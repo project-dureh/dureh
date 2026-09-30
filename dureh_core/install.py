@@ -231,3 +231,25 @@ def _remote(path: Path) -> str | None:
     if not (Path(path) / ".git").exists():
         return None
     return git(["remote", "get-url", "origin"], Path(path), check=False) or None
+
+
+def refresh_deployment(site: Site) -> dict:
+    """Re-pin harness and package revisions after an update; the previous pin stays in the event record."""
+    from .records import Ledger
+
+    path = site.root / "deployment.json"
+    dep = read_json(path)
+    src = Path((site.config.get("startup") or {}).get("source") or site.startup)
+    new = dict(dep)
+    new["harness"] = {"url": _remote(HARNESS_ROOT), "rev": git_revision(HARNESS_ROOT)}
+    new["package"] = {**dep.get("package", {}), "rev": git_revision(src) if src.exists() else dep.get("package", {}).get("rev")}
+    if new["harness"] != dep.get("harness") or new["package"] != dep.get("package"):
+        new["recorded"] = utc_now()
+        Ledger(site).event("deployment.updated", "desk", None, {"previous": {"harness": dep.get("harness"),
+                                                                             "package": dep.get("package")},
+                                                                "current": {"harness": new["harness"], "package": new["package"]}})
+        tmp = path.with_name(".deployment.json.tmp")
+        tmp.write_text(json.dumps(new, indent=2) + "\n", encoding="utf-8")
+        tmp.chmod(0o600)
+        os.replace(tmp, path)
+    return new

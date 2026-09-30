@@ -509,9 +509,9 @@ def session_start(site: Site, data: dict) -> dict:
     from ..selftest import session_checks
 
     led = Ledger(site)
+    checks = session_checks(site)  # before this session writes anything
     led.append("session", "start", "desk", None, {"phase": "start", "source": data.get("source"),
-                                                  "session_id": data.get("session_id")})
-    checks = session_checks(site)
+                                                  "session_id": data.get("session_id"), "checks": checks})
     persona = _persona(site)
     handoff = site.state / "memory" / "handoff.md"
     parts = [f"DUREH session start for site {site.root}.",

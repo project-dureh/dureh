@@ -230,6 +230,7 @@ class BashGuard(SiteCase):
         ctx = out["hookSpecificOutput"]["additionalContext"]
         self.assertIn("Tester", ctx)
         self.assertIn("Gate 1", ctx)
+        self.assertIn("state saved", ctx, "the session's own start record is not an unsaved change")
         hook(self.s, hook_event_name="SessionEnd", reason="exit", session_id="t1")
         phases = [r["payload"]["phase"] for r in Ledger(self.s).load("session")]
         self.assertEqual(phases, ["start", "end"])

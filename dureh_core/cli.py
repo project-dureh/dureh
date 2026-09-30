@@ -46,8 +46,13 @@ def cmd_install(a):
 def cmd_adapter_sync(a):
     from .runtimes import claude_code
 
-    m = claude_code.generate(_site(a))
+    site = _site(a)
+    m = claude_code.generate(site)
     print(f"generated {len(m['files'])} files for claude-code")
+    from .install import refresh_deployment
+
+    dep = refresh_deployment(site)
+    print(f"deployment pins: harness {dep['harness']['rev'][:12]} package {str(dep['package']['rev'])[:12]}")
 
 
 def cmd_hook(a):
