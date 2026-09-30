@@ -54,7 +54,7 @@ def wi_target(site: Site, wi: str) -> str | None:
 
 
 def scratch_roots() -> list[Path]:
-    roots = {Path(tempfile.gettempdir()).resolve()}
+    roots = {Path(tempfile.gettempdir()).resolve(), Path("/tmp").resolve()}
     for var in ("TMPDIR", "CLAUDE_SCRATCHPAD"):
         if os.environ.get(var):
             roots.add(Path(os.environ[var]).resolve())

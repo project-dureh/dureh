@@ -273,6 +273,8 @@ def verify_wi(site: Site, actor: str, wi: str, timeout: int = 1800) -> dict:
     if status != "staged":
         fail(f"{wi} is {status}; only staged work can be verified")
     start = time.monotonic()
+    if org.role(p["role"]).is_manager:
+        return _verify_bundle(site, actor, wi, start)
     paths, head = changed_paths(site, wi)
     violations = [x for x in paths if not org.scope_allows(p["role"], f"{p['target']}/{x}")]
     results = []
@@ -311,6 +313,27 @@ def verify_wi(site: Site, actor: str, wi: str, timeout: int = 1800) -> dict:
     return payload
 
 
+def _verify_bundle(site: Site, actor: str, wi: str, start: float) -> dict:
+    """A bundle passes when it has children and every child is verified or promoted."""
+    led = Ledger(site)
+    kids = _children(site, wi)
+    states = {k["id"]: led.wi_status(k["id"])["status"] for k in kids}
+    open_items = {k: v for k, v in states.items() if v not in ("verified", "promoted")}
+    passed = bool(kids) and not open_items
+    note = (f"{len(kids) - len(open_items)}/{len(kids)} bundle items verified or promoted" if kids
+            else "bundle has no work items")
+    payload = {"result": "pass" if passed else "fail", "head": None, "changed": [], "violations": [],
+               "missing_outputs": [], "checks": [], "children": states, "artifact_sha256": {},
+               "seconds": round(time.monotonic() - start, 2), "note": note}
+    run = led.append("run", "verify", actor, wi, {"run_type": "verify", "status": payload["result"], **payload})
+    led.event("verification.recorded", actor, wi, {"result": payload["result"], "run": run["id"]}, [run["id"]])
+    if passed:
+        led.event("wi.verified", actor, wi, {"run": run["id"], "head": None}, [run["id"]])
+    else:
+        led.event("rework.requested", actor, wi, {"run": run["id"], "reason": note, "open": open_items}, [run["id"]])
+    return payload
+
+
 # ---------------------------------------------------------------- promote
 def wi_promote(site: Site, actor: str, wi: str, memo: str) -> dict:
     """Gate 2: the desk merges a verified WI branch into its target's current branch."""
@@ -321,6 +344,19 @@ def wi_promote(site: Site, actor: str, wi: str, memo: str) -> dict:
     if led.wi_status(wi)["status"] != "verified":
         fail(f"{wi} is not verified")
     verified = [e for e in led.events(wi) if e["type"] == "wi.verified"][-1]
+    if site.org.role(rec["payload"]["role"]).is_manager:
+        promoted_children = []
+        for kid in _children(site, wi):
+            if led.wi_status(kid["id"])["status"] == "verified":
+                wi_promote(site, actor, kid["id"], f"promoted with bundle {wi}: {memo}")
+                promoted_children.append(kid["id"])
+        dec = led.append("decision", "gate2", actor, wi, {"subject": f"Gate 2 bundle {wi}", "disposition": "approve",
+                                                            "by": "desk", "memo": memo,
+                                                            "binding": {"children": promoted_children}})
+        return led.event("wi.promoted", actor, wi, {"merge": None, "decision": dec["id"], "children": promoted_children,
+                                                    "action_class": "compensatable",
+                                                    "compensation": "revert each child merge; append wi.reverted"},
+                         [dec["id"]])
     wt = site.worktrees / wi
     merge = None
     if wt.is_dir():

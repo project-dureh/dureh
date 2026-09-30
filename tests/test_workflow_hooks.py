@@ -95,6 +95,13 @@ class Bundle(SiteCase):
         self.assertIn("g()", (self.mod / "src" / "demo.py").read_text().replace("def g", "g()"))
         self.assertEqual(self.led.wi_status(self.item)["status"], "promoted")
         self.assertIn("git revert", ev["payload"]["compensation"])
+        # the bundle passes once every child is verified or promoted, then promotes
+        wf.wi_stage(self.s, "pm-modules", self.bundle, "bundle done")
+        r = wf.verify_wi(self.s, "checker", self.bundle)
+        self.assertEqual(r["result"], "pass", r)
+        ev = wf.wi_promote(self.s, "desk", self.bundle, "bundle Gate 2")
+        self.assertEqual(ev["payload"]["children"], [], "child already promoted individually")
+        self.assertEqual(self.led.wi_status(self.bundle)["status"], "promoted")
         p = wf.purge(self.s, "desk", self.item)
         self.assertFalse(wt.exists())
         self.assertIn(str(wt), p["removed"])
@@ -117,6 +124,8 @@ class Bundle(SiteCase):
         self.assertIn("NOTES.txt", r["violations"])
         self.assertEqual(r["missing_outputs"], ["src/demo.py"])
         self.assertEqual(self.led.wi_status(self.item)["status"], "rework")
+        wf.wi_stage(self.s, "pm-modules", self.bundle, "premature")
+        self.assertEqual(wf.verify_wi(self.s, "checker", self.bundle)["result"], "fail", "open child blocks the bundle")
 
     def test_invalid_transitions_and_authority(self):
         with self.assertRaisesRegex(DurehError, "invalid transition"):

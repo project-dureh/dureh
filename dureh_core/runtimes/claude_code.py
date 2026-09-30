@@ -167,7 +167,8 @@ def _claude_md(site: Site) -> str:
               f"3. Dispatch: `{dureh} dispatch brief --wi <WI>`, then use the Agent tool with `subagent_type` = the named role and the printed brief as the whole prompt."
               " The hook refuses any spawn without a recorded brief.",
               f"4. Stop or rework: `{dureh} dispatch stop --wi <WI> --reason ...` (the runtime stop ends the agent; the record keeps the reason).",
-              f"5. Gate 2: after the checker verified the item, report it to the Director and promote with `{dureh} wi promote --wi <WI> --memo ...`.",
+              f"5. Gate 2: after the checker verified the item, report it to the Director and promote with `{dureh} wi promote --wi <WI> --memo ...`."
+              f" For a bundle the manager staged, run `{dureh} verify --wi <bundle>` (a recount of its items' states); promoting the bundle merges any verified items not yet promoted.",
               f"6. Findings are records, not work items: `{dureh} ledger add finding --summary ... --evidence-level measured|reviewed|inferred|proposed`.",
               f"7. Before moving or deleting a path, run `{dureh} path-refs <path>`. Delete only through `{dureh} purge`.",
               f"8. Compute runs only as scheduler jobs through `{dureh} slurm submit`. External pushes only through `{dureh} push` with a Director decision.",
