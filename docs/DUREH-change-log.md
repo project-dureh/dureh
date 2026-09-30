@@ -18,3 +18,20 @@ Source: uploaded `RP-0010-camri-org.md.html` (an HTML rendering of the original 
 | Excluded internal decision chronology, reviewer log, and naming deliberations | Neither deliverable reproduces those appendices. |
 
 The revision preserves source measurements and terminology while marking implementation, deployment, security, and performance claims as unverified. The HTML did not provide the underlying repositories or executable results, so this is an editorial and design-specification revision rather than a validation report.
+
+## Revision 2 (2026-09-30) — merged from the internal edition after two review rounds
+
+Source: internal edition RP-0010 v20 and two independent review rounds (one OpenAI Codex CLI reviewer, one Claude reviewer). Acronym and remote follow this repository.
+
+| Change | Result |
+|---|---|
+| Expanded the contribution lifecycle into a six-step gated procedure (agent-authored PR, regression case, exams, privacy scan, human approval, upstream CI) | Public white paper, Section 3 |
+| Added a comparison table against OrgAgent, Anthropic guidance, MAST, oh-my-codex, Claude Code subagents, and a "related systems" note covering MetaGPT, ChatDev, AutoGen, CrewAI, LangGraph, MemGPT/Letta, Reflexion, ExpeL, Voyager, ACE, Darwin Gödel Machine, SICA, FrugalGPT, RouteLLM | Public white paper, Section 7 |
+| Added the full bibliography from the survey with evidence levels; items consulted but not cited are marked | Public white paper, Section 9 |
+| Replaced the package-held state submodule with a private deployment manifest; noted the `ria+` submodule limitation | Technical specification, Section 1 |
+| Resolved `ledger update`: immutable records, status as an event projection | Technical specification, Section 4 |
+| Added the dispatch adapter contract, manager dispatch authority, ownership enforcement at promotion, desk memory audit, and per-WI ephemeral DataLad clones | Technical specification, Section 5 |
+| Raised the exam size guidance (≥30 items or repeated runs) with an interval note | Technical specification, Section 6 |
+| Console: own state clone and `decisions/<host>` branch, `DUREH_ROOT`, OOD `view.html.erb` and proxy base path, `node:sqlite` fallback, mode C unattended-sync caveat | Technical specification, Section 7 |
+| Reproduced the twelve lessons in full so a package draft can be made from this repository | Technical specification, Section 8 |
+| Pointed to the private evidence registry for case provenance | Public white paper, Section 8; README |

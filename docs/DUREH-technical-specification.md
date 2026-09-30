@@ -17,7 +17,18 @@ The three ownership layers must be kept distinct:
 | Startup package | Company values, skills, lessons, evaluations, templates, bootstrap WI. | Transfer only after content review. A private state submodule *reference* may exist here for recovery of this installation. |
 | Site | Configuration, linked projects, caches, persona, memory, records, and raw data. | Site-bound. A private versioned snapshot may restore this same installation; it is not a default payload for new installations. |
 
-The source describes `state/` both under the package as a submodule and under the site as a checkout. Interpret these as one private dataset with a package-held pin and a site operating checkout, not two independent writable sources. The exact Git/DataLad command sequence that keeps the two synchronized remains to be proven. Do not publish package pins that expose private state URLs or metadata.
+The source describes `state/` both under the package as a submodule and under the site as a checkout. **Resolution (proposed, from external review):** the package must not contain a Git submodule pointing at the private state dataset. A shared, contributable package that carries a gitlink (URL + commit) to private state conflicts with the privacy scan in the contribution loop, makes every fork inherit a pointer to someone else's state, and cannot be cloned with `--recurse-submodules` when the URL is a `ria+` DataLad address (plain Git does not understand it; DataLad's `datalad-url` submodule property would be required). Instead, a **private deployment manifest** — `deployment.yaml`, kept in the site or in a private evidence repository, never in the package — pins the three revisions together:
+
+```yaml
+# deployment.yaml (private; example structure)
+harness:  {url: "<harness-remote>",  rev: "<sha>"}
+package:  {url: "<package-remote>",  rev: "<sha>"}
+state:    {url: "<private-dataset-remote or ria+ url>", rev: "<sha>", schema_version: 3}
+console:  {rev: "<console tag compatible with schema_version>"}   # from compat.yaml
+recorded: "<UTC timestamp>"
+```
+
+Recovery of the *same* installation clones the three revisions named by a manifest; ordinary installation of the package at a new site creates empty state. The package therefore stays free of site-specific pointers, and the manifest — not the package — is the "snapshot pin". `install.sh --recover <deployment.yaml>` is the proposed entry point. The command sequence that keeps the site checkout and the private remote synchronized (session-end save/push, session-start update/merge) is specified in Section 4 and remains to be proven by a two-host test.
 
 ## 2. Proposed repository and site layout
 
@@ -110,7 +121,7 @@ APPROVED -> STAGED -> VALIDATED -> PROMOTED
 
 Gate 1 approves the plan and acceptance criteria. `dispatch` creates the worktree and assignment event. The worker stages output. A checker records verification; `verify` owns any repeatable test execution. Gate 2 permits desk-controlled merge and tag. The source does not specify every invalid transition, failure state, or concurrent update rule; these must be explicit in the implementation state machine. Findings are not automatically new WIs. Append-only history is corrected by a new event instead of deleting the original record.
 
-The source proposes `ledger add/update/index/query/migrate`. Since it also describes records as one-write files, `update` must be resolved: either immutable record plus event-based state projection or controlled versioned replacement. The index is rebuildable from records, runs on node-local storage, and is not backed up as authority. An interrupted write, malformed record, stale index, and crash before `datalad save` each need a recovery test. It is unverified that full rebuild will take seconds at target size.
+The source proposes `ledger add/update/index/query/migrate`. Since it also describes records as one-write files, `update` must be resolved. **Proposed resolution:** records are immutable after creation; the current status of a work item is a *projection* computed by the index from its events (`dispatched`, `staged`, `verified`, `promoted`, `reverted`, `stopped`). `ledger update` is therefore removed; anything that would have changed a record is instead a new event that references the record. The single exception is `ledger migrate`, which rewrites records only to move them between schema versions and records a `migrated` event per file. This choice keeps the one-write-per-file property that makes NFS-hosted records safe. The index is rebuildable from records, runs on node-local storage, and is not backed up as authority. An interrupted write, malformed record, stale index, and crash before `datalad save` each need a recovery test. It is unverified that full rebuild will take seconds at target size.
 
 ### Concurrent hosts and RIA
 
@@ -134,7 +145,28 @@ The desk is the sole persistent agent with persona and memory. Proposed managers
 | `researcher` | Finding record through ledger | Direct code/document writes. |
 | `checker` | Verification/run event through tool | Repairing the artifact it checks. |
 
-The desk writes the remaining organization, package, persona, memory, and site configuration paths. The source proposes a generated hook table from these globs so path ownership has one source of truth. Glob overlap, symlinks, submodules, renamed paths, and commands that write outside Git must be tested. A hook that watches changed paths is not a sandbox. Worker read access also needs enforcement if private data may be present; the source explicitly says briefings alone are only context management.
+The desk writes the remaining organization, package, persona, memory, and site configuration paths. Two audits apply to the desk itself, because its writes bypass the worker gates: `state/memory/` has a size cap set in `config.yaml` and every change to it is recorded as a `memory-changed` event with a diff summary, so that policy cannot silently re-grow inside memory; and desk commits to the harness or package default branch are listed in the session record.
+
+### Dispatch contract (adapter API)
+
+A shell tool cannot spawn or stop an agent inside a runtime's session, and a separate background process would violate the "no hidden session background work" invariant. `dispatch` is therefore a *contract* that each runtime adapter implements, not a single script:
+
+| Operation | Semantics | Claude Code adapter (proposed) |
+|---|---|---|
+| `spawn(role, wi, brief, model_tier)` | Start one agent for one WI with the generated briefing; returns an agent handle; records a `dispatched` event | Runtime subagent API invoked by the calling agent (desk or manager); the adapter writes the event through `ledger` |
+| `stop(handle, reason)` | Terminate the agent; records `stopped`; the WI worktree is left for inspection or discard | Runtime stop/cancel API |
+| `status(handle)` | running / finished / failed, tokens so far | Runtime task status; usage from the runtime's accounting when available (see evidence case on incomparable usage fields) |
+| `wait(handle, timeout)` | Block until finished or timeout; timeout produces an event, never an unbounded loop | Runtime notification with a bounded deadline |
+
+Authority: the desk dispatches managers, researchers and document workers; a **manager may dispatch and re-dispatch specialists for its own bundle only** (depth 1 below it), and the adapter refuses a spawn whose depth would exceed two. A runtime without these primitives cannot host managers; it may still host single-level dispatch from the desk.
+
+### Ownership enforcement at promotion
+
+A hook that inspects a tool call cannot reliably tell which paths a shell command will write. The authoritative ownership check is therefore performed at promotion: `verify` computes `git diff --name-only <base>..<wi-branch>` (and `datalad status` for annexed content) and rejects the WI if any changed path falls outside the role's globs; hooks remain as an early, best-effort warning. Writes that legitimately go through tools (e.g. `ledger add` writing `state/records/`) are attributed to the tool, not the worker, and are exempt by rule.
+
+### Worktrees and DataLad subdatasets
+
+A Git worktree of a superdataset does not initialize its subdatasets, and a subdataset branch cannot be shared by concurrent WIs or running Slurm jobs without conflicts; discarding a branch also leaves annexed objects behind. For project work the proposed unit of isolation is therefore an **ephemeral `datalad clone`** of the relevant subdataset per WI (on scratch or checkpoint storage), in which `datalad run` executes; results are pushed back to the subdataset on a `wi/<id>` branch and merged at promotion. Cleanup after discard is `datalad drop` plus removal of the ephemeral clone, recorded as a `purged` event. This is untested and belongs to Phase 2 acceptance. The source proposes a generated hook table from these globs so path ownership has one source of truth. Glob overlap, symlinks, submodules, renamed paths, and commands that write outside Git must be tested. A hook that watches changed paths is not a sandbox. Worker read access also needs enforcement if private data may be present; the source explicitly says briefings alone are only context management.
 
 Proposed hook/tool invariants:
 
@@ -155,7 +187,7 @@ The first runtime adapter proposed is Claude Code. A second adapter and actual e
 
 `org/exams/<role>/` is proposed to hold inputs, expected outputs, and scoring. A qualification record should link role/tier, model/provider/version, adapter, exam version, prompts/skills, run settings, pass/fail per task, costs, retries, and date. `dispatch` should refuse a model without a valid qualification for that tier, except for an explicit time-limited bootstrap waiver.
 
-The source proposes at least ten tasks per role, 80% passing, one replacement-task retest, and bootstrap waivers while exams are built. Those are prototype settings. A production exam must separate development cases from hidden hold-outs, include repeat runs and uncertainty, treat forbidden actions as hard failures, and requalify after meaningful version changes. Case ancestry from real WIs must be tracked to avoid near-duplicate contamination. A score threshold and sample size must be calibrated against observed failure cost, not inherited as fact. Provider/model mappings and prices are dated site data; no particular vendor or model is part of the specification.
+The source proposes at least ten tasks per role, 80% passing, one replacement-task retest, and bootstrap waivers while exams are built. Those are prototype settings; with ten items an observed 80% pass rate has a wide interval (roughly 0.44–0.97 at 95%), so a production exam should target at least thirty items per role, or fewer items with repeated stochastic runs, before a tier assignment is treated as reliable. A production exam must separate development cases from hidden hold-outs, include repeat runs and uncertainty, treat forbidden actions as hard failures, and requalify after meaningful version changes. Case ancestry from real WIs must be tracked to avoid near-duplicate contamination. A score threshold and sample size must be calibrated against observed failure cost, not inherited as fact. Provider/model mappings and prices are dated site data; no particular vendor or model is part of the specification.
 
 ## 7. Console and deployment modes
 
@@ -167,7 +199,9 @@ The source proposes a separately versioned Astro/Node console that reads the nod
 | B: cluster Apptainer | Same image on a compute node, via Slurm; SSH tunnel or OOD proxy for access. | HTTP response, local index rebuild, job cleanup, port and identity controls. Image build and launch are unverified. |
 | C: external Docker VM | Same console code; clone harness and site state from authorized remotes/RIA, access over approved private network. | Two-way decision branch round trip, stale-clone handling, authorization, backup and restore. The original source proposed periodic sync but did not prove consistency. |
 
-The source mentions a `Containerfile` using Node 24, conversion to `console.sif`, `CAMRI_ROOT` bind mount, and `docker compose up`. These are proposed build and launch methods, not tested commands. Image provenance, version pinning, and patching need a deployment procedure. The external VM should not receive raw site data merely because it can sync RIA; its allowed dataset contents and permissions need an explicit policy.
+The console must never share the desk's operating checkout of the state dataset when it writes decisions; in mode A on the cluster it uses its own clone of the state dataset and writes to `decisions/<host>` like any other host, so that the desk remains the single writer of `main`. The environment variable naming the harness root is `DUREH_ROOT` everywhere (the source's console used `CAMRI_ROOT`; the rename is a console WI). For Open OnDemand Batch Connect the app must ship its own `view.html.erb`, and the served application must honour the proxy base path (`/rnode/<host>/<port>/` or `/node/...`, passed to the app as a base-path and allowed-host setting) — the source's console already solved both (script URLs without the proxy prefix were the recorded failure). `node:sqlite` is still marked experimental in Node 24 documentation; the console should read the index through it only with a tested fallback (a small native binding or a read-only sidecar) selected at build time. Mode C's periodic `datalad update` over SSH to a cluster with multi-factor login is not assumed to work unattended; the alternative is to place the RIA store (or a mirror) where the VM can reach it without interactive login, decided per site.
+
+The source mentions a `Containerfile` using Node 24, conversion to `console.sif`, `DUREH_ROOT` bind mount, and `docker compose up`. These are proposed build and launch methods, not tested commands. Image provenance, version pinning, and patching need a deployment procedure. The external VM should not receive raw site data merely because it can sync RIA; its allowed dataset contents and permissions need an explicit policy.
 
 ### Slurm boundary
 
@@ -192,7 +226,22 @@ The proposed `package-from-source` skill reads a reference in read-only mode, in
 
 ### CAMRI package bootstrap material
 
-The source identifies three domain values: refactor old code into `camri`/`camri-X` modules; use DataLad superdatasets with sourcedata, rawbids, derivatives, code, reports, and AI instructions; and assist interpretation of analysis outputs. It proposes initial work on LNA Phase D, camri v2, and container provenance. These are draft bootstrap inputs, not a claim that the work was approved or done. The source's `LESSONS.jsonl` v0 lists twelve incidents (L-01–L-12), summarized in the white paper and measurement section here; the uploaded HTML is the authoritative source for the full text pending a reviewed package file.
+The source identifies three domain values: refactor old code into `camri`/`camri-X` modules; use DataLad superdatasets with sourcedata, rawbids, derivatives, code, reports, and AI instructions; and assist interpretation of analysis outputs. It proposes initial work on LNA Phase D, camri v2, and container provenance. These are draft bootstrap inputs, not a claim that the work was approved or done. The source's `LESSONS.jsonl` v0 lists twelve incidents. They are reproduced here so that the package draft can be created from this repository alone; each row is an observation with its recorded measure and the design element that answers it. Operation period 2026-09-17 to 2026-09-30; measurements taken 2026-09-29/30; provenance pointers live in the private evidence registry.
+
+| id | Observation (measure) | Design response |
+|---|---|---|
+| L-01 | 2,345 of 2,477 tracked files (95%) were records, evidence, staging or approvals; Markdown tables and a journal file could not be indexed or queried | Typed JSON records with a rebuildable index; no records in the harness |
+| L-02 | 36 tools, 10,916 lines; 12 tool names (about 5,100 lines) absent from instructions, hooks and playbooks; a 1,416-line records tool received 15 commits in two days | Fixed small tool surface; self-test fails on a tool nothing invokes |
+| L-03 | Silent failures: a missing input file produced "0 iterations" or "no manifest" and passed | Every tool fails on a missing expected input |
+| L-04 | The same test was run by writer, manager, validator and desk (3–4 times) | One checker; `verify` owns repeatable execution |
+| L-05 | In one parallel hour ten workers used 140,000–330,000 tokens each; managers finished first and re-dispatched four or more times; two workers edited the same file | Output-type specialization with path ownership; bounded span; at most two lanes |
+| L-06 | A path move broke three dependants (a guard self-test, an inventory count 21→16, unresolved references 264→498) because nobody checked who read the path | `path-refs` before any move or deletion; layout fixed by the installer |
+| L-07 | "Parallel" work as background processes inside the session shared CPU (guard self-test 258 s in-session vs 61 s as a job) | Compute only as scheduler jobs; no hidden session background work |
+| L-08 | Waits that never ended: `pgrep -f` matching itself, a loop waiting on a display line, an exact-string comparison of a scheduler cancellation message | Bounded waits with job notifications and deadlines; state summarized by tools |
+| L-09 | One work item per defect (16 in a day) inflated the desk conversation and the cost of every report | Findings are records, not work items; desk hands over per session |
+| L-10 | 216 decision rows compiled into a 9,130-byte rules file; enforcement points (hook and auto-commit) kept separate path lists that drifted | One-page values plus hook-enforced invariants; a lesson survives only as a safeguard, tool or exam case with a regression test |
+| L-11 | Tests themselves were fast (module 15 s, console 47 s, control repo 69 s); the slow parts were record indexing (18 → 9 min) and the verification process | Node-local index rebuilt in seconds; single verification |
+| L-12 | Three repositories in three places (control on `/work`, console original under the OOD sandbox path, module on GitHub) so the company could not pin the console version | Submodule pins plus one symlink; console version locked to record schema |
 
 ## 9. Controlled reorganization and normalized phases
 
