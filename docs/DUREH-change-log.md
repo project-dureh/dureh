@@ -19,9 +19,9 @@ Source: uploaded `RP-0010-camri-org.md.html` (an HTML rendering of the original 
 
 The revision preserves source measurements and terminology while marking implementation, deployment, security, and performance claims as unverified. The HTML did not provide the underlying repositories or executable results, so this is an editorial and design-specification revision rather than a validation report.
 
-## Revision 2 (2026-09-30) — merged from the internal edition after two review rounds
+## Revision 2 (2026-09-30) — merged from the internal edition and completed reviews
 
-Source: internal edition RP-0010 v20 and two independent review rounds (one OpenAI Codex CLI reviewer, one Claude reviewer). Acronym and remote follow this repository.
+Source: internal edition RP-0010 v20; round 1 included OpenAI Codex CLI and Claude reviews, while round 2 had a completed Claude review only. The round-2 Codex attempts did not produce a verdict. Acronym and remote follow this repository.
 
 | Change | Result |
 |---|---|
@@ -35,3 +35,14 @@ Source: internal edition RP-0010 v20 and two independent review rounds (one Open
 | Console: own state clone and `decisions/<host>` branch, `DUREH_ROOT`, OOD `view.html.erb` and proxy base path, `node:sqlite` fallback, mode C unattended-sync caveat | Technical specification, Section 7 |
 | Reproduced the twelve lessons in full so a package draft can be made from this repository | Technical specification, Section 8 |
 | Pointed to the private evidence registry for case provenance | Public white paper, Section 8; README |
+
+## Revision 3 (2026-09-30) — consistency, release boundary, and citation review
+
+| Change | Result |
+|---|---|
+| Removed remaining package-held state references; a private deployment manifest alone pins recovery revisions | Public white paper, Sections 1 and 3; technical specification, Sections 1–2 |
+| Replaced site-identifying PR metadata and absolute privacy claims with an opaque contribution ID and reviewed export bundle | Public white paper, Section 3; technical specification, Section 11 |
+| Added pre-execution capability checks alongside promotion-time artifact checks | Technical specification, Sections 5 and 11 |
+| Defined append-only record migration as a staged, validated new-version dataset; updated the outstanding-decision list | Technical specification, Sections 4 and 11 |
+| Shortened the public related-work section and retained the broad survey in a separately labeled appendix with discovery-index links removed | Public white paper, Sections 7 and 9; related-work appendix |
+| Corrected the Anthropic summary-size claim and MAST category wording; updated Node 24 SQLite status and removed an unsupported claim that the source OOD console was already fixed | Public white paper and related-work appendix; technical specification, Section 7 |

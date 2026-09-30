@@ -8,6 +8,7 @@
 
 - [대외용 백서](docs/DUREH-public-white-paper.md): 문제, 핵심 설계, 평가·보안 요구사항
 - [기술 명세](docs/DUREH-technical-specification.md): 구성 요소, 레코드, 설치·배포, 단계별 완료 기준과 미해결 사항
+- [관련 연구 부록](docs/DUREH-related-work-appendix.md): 비교표와 조사 문헌 목록(검증 상태 표시)
 - [변경 기록](docs/DUREH-change-log.md): 원문에서 바뀐 내용
 - [에이전트 시작 지침](AGENTS.md): 이 저장소에서 작업할 때 지킬 범위와 검증 방식
 - [첫 작업 요청문](START-HERE.md): 저장소 주소와 함께 에이전트에게 전달할 문장

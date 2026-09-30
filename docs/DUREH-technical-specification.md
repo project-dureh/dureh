@@ -14,10 +14,10 @@ The three ownership layers must be kept distinct:
 | Layer | Owner and purpose | Distribution and recovery |
 |---|---|---|
 | Harness | Shared organization machinery: roles, tools, adapters, schemas, tests, console compatibility. | Versioned and intended for reuse. |
-| Startup package | Company values, skills, lessons, evaluations, templates, bootstrap WI. | Transfer only after content review. A private state submodule *reference* may exist here for recovery of this installation. |
+| Startup package | Company values, skills, lessons, evaluations, templates, bootstrap WI. | Transfer only after content review; contains no site-state URL, gitlink, or revision. |
 | Site | Configuration, linked projects, caches, persona, memory, records, and raw data. | Site-bound. A private versioned snapshot may restore this same installation; it is not a default payload for new installations. |
 
-The source describes `state/` both under the package as a submodule and under the site as a checkout. **Resolution (proposed, from external review):** the package must not contain a Git submodule pointing at the private state dataset. A shared, contributable package that carries a gitlink (URL + commit) to private state conflicts with the privacy scan in the contribution loop, makes every fork inherit a pointer to someone else's state, and cannot be cloned with `--recurse-submodules` when the URL is a `ria+` DataLad address (plain Git does not understand it; DataLad's `datalad-url` submodule property would be required). Instead, a **private deployment manifest** — `deployment.yaml`, kept in the site or in a private evidence repository, never in the package — pins the three revisions together:
+The source describes `state/` both under the package as a submodule and under the site as a checkout. **Resolution (proposed, from external review):** the package must not contain a Git submodule pointing at the private state dataset. A shared, contributable package that carries a gitlink (URL + commit) to private state would make forks inherit a site pointer and would undermine the contribution privacy gate. A `ria+` DataLad address also requires special handling rather than plain Git submodule cloning. Instead, a **private deployment manifest** — `deployment.yaml`, kept at the site or in a restricted recovery store, never in the package — pins four revisions together:
 
 ```yaml
 # deployment.yaml (private; example structure)
@@ -28,7 +28,7 @@ console:  {rev: "<console tag compatible with schema_version>"}   # from compat.
 recorded: "<UTC timestamp>"
 ```
 
-Recovery of the *same* installation clones the three revisions named by a manifest; ordinary installation of the package at a new site creates empty state. The package therefore stays free of site-specific pointers, and the manifest — not the package — is the "snapshot pin". `install.sh --recover <deployment.yaml>` is the proposed entry point. The command sequence that keeps the site checkout and the private remote synchronized (session-end save/push, session-start update/merge) is specified in Section 4 and remains to be proven by a two-host test.
+Recovery of the *same* installation resolves the harness, package, state, and console revisions named by the manifest; ordinary installation of the package at a new site creates empty state. The package therefore stays free of site-specific pointers, and the manifest — not the package — is the "snapshot pin". `install.sh --recover <deployment.yaml>` is the proposed entry point. The command sequence that keeps the site checkout and the private remote synchronized (session-end save/push, session-start update/merge) is specified in Section 4 and remains to be proven by a two-host test.
 
 ## 2. Proposed repository and site layout
 
@@ -58,7 +58,6 @@ The following is a design layout, not a claim that these paths exist now. The Lo
   lessons/evals/            regression and qualification cases
   templates/project/        project skeleton and AI instruction source
   bootstrap/                first WI and installation questions
-  state/                    private site-state dataset submodule reference
 
 <site>/                     outside the harness clone
   config.yaml               site paths, runtime/model mapping, RIA, Slurm, OOD
@@ -109,7 +108,7 @@ An implementation must define types, required fields, environment overrides, sec
 
 ## 4. Record model and lifecycle
 
-The proposed source of truth is one schema-validated JSON file per record at `state/records/<kind>/<id>.json`, with large logs and attachments in annex. The six kinds are `work-item`, `run`, `decision`, `session`, `finding`, and `event`. Proposed common fields are `id`, `kind`, `ts`, `actor`, `wi`, `status`, `refs[]`, and `schema_version`. Some fields may be null or inapplicable by kind; that rule is not specified in the source and needs a formal schema. The proposed ID form is `<kind>-<UTC>-<host>-<random4>`; collision probability and host naming/privacy implications require validation.
+The proposed source of truth is one schema-validated JSON file per record at `state/records/<kind>/<id>.json`, with large logs and attachments in annex. The six kinds are `work-item`, `run`, `decision`, `session`, `finding`, and `event`. Proposed common fields are `id`, `kind`, `ts`, `actor`, `wi`, `refs[]`, and `schema_version`; current WI status is derived from events, while an initial status belongs only on record kinds that need it. Nullable and kind-specific fields still need a formal schema. The source proposed IDs containing a host name; use an opaque installation identifier instead so a public contribution cannot disclose host metadata. Collision probability remains to be validated.
 
 The WI status path in the source is:
 
@@ -121,7 +120,7 @@ APPROVED -> STAGED -> VALIDATED -> PROMOTED
 
 Gate 1 approves the plan and acceptance criteria. `dispatch` creates the worktree and assignment event. The worker stages output. A checker records verification; `verify` owns any repeatable test execution. Gate 2 permits desk-controlled merge and tag. The source does not specify every invalid transition, failure state, or concurrent update rule; these must be explicit in the implementation state machine. Findings are not automatically new WIs. Append-only history is corrected by a new event instead of deleting the original record.
 
-The source proposes `ledger add/update/index/query/migrate`. Since it also describes records as one-write files, `update` must be resolved. **Proposed resolution:** records are immutable after creation; the current status of a work item is a *projection* computed by the index from its events (`dispatched`, `staged`, `verified`, `promoted`, `reverted`, `stopped`). `ledger update` is therefore removed; anything that would have changed a record is instead a new event that references the record. The single exception is `ledger migrate`, which rewrites records only to move them between schema versions and records a `migrated` event per file. This choice keeps the one-write-per-file property that makes NFS-hosted records safe. The index is rebuildable from records, runs on node-local storage, and is not backed up as authority. An interrupted write, malformed record, stale index, and crash before `datalad save` each need a recovery test. It is unverified that full rebuild will take seconds at target size.
+The source proposes `ledger add/update/index/query/migrate`. **Proposed resolution:** records are immutable after creation; the current status of a work item is a *projection* computed by the index from its events (`dispatched`, `staged`, `verified`, `promoted`, `reverted`, `stopped`). `ledger update` is removed; a change is a new event referencing the original record. A schema migration writes new-version records into a staged dataset or namespace, retains the previous snapshot, records old-to-new identities and a migration event, validates both projections, and atomically changes the private deployment manifest only after the full migration passes. It does not rewrite the old record files in place. This is a proposed transaction protocol, not an implemented `ledger migrate` command. The index is rebuildable from records, runs on node-local storage, and is not backed up as authority. An interrupted write, malformed record, stale index, and crash before `datalad save` each need a recovery test. Per-file immutability reduces content races but does not establish NFS or two-host safety; full rebuild time is also unverified.
 
 ### Concurrent hosts and RIA
 
@@ -162,7 +161,7 @@ Authority: the desk dispatches managers, researchers and document workers; a **m
 
 ### Ownership enforcement at promotion
 
-A hook that inspects a tool call cannot reliably tell which paths a shell command will write. The authoritative ownership check is therefore performed at promotion: `verify` computes `git diff --name-only <base>..<wi-branch>` (and `datalad status` for annexed content) and rejects the WI if any changed path falls outside the role's globs; hooks remain as an early, best-effort warning. Writes that legitimately go through tools (e.g. `ledger add` writing `state/records/`) are attributed to the tool, not the worker, and are exempt by rule.
+A hook that inspects a tool call cannot reliably tell which paths a shell command will write. Before execution, each role therefore runs with scoped filesystem and network capabilities; state-record writes and external actions go through privileged, audited tools that check WI authority, action class, target, and required approval. Hooks provide an early warning, not a security boundary. At promotion, `verify` compares the WI branch with its base, inventories untracked and ignored outputs in allowed work roots, inspects subdataset/annex changes and the recorded Slurm output manifest, and rejects any artifact outside the role's ownership contract. A `git diff --name-only` result alone cannot see untracked files, direct site writes, or external side effects. Tool-mediated writes are attributed to the tool and remain subject to their own authority and audit checks; they are not a blanket worker exemption. Phase 1 must test an unauthorized write attempt before promotion, and Phase 2 must test Slurm, DataLad, symlink, and subprocess paths.
 
 ### Worktrees and DataLad subdatasets
 
@@ -187,7 +186,7 @@ The first runtime adapter proposed is Claude Code. A second adapter and actual e
 
 `org/exams/<role>/` is proposed to hold inputs, expected outputs, and scoring. A qualification record should link role/tier, model/provider/version, adapter, exam version, prompts/skills, run settings, pass/fail per task, costs, retries, and date. `dispatch` should refuse a model without a valid qualification for that tier, except for an explicit time-limited bootstrap waiver.
 
-The source proposes at least ten tasks per role, 80% passing, one replacement-task retest, and bootstrap waivers while exams are built. Those are prototype settings; with ten items an observed 80% pass rate has a wide interval (roughly 0.44–0.97 at 95%), so a production exam should target at least thirty items per role, or fewer items with repeated stochastic runs, before a tier assignment is treated as reliable. A production exam must separate development cases from hidden hold-outs, include repeat runs and uncertainty, treat forbidden actions as hard failures, and requalify after meaningful version changes. Case ancestry from real WIs must be tracked to avoid near-duplicate contamination. A score threshold and sample size must be calibrated against observed failure cost, not inherited as fact. Provider/model mappings and prices are dated site data; no particular vendor or model is part of the specification.
+The source proposes at least ten tasks per role, 80% passing, one replacement-task retest, and bootstrap waivers while exams are built. Those are prototype settings; with ten independent items an observed 80% pass rate has a wide interval (roughly 0.44–0.97 at 95%). A production exam needs a sufficiently diverse hidden task set **and** repeated stochastic runs; repeating a small set estimates run variance but does not replace task diversity. Thirty distinct items is a planning target to calibrate, not a guarantee of a reliable tier assignment. The qualification unit is the model together with its runtime adapter, tool permissions, prompt/skill revision, and execution environment. A production exam must separate development cases from hold-outs, report uncertainty, treat forbidden actions as hard failures, and requalify after meaningful version or permission changes. Case ancestry from real WIs must be tracked to avoid near-duplicate contamination. Thresholds follow observed failure cost; provider/model mappings and prices are dated site data.
 
 ## 7. Console and deployment modes
 
@@ -199,7 +198,7 @@ The source proposes a separately versioned Astro/Node console that reads the nod
 | B: cluster Apptainer | Same image on a compute node, via Slurm; SSH tunnel or OOD proxy for access. | HTTP response, local index rebuild, job cleanup, port and identity controls. Image build and launch are unverified. |
 | C: external Docker VM | Same console code; clone harness and site state from authorized remotes/RIA, access over approved private network. | Two-way decision branch round trip, stale-clone handling, authorization, backup and restore. The original source proposed periodic sync but did not prove consistency. |
 
-The console must never share the desk's operating checkout of the state dataset when it writes decisions; in mode A on the cluster it uses its own clone of the state dataset and writes to `decisions/<host>` like any other host, so that the desk remains the single writer of `main`. The environment variable naming the harness root is `DUREH_ROOT` everywhere (the source's console used `CAMRI_ROOT`; the rename is a console WI). For Open OnDemand Batch Connect the app must ship its own `view.html.erb`, and the served application must honour the proxy base path (`/rnode/<host>/<port>/` or `/node/...`, passed to the app as a base-path and allowed-host setting) — the source's console already solved both (script URLs without the proxy prefix were the recorded failure). `node:sqlite` is still marked experimental in Node 24 documentation; the console should read the index through it only with a tested fallback (a small native binding or a read-only sidecar) selected at build time. Mode C's periodic `datalad update` over SSH to a cluster with multi-factor login is not assumed to work unattended; the alternative is to place the RIA store (or a mirror) where the VM can reach it without interactive login, decided per site.
+The console must never share the desk's operating checkout of the state dataset when it writes decisions; in mode A on the cluster it uses its own clone and writes to `decisions/<host>` like any other host, so that the desk remains the single writer of `main`. The environment variable naming the harness root is `DUREH_ROOT` everywhere (the source's console used `CAMRI_ROOT`; the rename is a console WI). For Open OnDemand Batch Connect the app must ship its own `view.html.erb`, and the served application must honour the actual proxy base path (`/rnode/<host>/<port>/` or `/node/...`, passed as a base-path and allowed-host setting). The source recorded broken script URLs through OOD; a fixed console commit and browser test through that proxy are still required as DUREH acceptance evidence. In current Node 24 documentation `node:sqlite` is a release candidate rather than fully stable; pin the runtime version and test a read-only fallback (a small native binding or a sidecar) before deployment. Mode C's periodic `datalad update` over SSH to a cluster with multi-factor login is not assumed to work unattended; the alternative is to place the RIA store (or a mirror) where the VM can reach it without interactive login, decided per site.
 
 The source mentions a `Containerfile` using Node 24, conversion to `console.sif`, `DUREH_ROOT` bind mount, and `docker compose up`. These are proposed build and launch methods, not tested commands. Image provenance, version pinning, and patching need a deployment procedure. The external VM should not receive raw site data merely because it can sync RIA; its allowed dataset contents and permissions need an explicit policy.
 
@@ -213,7 +212,7 @@ Proposed install flow:
 
 ```text
 clone harness -> choose startup package and revision -> choose site path
--> validate config and permissions -> initialize console/package submodules
+-> validate config and permissions -> initialize console submodule and clone package
 -> create or recover private state dataset -> configure RIA
 -> ask persona preferences (unless supplied securely)
 -> generate first runtime adapter -> create initial WI records
@@ -297,11 +296,12 @@ Before deployment with external write authority or sensitive data, specify and t
 - How README, AGENTS.md, retrieved pages, and other reference text are treated as untrusted data; test prompt-injection attempts against dispatch and tool calls.
 - How secrets are supplied, rotated, and kept out of model context, logs, RIA, Docker images, and upstream changes.
 - Which network destinations and Git remotes each role can contact, and how external push, PR creation, deployment, and disclosure are approved and audited.
+- Which exact export bundle was approved: revision, destination, diff, fixtures, logs, prompts, commit metadata, and license review. Public branch names and trailers use opaque contribution IDs, never a site identifier; the privileged push tool rejects a revision or destination different from the approved plan.
 - Whether site data may leave the cluster or be sent to a model provider; classify PHI/PII and research data before any processing.
 - Console identity, authorization, CSRF defense, audit log, and multi-user behavior. The original single-user/OOD or VPN assumption is insufficient for broader deployment.
 - How privacy review of an upstream contribution inspects diffs, test fixtures, commit metadata, logs, paths, hostnames, and licenses. A grep scan is supplementary.
 
-Key unresolved technical choices include record immutability versus `ledger update`, the formal JSON schemas and migration contract, package state-pin publication safety, two-host merge semantics, error handling when session-end push fails, exact console authorization, and the quantitative exam/evaluation thresholds. None should be silently filled by an implementer. A design review should resolve them before claiming a complete installable harness.
+The package/state separation and append-only record direction are resolved above as proposed contracts. Remaining decisions include formal JSON schemas, the exact staged-migration implementation, two-host merge semantics, recovery after a failed session-end push, console authorization, the privileged-tool capability model, and calibrated exam/evaluation thresholds. Record these as decisions with acceptance tests before claiming a complete installable harness.
 
 ## 12. Selected source bibliography by evidence level
 
