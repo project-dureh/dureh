@@ -2,7 +2,7 @@
 
 Public design repository: `git@github.com:dvm-shlee/dureh-whitepaper.git`
 
-Initial implementation baseline: `f678ffa` (2026-09-30).
+Initial implementation baseline: `7be1c86` (2026-09-30).
 
 Read at that commit, in order:
 
