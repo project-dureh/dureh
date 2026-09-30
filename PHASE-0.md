@@ -31,4 +31,14 @@ Acceptance must be run in a clean temporary directory and recorded with exact co
 - Console API identity, authorization, CSRF protection, and OOD/Apptainer deployment.
 - Qualification exam design and calibrated promotion thresholds.
 
-Phase 1 code exists, but acceptance is not marked verified until the criteria above have recorded results. Full component and security checks remain not run.
+## Implementation decisions (2026-09-30, Phase 1 build)
+
+8. **Runtime adapter:** Claude Code (measured with 2.1.283) passes `agent_type` and `agent_id` in hook input for subagent tool calls, and a subagent can spawn a subagent. The adapter therefore hosts the full depth-2 organization and identifies roles from hook input. Hooks declared in agent frontmatter did not fire in the probe, so all policy runs from one project-level hook. Generated files live in the site (`CLAUDE.md`, `.claude/`, `bin/dureh`) with a hash manifest; hand edits are reported as drift.
+9. **Configuration format:** site configuration and presets are JSON (`config.json`) so the harness stays standard-library only. Package and org files use a strict YAML subset parser that fails on unsupported syntax and is checked against PyYAML when available.
+10. **Records:** six kinds (`work-item`, `run`, `decision`, `session`, `finding`, `event`); `kind` is the record kind and `type` the event type. Work-item status is projected from lifecycle events with an explicit transition table (`proposed -> approved -> dispatched -> staged -> verified -> promoted`, plus `rework`, `stopped`, `reverted`). A correction is a `record.voided` event.
+11. **Dispatch:** a spawn is admitted only for a single-use brief recorded by `dispatch brief`, prepared by the caller that spawns. Managers dispatch only children of their own dispatched bundle. At most two top-level lanes and one reorganization lane. A tier without a qualification record needs a dated bootstrap waiver; an expired waiver blocks dispatch.
+12. **Isolation:** workers write git-tracked targets only inside a `wi/<WI>` worktree under `site/worktrees/`. `verify --wi` compares the branch with its recorded base and inventories untracked and ignored files (interpreter caches excepted). Promotion requires the verified head to be unchanged.
+13. **State backend:** a git repository by default; DataLad when `state.backend` is `datalad` and git-annex is on the configured path. Session end saves state. RIA push runs only when configured and is reported, never assumed.
+14. **Console:** not implemented. `compat.json` declares record schema 1 with no compatible console revision, so no console pin is accepted yet.
+
+Acceptance results for Phase 1 are recorded in `acceptance/`. Items not exercised there are `not run`.

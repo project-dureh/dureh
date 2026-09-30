@@ -1,0 +1,7 @@
+questions:
+  - key: name
+    prompt: Name?
+    required: true
+  - key: language
+    prompt: Language?
+    default: English

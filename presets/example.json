@@ -1,0 +1,24 @@
+{
+  "name": "example-site",
+  "persona": {
+    "name": "Desk",
+    "address_for_director": "Director",
+    "language": "English",
+    "tone": "Short reports with numbers first"
+  },
+  "references": [
+    {"path": "/path/to/retired-control-repo", "name": "old-org", "note": "read-only reference"}
+  ],
+  "models": {
+    "desk": "anthropic:claude-opus-5-5",
+    "pm": "anthropic:claude-opus-5-5",
+    "writer-academic": "anthropic:claude-opus-5-5",
+    "worker": "anthropic:claude-sonnet-5",
+    "recount": "anthropic:claude-haiku-4-5-20251001"
+  },
+  "waiver_days": 31,
+  "slurm": {"account": null, "partition": "general", "time": "01:00:00"},
+  "push": {"allowed_remotes": []},
+  "state": {"backend": "git", "ria": null},
+  "env": {"path_prepend": []}
+}

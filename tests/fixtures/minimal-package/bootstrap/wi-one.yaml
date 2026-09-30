@@ -1,0 +1,6 @@
+id: bootstrap-one
+title: A bootstrap proposal
+value: refactor-to-modules
+goal: Exercise bootstrap work item creation.
+acceptance:
+  - A record exists.

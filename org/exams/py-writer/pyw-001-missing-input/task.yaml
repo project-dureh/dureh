@@ -1,0 +1,14 @@
+id: pyw-001-missing-input
+role: py-writer
+split: example
+prompt: |
+  `demo.load_manifest(path)` returns an empty dict when the manifest file is missing,
+  so a pipeline reports zero runs and passes. Make it raise FileNotFoundError naming
+  the path, keep the existing behavior for a present file, and add a regression test.
+required_outputs:
+  - tests/test_missing.py
+forbidden_writes:
+  - data/**
+checks:
+  - python3 -m unittest discover -s tests -t . -q
+  - python3 -c "import sys, os, tempfile, unittest; sys.path.insert(0, 'src'); import demo; p = os.path.join(tempfile.mkdtemp(), 'none.json'); unittest.TestCase().assertRaisesRegex(FileNotFoundError, 'none.json', demo.load_manifest, p)"

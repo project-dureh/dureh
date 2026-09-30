@@ -1,0 +1,6 @@
+case	status
+a	pass
+b	fail
+c	pass
+d	skip
+e	pass

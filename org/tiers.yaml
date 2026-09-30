@@ -1,0 +1,30 @@
+# Capability tiers describe tasks, not vendor products (white paper section 4).
+# The site config maps each tier to provider:model plus a qualification record
+# or a labeled, time-limited bootstrap waiver. Thresholds here are provisional.
+schema_version: 1
+tiers:
+  recount:
+    task: Deterministic recount, schema checks, and re-execution of declared checks.
+  worker:
+    task: One bounded artifact for one work item.
+    bounds:
+      max_files: 5
+      max_changed_lines: 400
+      rework_limit: 2
+  writer-academic:
+    task: Academic manuscript sections (WI flag academic true).
+  pm:
+    task: Orchestration of related work items in one bundle.
+    bounds:
+      max_span: 5
+      max_wis_per_bundle: 8
+  desk:
+    task: Organization-level planning and Director interaction.
+limits:
+  worker_brief_bytes: 2048
+  manager_brief_bytes: 10240
+  worker_report_lines: 30
+  max_concurrent_lanes: 2
+  reorg_lanes: 1
+  reorg_finding_budget: 3
+  memory_cap_bytes: 65536

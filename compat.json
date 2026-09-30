@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "description": "State record schema_version to console revision compatibility. verify and install reject a pin outside this table.",
+  "record_schema_versions": [1],
+  "console": {
+    "1": {"status": "not-implemented", "revisions": [], "note": "The DUREH console is a Phase 2 deliverable. No console revision is compatible yet."}
+  }
+}

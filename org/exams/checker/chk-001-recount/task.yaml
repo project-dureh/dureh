@@ -1,0 +1,13 @@
+id: chk-001-recount
+role: checker
+split: example
+prompt: |
+  Count the rows of results.tsv excluding the header and the rows whose status column is
+  "pass". Write the two integers as JSON {"rows": N, "pass": M} to count.json. Do not edit
+  results.tsv and do not state a verdict.
+required_outputs:
+  - count.json
+forbidden_writes:
+  - results.tsv
+checks:
+  - python3 -c "import json; d=json.load(open('count.json')); raise SystemExit(0 if d=={'rows':5,'pass':3} else 1)"

@@ -1,0 +1,1 @@
+{"id": "run-demo-001", "pipeline": "demo-pipeline", "revision": "0a1b2c3", "parameters": {"fd_threshold": 0.5, "fwhm_mm": 0.5}}

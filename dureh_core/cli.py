@@ -1,0 +1,462 @@
+"""DUREH command line. Every subcommand is a harness tool with one job."""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+from .util import DurehError, dumps, fail
+
+
+def _site(args):
+    from .site import find_site
+
+    return find_site(getattr(args, "site", None))
+
+
+def _actor(args) -> str:
+    env = os.environ.get("DUREH_ACTOR")
+    given = getattr(args, "actor", None)
+    if env and given and env != given:
+        fail(f"--actor {given} conflicts with the harness-assigned identity {env}")
+    return env or given or "desk"
+
+
+def _print(value) -> None:
+    if isinstance(value, str):
+        print(value)
+    else:
+        print(dumps(value), end="")
+
+
+# ------------------------------------------------------------------ handlers
+def cmd_install(a):
+    from .install import install
+
+    r = install(a.startup, a.target_site or a.site, a.preset, a.persona, a.interactive, run_unit=not a.skip_unit)
+    print(f"Installed startup package {r['package']} into {r['site']}")
+    print("Created fresh site state; no package state or recovery pointer was imported.")
+    print(f"Bootstrap work items (awaiting Gate 1): {', '.join(r['work_items']) or 'none'}")
+    print(f"Self-test: {r['selftest']['result']} {r['selftest']['problems'] or ''}".rstrip())
+    print(f"State: {r['state'].get('backend')} revision {r['state'].get('revision')}")
+
+
+def cmd_adapter_sync(a):
+    from .runtimes import claude_code
+
+    m = claude_code.generate(_site(a))
+    print(f"generated {len(m['files'])} files for claude-code")
+
+
+def cmd_hook(a):
+    from .runtimes import claude_code
+
+    raw = sys.stdin.read()
+    try:
+        data = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError:
+        data = {}
+    try:
+        out = claude_code.handle(_site(a), data)
+    except Exception as exc:  # noqa: BLE001 - a hook must fail closed on PreToolUse
+        if data.get("hook_event_name") == "PreToolUse":
+            out = claude_code._deny(f"harness error, failing closed: {exc}")
+        else:
+            out = {"systemMessage": f"DUREH hook error: {exc}"}
+    if out:
+        print(json.dumps(out, ensure_ascii=False))
+
+
+def cmd_wi_new(a):
+    from .workflow import wi_new
+
+    r = wi_new(_site(a), _actor(a), a.title, a.goal, a.role, a.target, a.acceptance, a.lane, a.bundle, a.value,
+               a.check, a.output, a.constraint, a.parent, None, a.academic)
+    print(f"{r['id']} created (proposed; needs Gate 1): {r['payload']['title']}")
+
+
+def cmd_wi_approve(a):
+    from .workflow import wi_approve
+
+    ev = wi_approve(_site(a), _actor(a), a.wi, a.memo, a.by)
+    print(f"{a.wi} approved (Gate 1) by {a.by}: {ev['id']}")
+
+
+def cmd_wi_show(a):
+    from .records import Ledger
+
+    led = Ledger(_site(a))
+    rec = led.get("work-item", a.wi)
+    _print({"work_item": rec, "status": led.wi_status(a.wi),
+            "events": [{"ts": e["ts"], "type": e["type"], "actor": e["actor"], "payload": e["payload"]} for e in led.events(a.wi)]})
+
+
+def cmd_wi_list(a):
+    from .records import Ledger
+
+    for w in Ledger(_site(a)).work_items():
+        if a.status and w["status"] != a.status:
+            continue
+        print(f"{w['id']}  {str(w['status']):10s} {w['role']:15s} {w['target']:20s} {w['title']}")
+
+
+def cmd_wi_stage(a):
+    from .workflow import wi_stage
+
+    ev = wi_stage(_site(a), _actor(a), a.wi, a.summary)
+    print(f"{a.wi} staged at {ev['payload'].get('head') or 'no worktree'}")
+
+
+def cmd_wi_promote(a):
+    from .workflow import wi_promote
+
+    ev = wi_promote(_site(a), _actor(a), a.wi, a.memo)
+    print(f"{a.wi} promoted: merge {ev['payload'].get('merge')}; compensation: {ev['payload']['compensation']}")
+
+
+def cmd_dispatch_brief(a):
+    from .workflow import dispatch_brief
+
+    r = dispatch_brief(_site(a), a.wi, _actor(a), a.role)
+    print(f"# spawn subagent_type={r['subagent_type']} model={r['model']}; pass everything below as the prompt")
+    print(r["brief"], end="")
+
+
+def cmd_dispatch_stop(a):
+    from .workflow import dispatch_stop
+
+    dispatch_stop(_site(a), _actor(a), a.wi, a.reason)
+    print(f"{a.wi} stopped: {a.reason}. Stop the runtime agent too; its worktree is kept for inspection.")
+
+
+def cmd_verify(a):
+    site = None
+    if a.self:
+        from .selftest import run_self
+
+        try:
+            site = _site(a)
+        except DurehError:
+            site = None
+        r = run_self(site, _actor(a) if site else "checker", unit=not a.skip_unit)
+        _print(r)
+        if r["result"] != "pass":
+            raise SystemExit(1)
+        return
+    if a.exam:
+        from .exams import score
+
+        _print(score(_site(a), _actor(a), a.exam, a.answers, a.task))
+        return
+    if not a.wi:
+        fail("verify needs --self, --wi, or --exam")
+    from .workflow import verify_wi
+
+    r = verify_wi(_site(a), _actor(a), a.wi)
+    _print({k: r[k] for k in ("result", "note", "changed", "violations", "missing_outputs", "seconds")} |
+           {"checks": [{"command": c["command"], "exit": c["exit"], "seconds": c["seconds"]} for c in r["checks"]]})
+    if r["result"] != "pass":
+        raise SystemExit(1)
+
+
+def cmd_ledger_add(a):
+    from .records import Ledger
+
+    led = Ledger(_site(a))
+    actor = _actor(a)
+    if a.kind == "finding":
+        rec = led.append("finding", "finding", actor, a.wi, {"summary": a.summary, "evidence_level": a.evidence_level,
+                                                             "tags": a.tag or [], "sources": a.source or []})
+        led.event("finding.created", actor, a.wi, {"finding": rec["id"], "tags": a.tag or []}, [rec["id"]])
+    elif a.kind == "event":
+        try:
+            payload = json.loads(a.payload or "{}")
+        except json.JSONDecodeError as exc:
+            fail(f"--payload must be valid JSON: {exc}")
+        rec = led.event(a.type or fail("--type is required for events"), actor, a.wi, payload, a.ref)
+    elif a.kind == "decision":
+        rec = led.append("decision", a.type or "record", actor, a.wi,
+                         {"subject": a.summary or fail("--summary is required"), "disposition": a.disposition,
+                          "by": a.by, "memo": a.memo or ""})
+    else:
+        fail(f"use the dedicated tool for {a.kind} records")
+    _print(rec)
+
+
+def cmd_ledger_query(a):
+    from .records import Ledger
+
+    _print(Ledger(_site(a)).sql(a.sql))
+
+
+def cmd_ledger_index(a):
+    from .records import Ledger
+
+    _print(Ledger(_site(a)).build_index())
+
+
+def cmd_event_add(a):
+    """Phase 1 compatibility form of `ledger add event`."""
+    from .records import Ledger
+
+    try:
+        payload = json.loads(a.payload)
+    except json.JSONDecodeError as exc:
+        fail(f"--payload must be valid JSON: {exc}")
+    if not a.kind.strip() or not a.wi.strip() or not _actor(a).strip():
+        fail("--kind, --wi, and --actor must be nonempty")
+    _print(Ledger(_site(a)).event(a.kind, _actor(a), a.wi, payload))
+
+
+def cmd_event_query(a):
+    from .records import Ledger
+
+    _print(Ledger(_site(a)).events(a.wi))
+
+
+def cmd_status(a):
+    from .ops import render_status, status
+
+    st = status(_site(a))
+    _print(st if a.json else render_status(st))
+
+
+def cmd_slurm(a):
+    from . import ops
+
+    site = _site(a)
+    if a.slurm_command == "submit":
+        _print(ops.slurm_submit(site, _actor(a), a.wi, a.script, a.dry_run, a.sbatch_arg))
+    elif a.slurm_command == "status":
+        _print(ops.slurm_status(site, _actor(a), a.run))
+    else:
+        _print(ops.slurm_cancel(site, _actor(a), a.run))
+
+
+def cmd_path_refs(a):
+    from .ops import path_refs
+
+    r = path_refs(_site(a), a.path)
+    print(f"{len(r['hits'])} reference(s) to {', '.join(r['needles'])}" + (" (truncated)" if r["truncated"] else ""))
+    for h in r["hits"]:
+        print(h)
+
+
+def cmd_purge(a):
+    from .workflow import purge
+
+    _print(purge(_site(a), _actor(a), a.wi, a.dry_run))
+
+
+def cmd_push(a):
+    from . import ops
+
+    site = _site(a)
+    if a.approve:
+        _print(ops.push_approve(site, _actor(a), a.repo, a.remote, a.ref, a.memo or "", a.by))
+    else:
+        _print(ops.push(site, _actor(a), a.repo, a.remote, a.ref, a.approval or fail("--approval DECISION is required"), a.dry_run))
+
+
+def cmd_usage(a):
+    from .ops import usage
+
+    _print(usage(_site(a)))
+
+
+def cmd_authorize_write(a):
+    from .paths import write_decision
+
+    site = _site(a)
+    site.org.role(a.role)
+    ok, why = write_decision(site, a.role, site.root / a.path if not os.path.isabs(a.path) else Path(a.path))
+    if not ok:
+        fail(f"unauthorized write denied: role {a.role!r} cannot write {a.path!r}: {why}")
+    print(f"authorized: {a.role} -> {a.path} ({why})")
+
+
+def cmd_artifact_write(a):
+    from .paths import write_decision
+    from .util import reject_symlinks, safe_relative, write_create_only
+
+    site = _site(a)
+    site.org.role(a.role)
+    rel = safe_relative(a.path)
+    ok, why = write_decision(site, a.role, site.root / rel.as_posix())
+    if not ok:
+        fail(f"unauthorized write denied: role {a.role!r} cannot write {rel.as_posix()!r}: {why}")
+    target = reject_symlinks(site.root, rel, include_leaf=False)
+    source = Path(a.input).expanduser()
+    if source.is_symlink() or not source.is_file():
+        fail(f"required input file is missing or is a symlink: {source}")
+    data = source.read_bytes()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    reject_symlinks(site.root, rel, include_leaf=False)
+    write_create_only(target, data, 0o644)
+    print(f"wrote {len(data)} bytes: {rel.as_posix()}")
+
+
+# ------------------------------------------------------------------- parser
+def parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="dureh", description="DUREH harness tools: wi, dispatch, verify, ledger, status, "
+                                "slurm, path-refs, purge, push, usage (plus install, adapter, hook).")
+    p.add_argument("--site", help="installed site directory (or DUREH_SITE)")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    def add(parent, name, func, help_):
+        sp = parent.add_parser(name, help=help_)
+        sp.set_defaults(func=func)
+        return sp
+
+    x = add(sub, "install", cmd_install, "install a startup package into a new, empty site")
+    x.add_argument("--startup", required=True)
+    x.add_argument("--site", dest="target_site")
+    x.add_argument("--preset", help="JSON preset with site settings and persona answers")
+    x.add_argument("--persona", help="JSON file with persona answers")
+    x.add_argument("--interactive", action="store_true")
+    x.add_argument("--skip-unit", action="store_true", help="skip harness unit tests in the install self-test")
+
+    ad = sub.add_parser("adapter", help="runtime adapter output").add_subparsers(dest="adapter_command", required=True)
+    add(ad, "sync", cmd_adapter_sync, "regenerate runtime files from org/ and the package")
+
+    h = add(sub, "hook", cmd_hook, "runtime hook entry point (reads the event JSON on stdin)")
+    h.add_argument("runtime", choices=["claude-code"])
+
+    wi = sub.add_parser("wi", help="work items").add_subparsers(dest="wi_command", required=True)
+    x = add(wi, "new", cmd_wi_new, "create a work item (desk)")
+    x.add_argument("--title", required=True)
+    x.add_argument("--goal", required=True)
+    x.add_argument("--role", required=True)
+    x.add_argument("--target", required=True, help="harness | package | site | modules/<name> | projects/<name>")
+    x.add_argument("--acceptance", action="append", required=True)
+    x.add_argument("--lane", default="work", choices=["work", "reorg", "desk"])
+    x.add_argument("--bundle")
+    x.add_argument("--parent", help="bundle work item owned by a manager")
+    x.add_argument("--value")
+    x.add_argument("--check", action="append", help="command the checker runs in the WI worktree")
+    x.add_argument("--output", action="append", help="declared output path that must exist")
+    x.add_argument("--constraint", action="append")
+    x.add_argument("--academic", action="store_true")
+    x.add_argument("--actor")
+    x = add(wi, "approve", cmd_wi_approve, "record the Director's Gate 1 approval (desk)")
+    x.add_argument("--wi", required=True)
+    x.add_argument("--memo", required=True)
+    x.add_argument("--by", default="Director")
+    x.add_argument("--actor")
+    x = add(wi, "show", cmd_wi_show, "show a work item with its events")
+    x.add_argument("--wi", required=True)
+    x = add(wi, "list", cmd_wi_list, "list work items with projected status")
+    x.add_argument("--status")
+    x = add(wi, "stage", cmd_wi_stage, "mark committed work ready for the checker")
+    x.add_argument("--wi", required=True)
+    x.add_argument("--summary", required=True)
+    x.add_argument("--actor")
+    x = add(wi, "promote", cmd_wi_promote, "Gate 2: merge a verified work item (desk)")
+    x.add_argument("--wi", required=True)
+    x.add_argument("--memo", required=True)
+    x.add_argument("--actor")
+
+    d = sub.add_parser("dispatch", help="dispatch contract").add_subparsers(dest="dispatch_command", required=True)
+    x = add(d, "brief", cmd_dispatch_brief, "prepare a recorded brief for spawning one agent")
+    x.add_argument("--wi", required=True)
+    x.add_argument("--role", help="checker, to verify a staged item")
+    x.add_argument("--actor")
+    x = add(d, "stop", cmd_dispatch_stop, "record a stop for a dispatched work item")
+    x.add_argument("--wi", required=True)
+    x.add_argument("--reason", required=True)
+    x.add_argument("--actor")
+
+    x = add(sub, "verify", cmd_verify, "self-test, per-WI verification, or exam scoring")
+    x.add_argument("--self", action="store_true")
+    x.add_argument("--skip-unit", action="store_true")
+    x.add_argument("--wi")
+    x.add_argument("--exam", help="role whose exam to score")
+    x.add_argument("--task")
+    x.add_argument("--answers")
+    x.add_argument("--actor")
+
+    led = sub.add_parser("ledger", help="records").add_subparsers(dest="ledger_command", required=True)
+    x = add(led, "add", cmd_ledger_add, "append a record (finding, event, decision)")
+    x.add_argument("kind", choices=["finding", "event", "decision"])
+    x.add_argument("--wi")
+    x.add_argument("--type")
+    x.add_argument("--summary")
+    x.add_argument("--evidence-level", default="proposed", choices=["measured", "reviewed", "inferred", "proposed"])
+    x.add_argument("--tag", action="append")
+    x.add_argument("--source", action="append")
+    x.add_argument("--payload")
+    x.add_argument("--ref", action="append")
+    x.add_argument("--disposition", default="record", choices=["approve", "revise", "defer", "reject", "record"])
+    x.add_argument("--by", default="desk")
+    x.add_argument("--memo")
+    x.add_argument("--actor")
+    x = add(led, "query", cmd_ledger_query, "read-only SQL over the rebuildable index")
+    x.add_argument("sql")
+    add(led, "index", cmd_ledger_index, "rebuild the node-local index from records")
+
+    ev = sub.add_parser("event", help="Phase 1 event interface").add_subparsers(dest="event_command", required=True)
+    x = add(ev, "add", cmd_event_add, "append one immutable event")
+    x.add_argument("--kind", required=True)
+    x.add_argument("--wi", required=True)
+    x.add_argument("--actor", required=True)
+    x.add_argument("--payload", required=True)
+    x = add(ev, "query", cmd_event_query, "list events, optionally for one WI")
+    x.add_argument("--wi")
+
+    x = add(sub, "status", cmd_status, "work items, lanes, pending gates, index freshness")
+    x.add_argument("--json", action="store_true")
+
+    sl = sub.add_parser("slurm", help="scheduler jobs").add_subparsers(dest="slurm_command", required=True)
+    x = add(sl, "submit", cmd_slurm, "submit and record a job for a dispatched WI")
+    x.add_argument("--wi", required=True)
+    x.add_argument("--script", required=True)
+    x.add_argument("--sbatch-arg", action="append")
+    x.add_argument("--dry-run", action="store_true")
+    x.add_argument("--actor")
+    for name in ("status", "cancel"):
+        x = add(sl, name, cmd_slurm, f"{name} a recorded job")
+        x.add_argument("--run", required=True)
+        x.add_argument("--actor")
+
+    x = add(sub, "path-refs", cmd_path_refs, "find references to a path before moving or deleting it")
+    x.add_argument("path")
+    x = add(sub, "purge", cmd_purge, "remove a finished WI's worktree and scratch outputs")
+    x.add_argument("--wi", required=True)
+    x.add_argument("--dry-run", action="store_true")
+    x.add_argument("--actor")
+    x = add(sub, "push", cmd_push, "push an approved revision to an allowlisted remote")
+    x.add_argument("--repo", required=True)
+    x.add_argument("--remote", required=True)
+    x.add_argument("--ref", required=True)
+    x.add_argument("--approval")
+    x.add_argument("--approve", action="store_true", help="record the Director's approval bound to this revision")
+    x.add_argument("--memo")
+    x.add_argument("--by", default="Director")
+    x.add_argument("--dry-run", action="store_true")
+    x.add_argument("--actor")
+    add(sub, "usage", cmd_usage, "tokens per WI and per promoted WI from recorded agent runs")
+
+    x = add(sub, "authorize-write", cmd_authorize_write, "check a role's write to a site path")
+    x.add_argument("--role", required=True)
+    x.add_argument("--path", required=True)
+    art = sub.add_parser("artifact", help="harness-mediated artifact writes").add_subparsers(dest="artifact_command", required=True)
+    x = add(art, "write", cmd_artifact_write, "create a new authorized artifact")
+    x.add_argument("--role", required=True)
+    x.add_argument("--path", required=True)
+    x.add_argument("--input", required=True)
+    return p
+
+
+def main(argv=None) -> int:
+    try:
+        args = parser().parse_args(argv)
+        args.func(args)
+        return 0
+    except DurehError as exc:
+        print(f"dureh: error: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"dureh: error: {exc}", file=sys.stderr)
+        return 2
