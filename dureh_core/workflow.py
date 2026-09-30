@@ -133,6 +133,12 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None) -> 
     if checking:
         if st != "staged":
             fail(f"{wi} is {st}; the checker is dispatched only for staged work")
+    elif st == "dispatched":
+        evs = led.events(wi)
+        last = max((i for i, e in enumerate(evs) if e["type"] == "wi.dispatched"), default=None)
+        finished = last is not None and any(e["type"] == "agent.finished" for e in evs[last + 1:])
+        if not finished:
+            fail(f"{wi} is dispatched and its agent has not finished; stop it before re-dispatching")
     elif st not in ("approved", "rework"):
         fail(f"{wi} is {st}; only approved or rework items can be dispatched")
     entry = site.model_for_tier("writer-academic" if p.get("academic") and not checking else role.tier)

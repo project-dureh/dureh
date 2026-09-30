@@ -137,6 +137,18 @@ class Bundle(SiteCase):
         with self.assertRaisesRegex(DurehError, "not authorized"):
             self.led.event("wi.approved", "py-writer", self.item, {})
 
+    def test_resume_after_agent_finished(self):
+        w = wf.wi_new(self.s, "desk", "r", "research", "researcher", "site", ["summary"])["id"]
+        wf.wi_approve(self.s, "desk", w, "ok")
+        self.assertIsNone(self.spawn("desk", "researcher", wf.dispatch_brief(self.s, w, "desk")["brief"]))
+        with self.assertRaisesRegex(DurehError, "has not finished"):
+            wf.dispatch_brief(self.s, w, "desk")
+        self.start("researcher", "a-r1")
+        hook(self.s, hook_event_name="SubagentStop", agent_type="researcher", agent_id="a-r1")
+        again = wf.dispatch_brief(self.s, w, "desk")
+        self.assertIsNone(self.spawn("desk", "researcher", again["brief"]))
+        self.assertEqual(self.led.wi_status(w)["status"], "dispatched")
+
     def test_lane_limit(self):
         ids = []
         for i in range(3):

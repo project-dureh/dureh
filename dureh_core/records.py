@@ -35,7 +35,7 @@ TRANSITIONS = {
     None: {"proposed"},
     "proposed": {"approved", "stopped"},
     "approved": {"dispatched", "stopped"},
-    "dispatched": {"staged", "stopped", "rework"},
+    "dispatched": {"dispatched", "staged", "stopped", "rework"},  # re-dispatch resumes a finished agent's item
     "staged": {"verified", "rework", "stopped"},
     "rework": {"dispatched", "stopped"},
     "verified": {"promoted", "rework", "stopped"},

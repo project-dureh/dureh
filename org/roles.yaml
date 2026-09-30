@@ -96,6 +96,7 @@ roles:
       - projects/*/.gitattributes
       - projects/*/.gitmodules
       - projects/*/.bidsignore
+      - projects/*/sourcedata/atlases/**
   pipeline-runner:
     kind: worker
     tier: worker
