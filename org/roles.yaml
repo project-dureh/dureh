@@ -99,11 +99,13 @@ roles:
   pipeline-runner:
     kind: worker
     tier: worker
-    output: Scheduler jobs submitted and recorded through the slurm tool.
-    never: Code changes, interpretation.
+    # scratch: no WI worktree; writes go to the untracked checkpoints/ of the real project.
+    # Promotion into derivatives/ (a DataLad subdataset) needs a per-WI clone and is not enabled yet.
+    isolation: scratch
+    output: Scheduler jobs submitted and recorded through the slurm tool; job scripts and run manifests under checkpoints/.
+    never: Code changes, interpretation, tracked-file edits.
     may_dispatch: []
     write_scopes:
-      - projects/*/derivatives/**
       - projects/*/checkpoints/**
   interpreter:
     kind: worker

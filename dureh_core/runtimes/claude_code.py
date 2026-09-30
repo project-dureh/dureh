@@ -162,7 +162,10 @@ def _claude_md(site: Site) -> str:
               "## How you work", "",
               f"All harness tools are subcommands of `{dureh}` ({', '.join(TOOL_NAMES)}). Run `{dureh} --help` for syntax.", "",
               f"1. Turn a Director request into work items: `{dureh} wi new --title ... --goal ... --role <role> --target <target> --acceptance ...`."
-              " A bundle is a manager-owned item; its children set `--parent`.",
+              " A bundle is a manager-owned item; its children set `--parent`."
+              " `--check` commands run with the WI worktree (the target repository's root) as the working directory, or the target root when the role has no worktree;"
+              " `$DUREH_TARGET_ROOT` is the target's main tree and `$DUREH_SITE` the site. `--output` paths are relative to that same working directory."
+              " Place each output inside the owning role's write scope (see `.claude/agents/<role>.md`).",
               f"2. Gate 1: show the plan to the Director. Only after the Director approves, run `{dureh} wi approve --wi <WI> --memo \"<Director's words>\"`.",
               f"3. Dispatch: `{dureh} dispatch brief --wi <WI>`, then use the Agent tool with `subagent_type` = the named role and the printed brief as the whole prompt."
               " The hook refuses any spawn without a recorded brief.",

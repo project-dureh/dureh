@@ -160,6 +160,26 @@ class Bundle(SiteCase):
             wf.dispatch_brief(s, w["id"], "desk")
 
 
+class ScratchIsolation(SiteCase):
+    def test_pipeline_runner_writes_only_untracked_scratch_in_git_project(self):
+        self.install()
+        proj = self.site_root / "projects" / "p1"
+        proj.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(proj)], check=True)
+        from dureh_core.org import Org
+        from dureh_core.paths import write_decision
+        from helpers import HARNESS
+        # the fixture package does not enable pipeline-runner; check the rule on a full org
+        s = self.site()
+        s._org = Org.load(HARNESS)
+        ok, _ = write_decision(s, "pipeline-runner", proj / "checkpoints" / "WI-0002" / "job.sh")
+        self.assertTrue(ok)
+        ok, _ = write_decision(s, "pipeline-runner", proj / "code" / "job.sh")
+        self.assertFalse(ok)
+        ok, _ = write_decision(s, "interpreter", proj / "checkpoints" / "x")
+        self.assertFalse(ok, "worktree roles do not write the main tree, even scratch")
+
+
 class BashGuard(SiteCase):
     def setUp(self):
         super().setUp()

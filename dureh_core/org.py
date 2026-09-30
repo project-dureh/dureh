@@ -20,6 +20,7 @@ class Role:
     output: str = ""
     never: str = ""
     value: str | None = None
+    isolation: str = "worktree"
     may_dispatch: list[str] = field(default_factory=list)
     write_scopes: list[str] = field(default_factory=list)
 
@@ -56,6 +57,7 @@ class Org:
                 output=spec.get("output") or "",
                 never=spec.get("never") or "",
                 value=spec.get("value"),
+                isolation=spec.get("isolation") or "worktree",
                 may_dispatch=list(spec.get("may_dispatch") or []),
                 write_scopes=list(spec.get("write_scopes") or []),
             )

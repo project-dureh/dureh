@@ -155,7 +155,7 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None) -> 
     if not checking and role.is_worker and led.wi_status(wi)["rework"] >= rework_limit:
         entry = dict(site.model_for_tier("pm"))
         why += f"; escalated after {rework_limit} reworks"
-    if role.is_worker and role.write_scopes and not checking:
+    if role.is_worker and role.write_scopes and not checking and role.isolation == "worktree":
         wt = _create_worktree(site, wi, p["target"])
     else:
         wt = {"worktree": str(site.worktrees / wi) if checking and (site.worktrees / wi).is_dir() else None,
@@ -192,7 +192,12 @@ def _render_brief(site: Site, rec: dict, role: str, wt: dict, entry: dict) -> st
         lines.append("Constraints:")
         lines += [f"- {c}" for c in p["constraints"]]
     if p.get("checks"):
-        lines.append("Checks the checker will run: " + "; ".join(p["checks"]))
+        lines.append("Checks the checker will run (cwd = your work root; $DUREH_TARGET_ROOT = the target's main tree): "
+                     + "; ".join(p["checks"]))
+    if p.get("outputs"):
+        lines.append("Declared outputs (relative to your work root): " + ", ".join(p["outputs"]))
+    if r.isolation == "scratch":
+        lines.append(f"Work root: {target_root(site, p['target'])} (no worktree; write only under its checkpoints/ or cache/)")
     skill = _skill_for(site, role, p.get("value"))
     if skill:
         lines.append(f"Skill: read {skill}")
@@ -279,12 +284,14 @@ def verify_wi(site: Site, actor: str, wi: str, timeout: int = 1800) -> dict:
     violations = [x for x in paths if not org.scope_allows(p["role"], f"{p['target']}/{x}")]
     results = []
     wt = site.worktrees / wi
-    cwd = wt if wt.is_dir() else (target_root(site, p["target"]) or site.root)
-    missing = [o for o in p.get("outputs", []) if not (Path(cwd) / o).exists()]
+    troot = target_root(site, p["target"]) or site.root
+    cwd = wt if wt.is_dir() else troot
+    missing = [o for o in p.get("outputs", []) if not (Path(cwd) / o).exists()]  # the work root only
     for cmd in p.get("checks") or []:
         t0 = time.monotonic()
         try:
-            env = {**site.env(), "PYTHONDONTWRITEBYTECODE": "1"}
+            env = {**site.env(), "PYTHONDONTWRITEBYTECODE": "1", "DUREH_WORK_ROOT": str(cwd),
+                   "DUREH_TARGET_ROOT": str(troot), "DUREH_WI": wi}
             proc = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env)
             rc, out = proc.returncode, (proc.stdout + proc.stderr)[-2000:]
         except subprocess.TimeoutExpired:
