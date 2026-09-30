@@ -271,6 +271,16 @@ def cmd_usage(a):
     _print(usage(_site(a)))
 
 
+def cmd_site(a):
+    from . import sitelinks
+
+    site = _site(a)
+    if a.site_command == "link-module":
+        _print(sitelinks.link_module(site, _actor(a), a.id, a.source, a.rev))
+    else:
+        _print(sitelinks.link_project(site, _actor(a), a.name, a.source))
+
+
 def cmd_authorize_write(a):
     from .paths import write_decision
 
@@ -442,6 +452,17 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--dry-run", action="store_true")
     x.add_argument("--actor")
     add(sub, "usage", cmd_usage, "tokens per WI and per promoted WI from recorded agent runs")
+
+    st = sub.add_parser("site", help="Director-side site setup").add_subparsers(dest="site_command", required=True)
+    x = add(st, "link-module", cmd_site, "clone a module repository at a pinned revision into modules/<id>")
+    x.add_argument("--id", required=True)
+    x.add_argument("--source", required=True)
+    x.add_argument("--rev", required=True)
+    x.add_argument("--actor")
+    x = add(st, "link-project", cmd_site, "DataLad-clone a project into projects/<name> without fetching data")
+    x.add_argument("--name", required=True)
+    x.add_argument("--source", required=True)
+    x.add_argument("--actor")
 
     x = add(sub, "authorize-write", cmd_authorize_write, "check a role's write to a site path")
     x.add_argument("--role", required=True)

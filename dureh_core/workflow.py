@@ -17,7 +17,7 @@ from .site import Site
 from .util import fail, git, sha256_file
 
 BRIEF_TAG = "DUREH-BRIEF"
-CACHE_RE = re.compile(r"(^|/)(__pycache__|\.pytest_cache|\.mypy_cache)(/|$)|\.py[co]$")
+CACHE_RE = re.compile(r"(^|/)(__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.venv)(/|$)|\.py[co]$")
 
 
 # --------------------------------------------------------------------- wi

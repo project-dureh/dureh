@@ -153,6 +153,31 @@ class Ops(SiteCase):
         self.assertIn("name: py-writer", front)
 
 
+class SiteLinks(SiteCase):
+    def test_link_module_pins_revision(self):
+        self.install()
+        s = self.site()
+        src = self.tmp / "upstream"
+        (src / "src").mkdir(parents=True)
+        (src / "src" / "m.py").write_text("x = 1\n")
+        subprocess.run(["git", "init", "-q", "-b", "dev", str(src)], check=True)
+        subprocess.run(["git", "add", "-A"], cwd=src, check=True)
+        subprocess.run(["git", "commit", "-qm", "one"], cwd=src, check=True)
+        first = subprocess.run(["git", "rev-parse", "HEAD"], cwd=src, capture_output=True, text=True).stdout.strip()
+        (src / "src" / "m.py").write_text("x = 2\n")
+        subprocess.run(["git", "commit", "-qam", "two"], cwd=src, check=True)
+        from dureh_core.sitelinks import link_module
+        e = link_module(s, "desk", "demo", str(src), first)
+        self.assertEqual(e["rev"], first)
+        self.assertEqual((self.site_root / "modules/demo/src/m.py").read_text(), "x = 1\n")
+        with self.assertRaisesRegex(DurehError, "only the desk"):
+            link_module(s, "py-writer", "demo2", str(src), first)
+        with self.assertRaisesRegex(DurehError, "already linked"):
+            link_module(s, "desk", "demo", str(src), first)
+        cfg = json.loads(s.config_path.read_text())
+        self.assertEqual(cfg["modules"][0]["id"], "demo")
+
+
 class YamlSubset(unittest.TestCase):
     def test_matches_pyyaml_on_harness_files(self):
         try:

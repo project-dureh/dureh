@@ -80,6 +80,8 @@ class Site:
         prepend = (self.config.get("env") or {}).get("path_prepend") or []
         if prepend:
             env["PATH"] = os.pathsep.join([*prepend, env.get("PATH", "")])
+        for key, value in ((self.config.get("env") or {}).get("vars") or {}).items():
+            env[str(key)] = os.path.expandvars(str(value))
         env["DUREH_SITE"] = str(self.root)
         env["DUREH_ROOT"] = str(HARNESS_ROOT)
         return env
