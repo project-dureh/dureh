@@ -185,7 +185,10 @@ def _render_brief(site: Site, rec: dict, role: str, wt: dict, entry: dict) -> st
     org = site.org
     r = org.role(role)
     dureh = site.root / "bin" / "dureh"
-    lines = [f"Work item {rec['id']}: {p['title']}", f"Goal: {p['goal']}", f"Target: {p['target']}"]
+    from .util import utc_now
+
+    lines = [f"Work item {rec['id']}: {p['title']}", f"Goal: {p['goal']}", f"Target: {p['target']}",
+             f"Prepared: {utc_now()} for {role}"]
     if wt.get("worktree"):
         base = f", base {wt['base'][:12]}" if wt.get("base") else ""
         lines.append(f"Work only in: {wt['worktree']} (branch wi/{rec['id']}{base})")
