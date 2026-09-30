@@ -281,6 +281,26 @@ def cmd_site(a):
         _print(sitelinks.link_project(site, _actor(a), a.name, a.source))
 
 
+def cmd_upstream(a):
+    from . import upstream
+
+    site = _site(a)
+    actor = _actor(a)
+    if a.upstream_command == "draft":
+        _print(upstream.draft(site, actor, a.finding, a.type, a.severity))
+    elif a.upstream_command == "list":
+        rows = upstream.list_requests(site)
+        if a.json:
+            _print(rows)
+        else:
+            for r in rows:
+                print(f"{r['id']}\t{r['type']}\t{r['severity']}\t{r['status']}")
+    elif a.upstream_command == "status":
+        _print(upstream.status(site, actor, a.ur, a.to, a.rev))
+    else:
+        _print(upstream.export(site, actor, a.ur, a.out))
+
+
 def cmd_authorize_write(a):
     from .paths import write_decision
 
@@ -462,6 +482,26 @@ def parser() -> argparse.ArgumentParser:
     x = add(st, "link-project", cmd_site, "DataLad-clone a project into projects/<name> without fetching data")
     x.add_argument("--name", required=True)
     x.add_argument("--source", required=True)
+    x.add_argument("--actor")
+
+    up = sub.add_parser("upstream", help="upstream requests: harness problems routed back to the harness "
+                         "developers (desk-only; never pushes or contacts a remote)").add_subparsers(
+        dest="upstream_command", required=True)
+    x = add(up, "draft", cmd_upstream, "write notes/upstream/UR-<date>-<n>.md from a finding (desk)")
+    x.add_argument("--finding", required=True)
+    x.add_argument("--type", required=True, choices=["bug", "change", "decision", "friction"])
+    x.add_argument("--severity", required=True, choices=["blocking", "degrading", "minor"])
+    x.add_argument("--actor")
+    x = add(up, "list", cmd_upstream, "list upstream requests with id, type, severity, Status")
+    x.add_argument("--json", action="store_true")
+    x = add(up, "status", cmd_upstream, "record a Status transition for an upstream request (desk)")
+    x.add_argument("--ur", required=True)
+    x.add_argument("--to", required=True, choices=["sent", "accepted", "declined", "landed"])
+    x.add_argument("--rev", help="harness revision; required when --to landed")
+    x.add_argument("--actor")
+    x = add(up, "export", cmd_upstream, "bundle a UR file with its referenced findings and WIs (desk)")
+    x.add_argument("--ur", required=True)
+    x.add_argument("--out", help="bundle directory (default notes/upstream/export/<ur>)")
     x.add_argument("--actor")
 
     x = add(sub, "authorize-write", cmd_authorize_write, "check a role's write to a site path")
