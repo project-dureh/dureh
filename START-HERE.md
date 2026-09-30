@@ -1,7 +1,5 @@
-# 첫 에이전트 작업 요청문
+# First implementation task
 
-아래 문장을 새 프로젝트의 에이전트 작업에 전달하고 `<REPOSITORY_URL>`을 실제 주소로 바꾸세요.
+Clone `git@github.com:dvm-shlee/dureh.git`. Read `AGENTS.md` and `DESIGN-BASELINE.md`, then read the pinned English white paper, technical specification, and testing workflow in `dvm-shlee/dureh-whitepaper`.
 
-> `<REPOSITORY_URL>`을 clone하여 `AGENTS.md`, `docs/DUREH-public-white-paper.md`, `docs/DUREH-technical-specification.md`를 읽어 주세요. 이 저장소는 설계 문서만 있는 출발점입니다. DUREH의 Phase 0을 수행하고, 미해결 설계 결정을 명시한 뒤, Phase 1의 가장 작은 실행 가능한 세로 단면을 구현해 주세요. 그 단면은 빈 디렉터리에 설치하고, work item 이벤트를 기록·조회하며, 잘못된 입력과 허용되지 않은 경로 쓰기를 거부하는 자동 검증을 포함해야 합니다. 구현·검증 여부를 구분해 보고하고, 다음 단계의 의존성과 위험을 적어 주세요. 문서에 없는 세부사항은 조용히 확정하지 말고 선택 근거를 기록해 주세요. 외부 배포나 실제 사이트 데이터 연결은 수행하지 마세요.
-
-첫 작업이 끝나면 결과를 검토하고 다음 Phase를 별도 작업으로 진행하는 편이 좋습니다. 설계 문서 전체를 한 번에 구현하도록 요청하면 미정 사항과 검증 단계가 섞이기 쉽습니다.
+Complete Phase 0's decision inventory and acceptance plan. Implement the smallest independently testable Phase 1 slice: install into an empty temporary site, create and query a work-item event, and reject a missing input and an unauthorized write. Record exact commands, test counts, timing, and any check not run. Do not connect real site data or deploy externally. State what is proposed, implemented, and verified.

@@ -1,24 +1,21 @@
-# DUREH project blueprint
+# DUREH harness
 
 **DUREH** = **D**esk-led, **U**nbundled, **R**eversibility-aware, **E**vidence-accumulating **H**arness.
 
-이 저장소는 DUREH를 구현하기 위한 **설계 출발점**입니다. 현재 들어 있는 것은 백서와 기술 명세이며, 실행 가능한 harness는 아직 없습니다.
+이 저장소는 **실행 가능한 DUREH harness의 코드 저장소**입니다. 현재는 구현 착수 전 단계이며 설치·dispatch·기록·복구가 작동한다고 주장하지 않습니다. 설계 문서는 [dureh-whitepaper](https://github.com/dvm-shlee/dureh-whitepaper)로 옮겼습니다. 기존 백서 파일은 이 저장소의 Git 이력에 남습니다.
 
-## 문서
+## 설계 문서
 
-- [대외용 백서](docs/DUREH-public-white-paper.md): 문제, 핵심 설계, 평가·보안 요구사항
-- [기술 명세](docs/DUREH-technical-specification.md): 구성 요소, 레코드, 설치·배포, 단계별 완료 기준과 미해결 사항
-- [관련 연구 부록](docs/DUREH-related-work-appendix.md): 비교표와 조사 문헌 목록(검증 상태 표시)
-- [변경 기록](docs/DUREH-change-log.md): 원문에서 바뀐 내용
-- [에이전트 시작 지침](AGENTS.md): 이 저장소에서 작업할 때 지킬 범위와 검증 방식
-- [첫 작업 요청문](START-HERE.md): 저장소 주소와 함께 에이전트에게 전달할 문장
-- 내부판(결정 기록·심사 기록·측정 원본 포인터)은 비공개 저장소 `dureh-internal-evidence`에 있습니다. 이 저장소는 공개판만 담습니다.
+- [영문 백서](https://github.com/dvm-shlee/dureh-whitepaper/blob/main/docs/white-paper.en.md) — 에이전트가 먼저 읽는 정본
+- [한국어 백서](https://github.com/dvm-shlee/dureh-whitepaper/blob/main/docs/white-paper.ko.md) — 사람이 읽는 대응판
+- [영문 기술 명세](https://github.com/dvm-shlee/dureh-whitepaper/blob/main/docs/technical-spec.en.md) — 구현 계약과 미정 사항
+- [시험 워크플로 영문판](https://github.com/dvm-shlee/dureh-whitepaper/blob/main/docs/testing-workflow.en.md) · [한국어판](https://github.com/dvm-shlee/dureh-whitepaper/blob/main/docs/testing-workflow.ko.md)
+- [설계 기준 버전](DESIGN-BASELINE.md) — 구현 작업에서 고정해 읽을 문서 커밋
 
-## 시작 방법
+내부 운영 근거는 접근이 제한된 `dureh-internal-evidence`에 둡니다. 현장 기록·사람의 기억·연구 데이터는 이 공개 코드 저장소에 넣지 않습니다.
 
-1. 이 저장소를 접근 가능한 Git 서버에 push합니다.
-2. 새 에이전트 작업에 저장소 URL과 [`START-HERE.md`](START-HERE.md)의 요청문을 전달합니다.
-3. 에이전트는 저장소를 clone하고 `AGENTS.md` 및 두 설계 문서를 읽은 뒤 **Phase 0**부터 시작합니다.
-4. 각 단계의 산출물과 테스트 결과를 Git commit 또는 pull request로 검토합니다. 단계가 끝났다는 주장은 실제 실행 결과가 있을 때만 합니다.
+## 구현 시작
 
-저장소 URL은 문서를 찾는 방법일 뿐, 그 자체로 구현 지시가 아닙니다. `AGENTS.md`와 시작 요청문이 작업 범위를 알려주며, 기술 명세의 미정 사항은 구현 전에 결정해야 합니다. Claude Code 외 런타임, RIA 복구, OOD/VM 배포, 보안 통제, 성능 개선은 현재 검증되지 않았습니다.
+새 에이전트 작업은 [AGENTS.md](AGENTS.md)와 [START-HERE.md](START-HERE.md)를 읽고 Phase 0의 미정 사항과 완료 기준을 정리한 뒤 Phase 1의 작고 검증 가능한 기능부터 구현합니다. 구현·검증 여부를 구분해 보고해야 합니다.
+
+시험은 빠른 편집 피드백과 결과 반영 게이트를 구분합니다. 변경 중에는 관련 시험을, Gate 2 전에는 영향을 받은 구성 요소의 전체 시험과 필요한 안전·통합 검사를 실행합니다. 속도 개선은 먼저 wall/CPU/Slurm 대기 시간을 측정하고, 시험의 판별력과 격리를 유지한 채 진행합니다. 외부 [fast-tests 사례](https://github.com/hunkim/ai-is-fast-your-tests-are-slow)의 속도 수치는 DUREH의 목표값이 아닙니다.
