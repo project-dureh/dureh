@@ -1,5 +1,7 @@
 # DUREH project blueprint
 
+**DUREH** = **D**esk-led, **U**nbundled, **R**eversibility-aware, **E**vidence-accumulating **H**arness.
+
 이 저장소는 DUREH를 구현하기 위한 **설계 출발점**입니다. 현재 들어 있는 것은 백서와 기술 명세이며, 실행 가능한 harness는 아직 없습니다.
 
 ## 문서

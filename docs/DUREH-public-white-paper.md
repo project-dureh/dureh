@@ -1,5 +1,7 @@
 # DUREH: An Installable Harness for AI-Agent Organizations
 
+*D*esk-led, *U*nbundled, *R*eversibility-aware, *E*vidence-accumulating *H*arness
+
 *A design informed by two weeks of operational evidence from one deployment*  
 RP-0010 · Public design proposal · 2026-09-30
 
@@ -9,7 +11,7 @@ A two-week AI-agent deployment accumulated many records and tools while repeatin
 
 ## 1. Thesis and contributions
 
-**DUREH treats an AI-agent organization itself as a versioned, testable, and controlled software artifact, separating organizational machinery, accumulated experience, and site-bound state.** The term *universal* in the original acronym is a design goal. Runtime portability is an architectural intent; operation across multiple runtimes has not been demonstrated.
+**DUREH treats an AI-agent organization itself as a versioned, testable, and controlled software artifact, separating organizational machinery, accumulated experience, and site-bound state.** Its name describes the proposed operating model: a desk leads; machinery, package, and site state are unbundled; actions are classified by reversibility; and lessons accumulate only with evidence. Runtime portability is an architectural intent; operation across multiple runtimes has not been demonstrated.
 
 The proposal has three core contributions. These are claims about the combination and operating model, not assertions that each component is individually novel.
 

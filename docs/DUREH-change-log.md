@@ -4,6 +4,7 @@ Source: uploaded `RP-0010-camri-org.md.html` (an HTML rendering of the original 
 
 | Change | Result |
 |---|---|
+| Updated the DUREH expansion to Desk-led, Unbundled, Reversibility-aware, Evidence-accumulating Harness | README and both main documents; removed the former acronym's `Universal` wording from the public paper |
 | Shortened title and abstract; made central thesis explicit | [Public white paper](DUREH-public-white-paper.md), abstract and Section 1 |
 | Consolidated seven listed contributions into three | Public white paper, Section 1 |
 | Reframed case study as observation, consequence, response with cautious causal language | Public white paper, Section 2 |

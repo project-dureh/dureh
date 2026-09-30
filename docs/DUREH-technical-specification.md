@@ -1,5 +1,7 @@
 # DUREH Technical Specification and Implementation Appendix
 
+*D*esk-led, *U*nbundled, *R*eversibility-aware, *E*vidence-accumulating *H*arness
+
 RP-0010 · Companion to [the public white paper](DUREH-public-white-paper.md) · 2026-09-30  
 **Status:** Proposed design extracted and reorganized from the uploaded `RP-0010-camri-org.md.html`. No DUREH implementation or acceptance result was supplied. Paths, commands, limits, and component names below are source proposals, not verified behavior.
 
