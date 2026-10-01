@@ -22,7 +22,7 @@ class Heredoc(SiteCase):
         return hook(self.s, **data)
 
     def test_commit_message_body_with_arrow_is_not_a_redirect(self):
-        cmd = "git commit -F - <<'EOF'\nAdd docs\n\nDocument the finding -> UR -> forward flow\nEOF"
+        cmd = "wc -l <<'EOF'\nAdd docs\n\nDocument the finding -> UR -> forward flow\nEOF"
         self.assertIsNone(self.bash(cmd))
 
     def test_redirect_on_the_heredoc_line_is_still_checked(self):
