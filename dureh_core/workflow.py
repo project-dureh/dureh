@@ -130,6 +130,8 @@ def _create_worktree(site: Site, wi: str, target: str) -> dict:
 
 def worktree_problem(wt: Path, wi: str) -> str | None:
     """None when wt is a usable worktree on branch wi/<wi>; otherwise what is wrong."""
+    if not Path(wt).is_dir():
+        return f"{wt} does not exist"
     proc = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=wt, capture_output=True, text=True)
     if proc.returncode != 0:
         return (proc.stderr or proc.stdout).strip()[-300:] or "not a git worktree"

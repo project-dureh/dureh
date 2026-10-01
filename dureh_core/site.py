@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 from . import yamlsub
@@ -11,6 +12,7 @@ from .util import fail, read_json
 RECORD_KINDS = ("work-item", "run", "decision", "session", "finding", "event")
 READ_ONLY_SITE_DIRS = ("references", "startup")
 _OBSERVE_DIRS: set = set()
+_VAR = re.compile(r"\$\{(\w+)(?::-([^}]*))?\}|\$(\w+)")
 TOOL_NAMES = ("wi", "dispatch", "verify", "ledger", "status", "slurm", "path-refs", "purge", "push", "usage", "upstream", "promote", "worktree")
 
 
@@ -74,7 +76,7 @@ class Site:
             return private / "index.sqlite"
         configured = (self.config.get("index") or {}).get("path")
         if configured:
-            return Path(os.path.expandvars(configured)).expanduser()
+            return Path(self.expand(configured))
         base = os.environ.get("TMPDIR") or "/tmp"
         return Path(base) / f"dureh-{os.environ.get('USER', 'user')}-{self.site_id}" / "index.sqlite"
 
@@ -90,16 +92,36 @@ class Site:
                 out.append(child)
         return out
 
+    def expand(self, value: str, env: dict | None = None) -> str:
+        """Expand ~, $VAR, ${VAR} and ${VAR:-default}; DUREH_SITE and DUREH_ROOT always name this site and harness."""
+        base = dict(os.environ if env is None else env, DUREH_SITE=str(self.root), DUREH_ROOT=str(HARNESS_ROOT))
+
+        def sub(m):
+            name = m.group(1) or m.group(3)
+            if name in base:
+                return base[name]
+            return m.group(2) if m.group(2) is not None else m.group(0)
+
+        return os.path.expanduser(_VAR.sub(sub, str(value)))
+
     def env(self) -> dict:
         env = dict(os.environ)
-        prepend = (self.config.get("env") or {}).get("path_prepend") or []
+        env["DUREH_SITE"] = str(self.root)
+        env["DUREH_ROOT"] = str(HARNESS_ROOT)
+        prepend = [self.expand(x, env) for x in (self.config.get("env") or {}).get("path_prepend") or []]
         if prepend:
             env["PATH"] = os.pathsep.join([*prepend, env.get("PATH", "")])
         for key, value in ((self.config.get("env") or {}).get("vars") or {}).items():
-            env[str(key)] = os.path.expandvars(str(value))
-        env["DUREH_SITE"] = str(self.root)
-        env["DUREH_ROOT"] = str(HARNESS_ROOT)
+            env[str(key)] = self.expand(value, env)
         return env
+
+    def package_source(self) -> Path | None:
+        """The startup package source tree: absolute, relative to the site, or built from env vars."""
+        src = (self.config.get("startup") or {}).get("source")
+        if not src:
+            return None
+        p = Path(self.expand(src))
+        return p if p.is_absolute() else (self.root / p).resolve()
 
     # --- package and org ---------------------------------------------------
     def package_manifest(self) -> dict:

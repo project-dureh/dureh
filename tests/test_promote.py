@@ -11,7 +11,8 @@ from dureh_core import promote as pr
 from dureh_core.records import Ledger
 from dureh_core.util import DurehError
 
-ANNEX_BIN = Path.home() / "micromamba" / "envs" / "annex" / "bin"
+# where git-annex lives when it is not on PATH; override with DUREH_TEST_ANNEX_BIN
+ANNEX_BIN = Path(os.environ.get("DUREH_TEST_ANNEX_BIN") or Path.home() / "micromamba" / "envs" / "annex" / "bin")
 
 
 def _tools_path():

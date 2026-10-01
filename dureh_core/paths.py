@@ -42,8 +42,7 @@ def target_root(site: Site, target: str) -> Path | None:
     if target == "harness":
         return HARNESS_ROOT
     if target == "package":
-        src = (site.config.get("startup") or {}).get("source")
-        return Path(src) if src else None
+        return site.package_source()
     parts = target.split("/")
     if len(parts) == 2 and parts[0] in ("modules", "projects") and parts[1]:
         return site.root / target
@@ -106,9 +105,9 @@ def classify(site: Site, raw: str | Path, cwd: Path | None = None) -> Target:
         return Target("site-other", None, rel)
     if is_within(real, HARNESS_ROOT):
         return Target("harness-main", "harness/" + real.relative_to(HARNESS_ROOT).as_posix(), None)
-    src = (site.config.get("startup") or {}).get("source")
-    if src and is_within(real, Path(src).resolve()):
-        return Target("package-main", "package/" + real.relative_to(Path(src).resolve()).as_posix(), None)
+    src = site.package_source()
+    if src and is_within(real, src.resolve()):
+        return Target("package-main", "package/" + real.relative_to(src.resolve()).as_posix(), None)
     for s in scratch_roots():
         if is_within(real, s):
             return Target("scratch", None, None)

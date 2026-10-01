@@ -239,7 +239,7 @@ def refresh_deployment(site: Site) -> dict:
 
     path = site.root / "deployment.json"
     dep = read_json(path)
-    src = Path((site.config.get("startup") or {}).get("source") or site.startup)
+    src = site.package_source() or site.startup
     new = dict(dep)
     new["harness"] = {"url": _remote(HARNESS_ROOT), "rev": git_revision(HARNESS_ROOT)}
     new["package"] = {**dep.get("package", {}), "rev": git_revision(src) if src.exists() else dep.get("package", {}).get("rev")}
