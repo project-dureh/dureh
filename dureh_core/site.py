@@ -11,7 +11,7 @@ from .util import fail, read_json
 RECORD_KINDS = ("work-item", "run", "decision", "session", "finding", "event")
 READ_ONLY_SITE_DIRS = ("references", "startup")
 _OBSERVE_DIRS: set = set()
-TOOL_NAMES = ("wi", "dispatch", "verify", "ledger", "status", "slurm", "path-refs", "purge", "push", "usage", "upstream", "promote")
+TOOL_NAMES = ("wi", "dispatch", "verify", "ledger", "status", "slurm", "path-refs", "purge", "push", "usage", "upstream", "promote", "worktree")
 
 
 class Site:

@@ -46,7 +46,7 @@ class AgentBinding(SiteCase):
 
     def bound(self):
         return {e["payload"]["agent_id"]: e["wi"] for e in self.led.load("event")
-                if e["type"] == "agent.started" and e["actor"] == "py-writer"}
+                if e["type"] == "agent.started" and e["actor"] == "py-writer" and e["wi"]}
 
     def test_binds_by_the_brief_in_the_agent_transcript(self):
         second = self.items[1]
@@ -55,7 +55,10 @@ class AgentBinding(SiteCase):
         hook(self.s, hook_event_name="SubagentStart", agent_type="py-writer", agent_id="a-b",
              agent_transcript_path=str(transcript))
         hook(self.s, hook_event_name="SubagentStart", agent_type="py-writer", agent_id="a-a")
-        self.assertEqual(self.bound(), {"a-b": second, "a-a": self.items[0]})
+        self.assertEqual(self.bound(), {"a-b": second}, "a-a has no transcript yet: deferred, not guessed")
+        deferred = [e for e in self.led.load("event") if e["type"] == "agent.started" and not e["wi"]
+                    and e["actor"] == "py-writer"]
+        self.assertEqual([e["payload"]["agent_id"] for e in deferred], ["a-a"])
 
     def concurrent(self, session=None):
         ctx = mp.get_context("fork")

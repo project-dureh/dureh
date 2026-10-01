@@ -320,6 +320,12 @@ def cmd_authorize_write(a):
     print(f"authorized: {a.role} -> {a.path} ({why})")
 
 
+def cmd_worktree(a):
+    from .workflow import worktree_repair
+
+    _print(worktree_repair(_site(a), _actor(a), a.wi))
+
+
 def cmd_promote(a):
     from .promote import promote, replace_metadata
 
@@ -358,7 +364,7 @@ def cmd_artifact_write(a):
 # ------------------------------------------------------------------- parser
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="dureh", description="DUREH harness tools: wi, dispatch, verify, ledger, status, "
-                                "slurm, path-refs, purge, push, usage, upstream, promote (plus install, adapter, hook).")
+                                "slurm, path-refs, purge, push, usage, upstream, promote, worktree (plus install, adapter, hook).")
     p.add_argument("--site", help="installed site directory (or DUREH_SITE)")
     p.add_argument("--observe", action="store_true",
                    help="read-only: allow only status, wi show/list, ledger query, upstream list/message, path-refs, usage, "
@@ -533,6 +539,10 @@ def parser() -> argparse.ArgumentParser:
     x = add(sub, "authorize-write", cmd_authorize_write, "check a role's write to a site path")
     x.add_argument("--role", required=True)
     x.add_argument("--path", required=True)
+    wt = sub.add_parser("worktree", help="WI worktrees").add_subparsers(dest="worktree_command", required=True)
+    x = add(wt, "repair", cmd_worktree, "desk: re-link a WI worktree after the site moved, or prune it if its directory is gone")
+    x.add_argument("--wi", required=True)
+    x.add_argument("--actor")
     x = add(sub, "promote", cmd_promote, "data-steward: promote verified checkpoints into a derivatives subdataset")
     x.add_argument("--wi", required=True)
     x.add_argument("--run", help="completed slurm run record that produced the source")

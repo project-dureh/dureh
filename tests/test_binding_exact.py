@@ -58,16 +58,44 @@ class ExactBinding(SiteCase):
 
     def bound(self):
         return {e["payload"]["agent_id"]: (e["wi"], e["payload"]["brief"], e["payload"]["bound_by"])
-                for e in self.led.load("event") if e["type"] == "agent.started" and e["actor"] == "py-writer"}
+                for e in self.led.load("event") if e["type"] == "agent.started" and e["actor"] == "py-writer" and e["wi"]}
 
     def digest(self, brief):
         return brief["brief"].split("brief=")[1][:16]
+
+    def test_start_without_transcript_defers_then_binds_by_brief(self):
+        ba = self.worker(self.a)
+        self.start("a-1")  # the runtime has not written the transcript yet
+        self.assertNotIn("a-1", self.bound())
+        self.transcript("a-1", ba["brief"])
+        self.assertIsNone(self.write("a-1", Path(ba["worktree"]) / "src" / "demo.py"))
+        self.assertEqual(self.bound()["a-1"], (self.a, self.digest(ba), "brief"))
+        ev = [e for e in self.led.load("event") if e["type"] == "agent.started" and e["payload"]["agent_id"] == "a-1"][-1]
+        self.assertEqual(ev["payload"]["prompt_brief"], self.digest(ba))
+
+    def test_order_fallback_records_that_no_prompt_brief_was_found(self):
+        ba = self.worker(self.a)
+        self.start("a-1", with_session=False)
+        self.write("a-1", Path(ba["worktree"]) / "src" / "demo.py")
+        ev = [e for e in self.led.load("event") if e["type"] == "agent.started" and e["payload"]["agent_id"] == "a-1"][-1]
+        self.assertEqual((ev["payload"]["bound_by"], ev["payload"]["prompt_brief"]), ("order", None))
+
+    def test_agent_that_used_no_tool_is_bound_at_stop(self):
+        ba = self.worker(self.a)
+        self.start("a-1")
+        p = self.transcript("a-1", ba["brief"])
+        hook(self.s, hook_event_name="SubagentStop", agent_type="py-writer", agent_id="a-1",
+             agent_transcript_path=str(self.session.with_suffix("") / "subagents" / "agent-a-1.jsonl"))
+        self.assertEqual(self.bound()["a-1"][2], "brief")
+        fin = [e for e in self.led.load("event") if e["type"] == "agent.finished" and e["payload"]["agent_id"] == "a-1"]
+        self.assertEqual(fin[-1]["wi"], self.a)
 
     def test_stopped_dispatch_is_not_a_candidate(self):
         self.worker(self.a)  # spawned, agent never starts
         wf.dispatch_stop(self.s, "desk", self.a, "never started")
         bb = self.worker(self.b)
         self.start("a-1", with_session=False)
+        self.write("a-1", Path(bb["worktree"]) / "src" / "demo.py")
         self.assertEqual(self.bound()["a-1"], (self.b, self.digest(bb), "order"))
 
     def test_superseded_dispatch_is_not_a_candidate(self):
@@ -76,6 +104,7 @@ class ExactBinding(SiteCase):
         wf.wi_approve(self.s, "desk", self.a, "again")
         second = self.worker(self.a)
         self.start("a-1", with_session=False)
+        self.write("a-1", Path(second["worktree"]) / "src" / "demo.py")
         self.assertEqual(self.bound()["a-1"], (self.a, self.digest(second), "order"))
 
     def test_binds_by_brief_from_the_session_transcript_layout(self):

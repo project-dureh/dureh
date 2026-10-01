@@ -113,6 +113,9 @@ def _create_worktree(site: Site, wi: str, target: str) -> dict:
         return {"worktree": None, "base": None, "note": "target is not a git repository; no isolated worktree"}
     wt = site.worktrees / wi
     if wt.exists():
+        err = worktree_problem(wt, wi)
+        if err:
+            fail(f"worktree {wt} is broken ({err}); repair it with `dureh worktree repair --wi {wi}`")
         base = git(["rev-parse", f"wi/{wi}"], root, check=False) or None
         return {"worktree": str(wt), "base": _base_of(site, wi) or base, "note": "reused existing worktree"}
     site.worktrees.mkdir(exist_ok=True)
@@ -123,6 +126,45 @@ def _create_worktree(site: Site, wi: str, target: str) -> dict:
     else:
         git(["worktree", "add", "-b", f"wi/{wi}", str(wt), base], root)
     return {"worktree": str(wt), "base": base, "note": "new worktree"}
+
+
+def worktree_problem(wt: Path, wi: str) -> str | None:
+    """None when wt is a usable worktree on branch wi/<wi>; otherwise what is wrong."""
+    proc = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=wt, capture_output=True, text=True)
+    if proc.returncode != 0:
+        return (proc.stderr or proc.stdout).strip()[-300:] or "not a git worktree"
+    if proc.stdout.strip() != f"wi/{wi}":
+        return f"checked out {proc.stdout.strip()}, not wi/{wi}"
+    return None
+
+
+def worktree_repair(site: Site, actor: str, wi: str) -> dict:
+    """Re-link a WI worktree after the site moved, keeping branch and commits; prune it if its directory is gone."""
+    from .ops import agent_state
+
+    if site.org.role(actor).kind != "desk":
+        fail("only the desk repairs worktrees")
+    led = Ledger(site)
+    p = led.get("work-item", wi)["payload"]
+    root = target_root(site, p["target"])
+    if root is None or not (root / ".git").exists():
+        fail(f"{wi} targets {p['target']}, which is not a git repository")
+    if led.wi_status(wi)["status"] == "dispatched" and agent_state(led, wi) == "running":
+        fail(f"an agent is running for {wi}; stop it before repairing its worktree")
+    wt = site.worktrees / wi
+    if not wt.exists():
+        git(["worktree", "prune"], root)
+        state = "pruned"
+    elif worktree_problem(wt, wi) is None:
+        return {"wi": wi, "worktree": str(wt), "state": "ok"}
+    else:
+        proc = subprocess.run(["git", "worktree", "repair", str(wt)], cwd=root, capture_output=True, text=True)
+        err = worktree_problem(wt, wi)
+        if err:
+            fail(f"repair of {wt} failed: {err} {(proc.stderr or '').strip()[-300:]}")
+        state = "repaired"
+    led.event("worktree.repaired", actor, wi, {"worktree": str(wt), "target": p["target"], "state": state})
+    return {"wi": wi, "worktree": str(wt), "state": state}
 
 
 def _base_of(site: Site, wi: str) -> str | None:

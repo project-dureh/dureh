@@ -181,7 +181,8 @@ def _claude_md(site: Site) -> str:
               f"5. Gate 2: after the checker verified the item, report it to the Director and promote with `{dureh} wi promote --wi <WI> --memo ...`."
               f" For a bundle the manager staged, run `{dureh} verify --wi <bundle>` (a recount of its items' states); promoting the bundle merges any verified items not yet promoted.",
               f"6. Findings are records, not work items: `{dureh} ledger add finding --summary ... --evidence-level measured|reviewed|inferred|proposed`.",
-              f"7. Before moving or deleting a path, run `{dureh} path-refs <path>`. Delete only through `{dureh} purge`.",
+              f"7. Before moving or deleting a path, run `{dureh} path-refs <path>`. Delete only through `{dureh} purge`."
+              f" If a dispatch reports a broken worktree (for example after the site moved), run `{dureh} worktree repair --wi <WI>`; never edit `.git` files.",
               f"8. Compute runs only as scheduler jobs through `{dureh} slurm submit`. External pushes only through `{dureh} push` with a Director decision."
               f" Verified checkpoints reach `derivatives/` only through `{dureh} promote`, run by a dispatched data-steward.",
               f"9. Self-test the harness and this site with `{dureh} verify --self` after any harness or package update.",
@@ -586,6 +587,13 @@ def _record_spawn(led: Ledger, role: str, target: str, wi: str, digest: str, ti:
     consumed = [e for e in events if e["type"] in ("wi.dispatched", "checker.dispatched") and e["payload"].get("brief") == digest]
     if consumed:
         return _deny(f"brief {digest} was already used; prepare a new brief")
+    wt = prepared[-1]["payload"].get("worktree")
+    if wt:
+        from ..workflow import worktree_problem
+
+        err = worktree_problem(Path(wt), wi)
+        if err:
+            return _deny(f"worktree {wt} is broken ({err}); the desk repairs it with `dureh worktree repair --wi {wi}`")
     try:
         etype = "checker.dispatched" if prepared[-1]["payload"].get("checking") else "wi.dispatched"
         led.event(etype, role, wi, {"role": target, "brief": digest, "by": role,
@@ -607,6 +615,8 @@ def pre_tool_use(site: Site, data: dict) -> dict | None:
     led = Ledger(site)
     ti = data.get("tool_input") or {}
     if tool in SPAWN_TOOLS:
+        if role != "desk":
+            _bind(led, role, data, "first-tool")
         target = ti.get("subagent_type") or "general-purpose"
         if target not in org.roles or target == "desk":
             return _deny(f"`{target}` is not a DUREH role; research goes to `researcher`, documents to `doc-writer`")
@@ -685,7 +695,7 @@ def _candidates(led: Ledger, role: str) -> list[dict]:
 
 
 def _bind(led: Ledger, role: str, data: dict, at: str) -> str | None:
-    """Bind an agent to its WI: by the brief in its own prompt, else by order only when one candidate exists.
+    """Bind an agent to its WI: by the brief in its own prompt, else (after start) by order when one candidate exists.
 
     With a single live candidate, that dispatch must be this agent's own: its spawn recorded it and no
     other agent can have taken it, because other agents bind only by their own brief or the same rule.
@@ -702,12 +712,17 @@ def _bind(led: Ledger, role: str, data: dict, at: str) -> str | None:
         exact = [e for e in pending if digest and e["payload"].get("brief") == digest]
         if exact:
             ev, how = exact[0], "brief"
-        elif not digest and len(pending) == 1:
+        elif not digest and len(pending) == 1 and at != "start":
             ev, how = pending[0], "order"
         else:
+            if at == "start" and pending:
+                # the runtime has usually not written the transcript yet: note the start, bind at the first tool call
+                led.event("agent.started", role, None, {"agent_id": agent_id, "bound_by": "deferred", "bound_at": at,
+                                                        "prompt_brief": None})
             return None
         led.event("agent.started", role, ev["wi"], {"agent_id": agent_id, "brief": ev["payload"].get("brief"),
-                                                    "bound_by": how, "bound_at": at}, [ev["id"]])
+                                                    "bound_by": how, "bound_at": at, "prompt_brief": digest},
+                  [ev["id"]])
         return ev["wi"]
 
 
@@ -743,7 +758,7 @@ def subagent_stop(site: Site, data: dict) -> None:
     if role.startswith("foreign:"):
         return None
     led = Ledger(site)
-    wi = _agent_wi(led, data.get("agent_id"))
+    wi = _bind(led, role, data, "stop")
     tpath = data.get("agent_transcript_path")
     usage = transcript_usage(Path(tpath)) if tpath else {"coverage": "none", "reason": "runtime did not supply a transcript path"}
     led.event("agent.finished", role, wi, {"agent_id": data.get("agent_id")})

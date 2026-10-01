@@ -25,7 +25,19 @@ def agent_state(led: Ledger, wi: str) -> str:
     later = [e["type"] for e in evs[last + 1:]]
     if "agent.finished" in later:
         return "ended"
-    return "running" if "agent.started" in later else "not started"
+    if "agent.started" in later:
+        return "running"
+    return "starting" if _deferred_start(led, evs[last]) else "not started"
+
+
+def _deferred_start(led: Ledger, dispatched: dict) -> bool:
+    """An agent of the dispatched role started after this dispatch and is still waiting to be bound."""
+    role = dispatched["payload"].get("role")
+    all_events = led.events()
+    done = {e["payload"].get("agent_id") for e in all_events
+            if e["type"] == "agent.finished" or (e["type"] == "agent.started" and e["wi"])}
+    return any(e["type"] == "agent.started" and not e["wi"] and e["actor"] == role and e["ts"] >= dispatched["ts"]
+               and e["payload"].get("agent_id") not in done for e in all_events)
 
 
 def orphaned(led: Ledger, wis: list[dict]) -> list[dict]:
@@ -33,10 +45,10 @@ def orphaned(led: Ledger, wis: list[dict]) -> list[dict]:
     state = {wi: agent_state(led, wi) for wi in dispatched}
     out = []
     for wi in dispatched:
-        if state[wi] == "running":
+        if state[wi] in ("running", "starting"):
             continue
         kids = [w["id"] for w in wis if led.get("work-item", w["id"])["payload"].get("parent") == wi]
-        running = [k for k in kids if state.get(k) == "running"]
+        running = [k for k in kids if state.get(k) in ("running", "starting")]
         if state[wi] == "not started":
             action = f"if no agent is starting, `dispatch stop --wi {wi} --reason ...` (resuming needs Gate 1)"
         elif running:
