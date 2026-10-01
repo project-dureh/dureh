@@ -44,7 +44,20 @@ class Message(SiteCase):
             self.assertNotIn(closed, text)
         self.assertIn(str(up.notes_dir(self.s)), text)
         self.assertIn("harness rev", text)
-        self.assertTrue(text.rstrip().endswith("give the harness rev when a change lands."))
+        self.assertTrue(text.rstrip().endswith("only in a merge window the Director opens."))
+
+    def test_message_reports_site_activity_for_the_merge_window(self):
+        text = up.message(self.s)
+        self.assertIn("SITE ACTIVITY", text)
+        self.assertIn("agents running: none", text)
+        self.assertIn("merge window: ready (no running agents)", text)
+        from dureh_core.records import Ledger
+
+        led = Ledger(self.s)
+        wi = led.work_items()[0]["id"]
+        led.event("wi.approved", "desk", wi, {})
+        led.event("wi.dispatched", "desk", wi, {"role": "pm-modules", "brief": "0" * 16, "by": "desk"})
+        self.assertIn("merge window: not ready", up.message(self.s))
 
     def test_cli_prints_it_in_observe_mode_without_writing(self):
         before = sorted(os.listdir(up.notes_dir(self.s)))

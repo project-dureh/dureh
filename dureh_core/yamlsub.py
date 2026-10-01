@@ -1,8 +1,8 @@
 """A strict parser for the YAML subset used by DUREH packages and org definitions.
 
 Supported: block mappings, block sequences (of scalars or mappings), flow
-sequences of scalars (``[a, b]``), plain/quoted scalars, ``#`` comments, and
-``|`` literal blocks. Anything else fails loudly instead of being guessed.
+sequences of scalars (``[a, b]``), flow mappings of scalars (``{a: 1, b: x}``),
+plain/quoted scalars, ``#`` comments, and ``|`` literal blocks. Anything else fails loudly instead of being guessed.
 """
 from __future__ import annotations
 
@@ -45,9 +45,19 @@ def scalar(text: str):
             return []
         return [scalar(part) for part in _split_flow(inner)]
     if t.startswith("{"):
-        if t == "{}":
-            return {}
-        fail(f"flow mappings are not supported: {t!r}")
+        if not t.endswith("}"):
+            fail(f"unterminated flow mapping: {t!r}")
+        inner = t[1:-1].strip()
+        out: dict = {}
+        for part in _split_flow(inner) if inner else []:
+            key, sep, value = part.strip().partition(":")
+            key = key.strip().strip("\"'")
+            if not sep or not key or (value and not value.startswith(" ")):
+                fail(f"expected 'key: value' in flow mapping: {t!r}")
+            if key in out:
+                fail(f"duplicate key {key!r} in flow mapping: {t!r}")
+            out[key] = scalar(value)
+        return out
     if _INT.match(t):
         return int(t)
     if _FLOAT.match(t):
@@ -179,7 +189,7 @@ def _parse_seq(lines, pos, indent, source):
             result.append(value)
             continue
         key, sep, rest = item.partition(":")
-        if sep and (not rest or rest.startswith(" ")) and not item.startswith(("'", '"', "[")):
+        if sep and (not rest or rest.startswith(" ")) and not item.startswith(("'", '"', "[", "{")):
             # mapping item: first key inline, following keys indented at ind+2
             sub_indent = ind + 2
             synthetic = [(sub_indent, item, lineno)]

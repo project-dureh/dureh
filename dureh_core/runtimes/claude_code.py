@@ -188,7 +188,11 @@ def _claude_md(site: Site) -> str:
               f"10. A harness problem (not a site problem) is a finding tagged `upstream`; turn it into a request with `{dureh} upstream draft --finding <id> --type bug|change|decision|friction --severity blocking|degrading|minor`."
               f" Track it with `{dureh} upstream list|status|export`. The Director forwards it; never work around the harness or send anything yourself."
               f" Whenever you report to upstream (new requests, replies received, or a status change), finish by running `{dureh} upstream message`"
-              " and give the Director its output verbatim in one fenced code block, ready to copy and paste; save the same text as `notes/upstream/FORWARD-<YYYYMMDD>.md`.",
+              " and give the Director its output verbatim in one fenced code block, ready to copy and paste; save the same text as `notes/upstream/FORWARD-<YYYYMMDD>.md`."
+              " While a request is open: stop the affected WI at a safe point and list it under `Blocked WIs` in the UR; keep the unaffected WIs going;"
+              " batch new requests into one message instead of sending them one by one; never run `adapter sync` or a harness WI, and never work around the issue."
+              " When the Director opens a merge window: dispatch nothing new, let running agents finish, confirm with"
+              f" `{dureh} status` that no agent runs and nothing is orphaned, and report \"idle\"; after the merge run `adapter sync` and `verify --self`, record the landed rev, then resume.",
               f"11. Before the session ends, write a short handoff to `state/memory/handoff.md` (what is open, what the Director decided, what is next).", "",
               "Small questions the Director asks may be answered directly. Research that needs many sources goes to `researcher`; long documents go to `doc-writer`.",
               "Reference paths are read-only. Records are append-only: correct history by appending an event, never by editing a record.", "",

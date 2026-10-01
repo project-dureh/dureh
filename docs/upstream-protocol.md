@@ -37,6 +37,28 @@ developers in one uniform, traceable form, so the harness improves from real use
 5. **Landed**: once a harness revision contains the change, set `Status: landed <rev>`, run
    `dureh adapter sync`, then `dureh verify --self`.
 
+## Working in parallel with upstream
+
+Site and upstream work at the same time. Four things can collide; each has one rule:
+
+| Collision | Rule |
+|---|---|
+| Code: a site harness WI and upstream write the same branch | The site reports harness problems as URs, never fixes them in a harness WI. |
+| Live swap: the harness changes under running agents | Merges and `adapter sync` happen only in a merge window the Director opens. |
+| Project files: `adapter sync` commits into linked projects | Same merge window; no data-steward or pipeline-runner runs in that project meanwhile. |
+| Site records | Upstream never writes them; it reads in observe mode. |
+
+Site (desk) order: stop the affected WI at a safe point; record the finding and the UR with
+`Blocked WIs` and `Continuing WIs`; batch requests into one `dureh upstream message` (its
+`SITE ACTIVITY` section shows running agents and whether a merge window could open now); keep
+unaffected WIs going and do not sync while waiting; in a merge window dispatch nothing new, let
+running agents finish, confirm with `dureh status`, report "idle"; after the merge run
+`adapter sync` and `verify --self`, record `landed <rev>`, resume.
+
+Upstream order: triage each UR, report the proposed order, site impact and whether a merge window
+is needed to the Director, implement only after the Director confirms, then hand over the merge
+commands and a reply that states per UR what behavior changes and whether a sync is needed.
+
 ## Status values
 
 `open` -> `sent` -> `accepted` | `declined` -> `landed`

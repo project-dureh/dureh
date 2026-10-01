@@ -196,7 +196,7 @@ class YamlSubset(unittest.TestCase):
     def test_rejects_unsupported(self):
         from dureh_core import yamlsub
 
-        for bad in ("a: {b: 1}", "a:\n\tb: 1", "a: 1\na: 2", "- a\nb: 1"):
+        for bad in ("a: {b: {c: 1}}", "a:\n\tb: 1", "a: 1\na: 2", "- a\nb: 1"):
             with self.subTest(bad=bad):
                 with self.assertRaises(DurehError):
                     yamlsub.loads(bad)

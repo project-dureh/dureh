@@ -111,7 +111,10 @@ def draft(site: Site, actor: str, finding: str, type_: str, severity: str) -> di
         f"{summary}\n\n"
         f"## Request\n<expected behavior or the exact diff>\n\n"
         f"## Options and recommendation\n<at least two if a decision is needed>\n\n"
-        f"## Impact at this site\n<which WIs wait, what proceeds meanwhile>\n"
+        f"## Impact at this site\n"
+        f"- Blocked WIs: <WIs that wait on this request>\n"
+        f"- Continuing WIs: <WIs that proceed meanwhile>\n"
+        f"- Workaround in use: <none, or what briefs must say until it lands>\n"
     )
     path = dir_ / f"{ur_id}.md"
     write_create_only(path, content.encode("utf-8"), 0o644)
@@ -200,8 +203,25 @@ def message(site: Site) -> str:
             n += 1
             lines.append(f"{n}. {r['id']} ({r['severity']}): {r['title']}; status: {r['status']}")
         lines.append("")
-    lines.append("Please reply per UR (accepted, declined or revised) and give the harness rev when a change lands.")
+    lines += _activity(site)
+    lines.append("Please reply per UR (accepted, declined or revised), with the order you propose, and give the harness rev"
+                 " when a change lands. Merges and syncs happen only in a merge window the Director opens.")
     return "\n".join(lines) + "\n"
+
+
+def _activity(site: Site) -> list[str]:
+    from .ops import status
+
+    st = status(site)
+    running = [f"{o['wi']} ({o['role']}, agent {o['agent']})" for o in st["orphaned"]]
+    dispatched = st["by_status"].get("dispatched", [])
+    live = [d.split(":")[0] for d in dispatched if d.split(" ")[0] not in {o["wi"] for o in st["orphaned"]}]
+    ready = not live and not st["orphaned"]
+    lines = ["SITE ACTIVITY", f"- active lanes {st['active_lanes']}; agents running: {', '.join(live) or 'none'}"]
+    if running:
+        lines.append(f"- orphaned: {', '.join(running)}")
+    lines += [f"- merge window: {'ready (no running agents)' if ready else 'not ready; the desk reports when idle'}", ""]
+    return lines
 
 
 def status(site: Site, actor: str, ur: str, to: str, rev: str | None = None) -> dict:

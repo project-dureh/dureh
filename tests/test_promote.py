@@ -25,7 +25,10 @@ TOOLS = _tools_path()
 
 
 def run(cmd, cwd=None):
-    return subprocess.run(cmd, cwd=cwd, check=True, capture_output=True, text=True).stdout
+    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"{' '.join(cmd[:3])} exited {proc.returncode}: {(proc.stderr or proc.stdout).strip()[-1500:]}")
+    return proc.stdout
 
 
 @unittest.skipUnless(TOOLS, "datalad and git-annex not available: not run")

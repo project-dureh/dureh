@@ -32,6 +32,27 @@ external_links:
 """
 
 
+
+def manifest_v2(links=196):
+    rows = ([f"rawbids/sub-{i:03d}" for i in range(39)]
+            + [f"derivatives/brainmask_camri_rat_bold/sub-{i:03d}/func/m.nii.gz" for i in range(links - 40)]
+            + ["sourcedata/atlases/group-ica/melodic_IC.nii.gz"])
+    link_lines = "".join(f'  - {{path: "{r}", link_target: "/proj/lab/{r}", external: true, traversed: false, size_bytes: 10}}\n'
+                         for r in rows)
+    return ("schema_version: 2\nproject:\n  name: \"lna\"\n"
+            "execution:\n  mode: \"slurm\"\n  slurm:\n    account: \"rc_lab_pi\"\n    partition: \"general\"\n"
+            "source:\n  type: \"bids\"   # note\n  external_root: \"/proj/lab/lna\"\n  size_bytes: 17490933543\n"
+            "pipelines:\n  - family: \"fmriprep\"\n    species: \"rat\"\n    suffix: \"bold\"\n    axes: {}\n"
+            "    camri_version: null\n    workflows:\n      - name: \"fmriprep.brainmask-first\"\n        default: true\n"
+            "        role: \"production\"\n      - name: \"fmriprep.default\"\n        default: false\n        role: \"oracle-test\"\n"
+            "datalad:\n  subdatasets:\n    - path: \"rawbids\"\n      dataset_id: \"r\"\n"
+            "    - path: \"derivatives/brainmask_camri_rat_bold\"\n      dataset_id: \"b\"\n"
+            "    - path: \"derivatives/fmriprep_camri_rat_bold\"\n      dataset_id: \"f\"\n"
+            "provenance:\n  tool_versions:\n    brkraw: null\n    camri: \"2.0.0a0+68b4d2d\"\n    containers:\n"
+            "      - {name: \"afni\", digest: \"sha256:aaa\"}\n      - {name: \"camri\", digest: \"sha256:ccc\"}\n"
+            f"external_links:   # {len(rows)} entries\n{link_lines}")
+
+
 def git(cwd, *args):
     return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
 
@@ -131,6 +152,33 @@ class ProjectGen(SiteCase):
         self.assertTrue(r[0]["changed"])
         self.assertEqual(git(dl, "status", "--porcelain"), "")
         self.assertIn("dureh: regenerate", git(dl, "log", "-1", "--format=%s"))
+
+    def test_reads_manifest_schema_v2(self):
+        (self.proj / "camri-manifest.yaml").write_text(manifest_v2())
+        pg.generate_projects(self.s)
+        text = (self.proj / "CLAUDE.md").read_text()
+        self.assertTrue(text.startswith("# Project agent instructions (template manifest schema 2)"), text[:80])
+        for part in ("source: bids at /proj/lab/lna (17.5 GB, external)",
+                     "196 links: 39 under rawbids/, 156 under derivatives/brainmask_camri_rat_bold/, 1 under sourcedata/atlases/",
+                     "rawbids/sub-000 -> /proj/lab/rawbids/sub-000",
+                     "camri 2.0.0a0+68b4d2d", "container afni: sha256:aaa", "container camri: sha256:ccc",
+                     "pipeline fmriprep (rat, bold): camri_version not yet registered",
+                     "fmriprep.brainmask-first (default, production)",
+                     "mode slurm, account rc_lab_pi, partition general",
+                     "derivatives/brainmask_camri_rat_bold:", "derivatives/fmriprep_camri_rat_bold:",
+                     "produced by pipeline fmriprep (rat, bold)"):
+            self.assertIn(part, text)
+        for wrong in ("None -> None", "not pinned", "not set", "template unknown", "none declared"):
+            self.assertNotIn(wrong, text)
+
+    def test_link_summary_does_not_grow_with_links(self):
+        sizes = []
+        for n in (60, 196, 2000):
+            (self.proj / "camri-manifest.yaml").write_text(manifest_v2(n))
+            pg.generate_projects(self.s)
+            sizes.append(len((self.proj / "CLAUDE.md").read_bytes()))
+        self.assertLessEqual(max(sizes) - min(sizes), 16, sizes)
+        self.assertFalse(pg.generate_projects(self.s)[0]["changed"], "second sync is a no-op")
 
     def test_link_project_generates(self):
         from dureh_core import sitelinks
