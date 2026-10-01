@@ -156,17 +156,21 @@ def worktree_repair(site: Site, actor: str, wi: str) -> dict:
     wt = site.worktrees / wi
     if not wt.exists():
         git(["worktree", "prune"], root)
-        state = "pruned"
-    elif worktree_problem(wt, wi) is None:
-        return {"wi": wi, "worktree": str(wt), "state": "ok"}
+        state, env = "pruned", {"env": "ok"}
     else:
-        proc = subprocess.run(["git", "worktree", "repair", str(wt)], cwd=root, capture_output=True, text=True)
-        err = worktree_problem(wt, wi)
-        if err:
-            fail(f"repair of {wt} failed: {err} {(proc.stderr or '').strip()[-300:]}")
-        state = "repaired"
-    led.event("worktree.repaired", actor, wi, {"worktree": str(wt), "target": p["target"], "state": state})
-    return {"wi": wi, "worktree": str(wt), "state": state}
+        if worktree_problem(wt, wi) is None:
+            state = "ok"
+        else:
+            proc = subprocess.run(["git", "worktree", "repair", str(wt)], cwd=root, capture_output=True, text=True)
+            err = worktree_problem(wt, wi)
+            if err:
+                fail(f"repair of {wt} failed: {err} {(proc.stderr or '').strip()[-300:]}")
+            state = "repaired"
+        env = _repair_env(site, wt, p["target"])
+    if state != "ok" or env["env"] == "rebuilt":
+        led.event("worktree.repaired", actor, wi, {"worktree": str(wt), "target": p["target"], "state": state,
+                                                   **{k: v for k, v in env.items() if k != "hint"}})
+    return {"wi": wi, "worktree": str(wt), "state": state, **env}
 
 
 def _base_of(site: Site, wi: str) -> str | None:
@@ -353,14 +357,89 @@ def changed_paths(site: Site, wi: str) -> tuple[list[str], str | None]:
     if not base:
         fail(f"no recorded base revision for {wi}")
     head = git(["rev-parse", "HEAD"], wt)
-    names = set(filter(None, git(["diff", "--name-only", f"{base}..{head}"], wt).splitlines()))
-    # untracked and ignored files are outputs too; only interpreter caches are exempt
-    for line in git(["status", "--porcelain", "--untracked-files=all", "--ignored"], wt).splitlines():
-        if line:
-            name = line[3:].strip()
-            if not CACHE_RE.search(name):
-                names.add(name)
+    # -z: paths come unquoted and exact (git quotes names with spaces or special characters otherwise)
+    names = {n for n in _git_z(["diff", "--name-only", "-z", f"{base}..{head}"], wt) if not CACHE_RE.search(n)}
+    # untracked and ignored files are outputs too; only interpreter caches and virtualenvs are exempt
+    entries = _git_z(["status", "--porcelain", "-z", "--untracked-files=all", "--ignored"], wt)
+    i = 0
+    while i < len(entries):
+        entry = entries[i]
+        i += 1
+        if len(entry) < 4:
+            continue
+        if entry[0] in "RC":
+            i += 1  # the next field is the rename/copy source
+        name = entry[3:]
+        if not CACHE_RE.search(name):
+            names.add(name)
     return sorted(names), head
+
+
+def _git_z(args: list[str], cwd: Path) -> list[str]:
+    proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        fail(f"git {' '.join(args[:2])} failed: {proc.stderr.strip()[-300:]}")
+    return [x for x in proc.stdout.split("\0") if x]
+
+
+def stale_venv(root: Path) -> str | None:
+    """The first missing interpreter named by a script shebang in <root>/.venv/bin, or None."""
+    bindir = Path(root) / ".venv" / "bin"
+    if not bindir.is_dir():
+        return None
+    for f in sorted(bindir.iterdir()):
+        if f.is_symlink() or not f.is_file():
+            continue
+        try:
+            with open(f, "rb") as fh:
+                first = fh.readline(4096)
+        except OSError:
+            continue
+        if first.startswith(b"#!"):
+            interp = first[2:].strip().split(b" ")[0].decode("utf-8", "replace")
+            if interp.startswith("/") and not os.path.exists(interp):
+                return interp
+    return None
+
+
+def _env_rebuild_command(site: Site, target: str) -> str | None:
+    for key in ("modules", "projects"):
+        for entry in site.config.get(key) or []:
+            if entry.get("path") == target and entry.get("env_rebuild"):
+                return entry["env_rebuild"]
+    return (site.config.get("env") or {}).get("rebuild")
+
+
+def _repair_env(site: Site, root: Path, target: str) -> dict:
+    stale = stale_venv(root)
+    if not stale:
+        return {"env": "ok"}
+    cmd = _env_rebuild_command(site, target)
+    if not cmd:
+        return {"env": "stale", "stale_interpreter": stale,
+                "hint": f"set `env_rebuild` on the {target} entry in config.json (or `env.rebuild`), for example"
+                        " \"uv sync --frozen --all-groups\", then run the repair again; the Director owns config.json"}
+    proc = subprocess.run(cmd, shell=True, cwd=root, capture_output=True, text=True, timeout=3600, env=site.env())
+    if proc.returncode != 0:
+        fail(f"environment rebuild `{cmd}` failed in {root} (exit {proc.returncode}): "
+             f"{(proc.stderr or proc.stdout).strip()[-600:]}")
+    still = stale_venv(root)
+    if still:
+        fail(f"environment rebuild `{cmd}` ran but {root}/.venv still names {still}")
+    return {"env": "rebuilt", "command": cmd, "stale_interpreter": stale}
+
+
+def env_repair(site: Site, actor: str, target: str) -> dict:
+    """Rebuild the virtualenv of a target's main tree (for example after the site moved)."""
+    if site.org.role(actor).kind != "desk":
+        fail("only the desk repairs environments")
+    root = target_root(site, target)
+    if root is None or not root.is_dir():
+        fail(f"unknown target {target!r}")
+    r = {"target": target, **_repair_env(site, root, target)}
+    if r["env"] == "rebuilt":
+        Ledger(site).event("env.repaired", actor, None, {k: v for k, v in r.items() if k != "hint"})
+    return r
 
 
 def verify_wi(site: Site, actor: str, wi: str, timeout: int = 1800) -> dict:
@@ -382,6 +461,10 @@ def verify_wi(site: Site, actor: str, wi: str, timeout: int = 1800) -> dict:
     wt = site.worktrees / wi
     troot = target_root(site, p["target"]) or site.root
     cwd = wt if wt.is_dir() else troot
+    stale = stale_venv(cwd)
+    if stale:
+        fail(f"{wi}: stale virtualenv in {cwd}/.venv (its scripts name {stale}, which does not exist); checks would run"
+             f" another environment. Repair first: `dureh worktree repair --wi {wi}`. Nothing was recorded.")
     missing = [o for o in p.get("outputs", []) if not (Path(cwd) / o).exists()]  # the work root only
     for cmd in p.get("checks") or []:
         t0 = time.monotonic()

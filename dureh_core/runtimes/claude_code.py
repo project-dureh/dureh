@@ -182,7 +182,8 @@ def _claude_md(site: Site) -> str:
               f" For a bundle the manager staged, run `{dureh} verify --wi <bundle>` (a recount of its items' states); promoting the bundle merges any verified items not yet promoted.",
               f"6. Findings are records, not work items: `{dureh} ledger add finding --summary ... --evidence-level measured|reviewed|inferred|proposed`.",
               f"7. Before moving or deleting a path, run `{dureh} path-refs <path>`. Delete only through `{dureh} purge`."
-              f" If a dispatch reports a broken worktree (for example after the site moved), run `{dureh} worktree repair --wi <WI>`; never edit `.git` files.",
+              f" If a dispatch or verify reports a broken worktree or a stale `.venv` (for example after the site moved), run `{dureh} worktree repair --wi <WI>`"
+              f" (or `--target <target>` for a main tree's `.venv`); it rebuilds the environment with `env_rebuild` from config.json. Never edit `.git` files or rebuild environments by hand.",
               f"8. Compute runs only as scheduler jobs through `{dureh} slurm submit`. External pushes only through `{dureh} push` with a Director decision."
               f" Verified checkpoints reach `derivatives/` only through `{dureh} promote`, run by a dispatched data-steward.",
               f"9. Self-test the harness and this site with `{dureh} verify --self` after any harness or package update.",

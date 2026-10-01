@@ -331,9 +331,11 @@ def cmd_authorize_write(a):
 
 
 def cmd_worktree(a):
-    from .workflow import worktree_repair
+    from .workflow import env_repair, worktree_repair
 
-    _print(worktree_repair(_site(a), _actor(a), a.wi))
+    if bool(a.wi) == bool(a.target):
+        fail("give exactly one of --wi (a WI worktree) or --target (a target's main tree, environment only)")
+    _print(worktree_repair(_site(a), _actor(a), a.wi) if a.wi else env_repair(_site(a), _actor(a), a.target))
 
 
 def cmd_promote(a):
@@ -557,8 +559,10 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--role", required=True)
     x.add_argument("--path", required=True)
     wt = sub.add_parser("worktree", help="WI worktrees").add_subparsers(dest="worktree_command", required=True)
-    x = add(wt, "repair", cmd_worktree, "desk: re-link a WI worktree after the site moved, or prune it if its directory is gone")
-    x.add_argument("--wi", required=True)
+    x = add(wt, "repair", cmd_worktree, "desk: re-link a WI worktree after the site moved (or prune it if its directory is"
+            " gone) and rebuild a stale .venv with the configured env_rebuild; --target rebuilds a main tree's .venv")
+    x.add_argument("--wi")
+    x.add_argument("--target")
     x.add_argument("--actor")
     x = add(sub, "promote", cmd_promote, "data-steward: promote verified checkpoints into a derivatives subdataset")
     x.add_argument("--wi", required=True)
