@@ -179,7 +179,9 @@ def _claude_md(site: Site) -> str:
               " The hook refuses any spawn without a recorded brief.",
               f"4. Stop or rework: `{dureh} dispatch stop --wi <WI> --reason ...` (the runtime stop ends the agent; the record keeps the reason).",
               f"5. Gate 2: after the checker verified the item, report it to the Director and promote with `{dureh} wi promote --wi <WI> --memo ...`."
-              f" For a bundle the manager staged, run `{dureh} verify --wi <bundle>` (a recount of its items' states); promoting the bundle merges any verified items not yet promoted.",
+              f" For a bundle the manager staged, run `{dureh} verify --wi <bundle>` (a recount of its items' states); promoting the bundle merges any verified items not yet promoted."
+              " Items whose target is `harness` or `package` are not merged: promotion leaves an opaque `contrib/c-<id>` branch for upstream to review"
+              " (and notifies upstream through the mailbox when one is configured). WI branches are named `wi/<site-id>/<WI>`; older `wi/<WI>` branches keep working.",
               f"6. Findings are records, not work items: `{dureh} ledger add finding --summary ... --evidence-level measured|reviewed|inferred|proposed`.",
               f"7. Before moving or deleting a path, run `{dureh} path-refs <path>`. Delete only through `{dureh} purge`."
               f" If a dispatch or verify reports a broken worktree or a stale `.venv` (for example after the site moved), run `{dureh} worktree repair --wi <WI>`"
@@ -669,7 +671,7 @@ def _record_spawn(led: Ledger, role: str, target: str, wi: str, digest: str, ti:
         from ..workflow import worktree_problem
 
         wt = led.site.worktrees / wi  # where the site is now; the recorded path may predate a move
-        err = worktree_problem(wt, wi)
+        err = worktree_problem(wt, wi, led.site)
         if err:
             return _deny(f"worktree {wt} is broken ({err}); the desk repairs it with `dureh worktree repair --wi {wi}`")
     try:

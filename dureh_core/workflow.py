@@ -75,7 +75,7 @@ def brief_bytes(site: Site, rec: dict, extra_children: list[dict] | None = None)
     if role.is_worker and role.write_scopes and role.isolation == "worktree":
         root = target_root(site, rec["payload"]["target"])
         if root is not None and (root / ".git").exists():
-            wt = {"worktree": str(site.worktrees / rec["id"]), "base": "0" * 40}
+            wt = {"worktree": str(site.worktrees / rec["id"]), "base": "0" * 40, "branch": wi_branch(site, rec["id"], root)}
     return len(_render_brief(site, rec, role.name, wt, {}, extra_children).encode("utf-8"))
 
 
@@ -113,30 +113,46 @@ def _create_worktree(site: Site, wi: str, target: str) -> dict:
         return {"worktree": None, "base": None, "note": "target is not a git repository; no isolated worktree"}
     wt = site.worktrees / wi
     if wt.exists():
-        err = worktree_problem(wt, wi)
+        err = worktree_problem(wt, wi, site)
         if err:
             fail(f"worktree {wt} is broken ({err}); repair it with `dureh worktree repair --wi {wi}`")
-        base = git(["rev-parse", f"wi/{wi}"], root, check=False) or None
-        return {"worktree": str(wt), "base": _base_of(site, wi) or base, "note": "reused existing worktree"}
+        branch = git(["rev-parse", "--abbrev-ref", "HEAD"], wt)
+        base = git(["rev-parse", branch], root, check=False) or None
+        return {"worktree": str(wt), "base": _base_of(site, wi) or base, "branch": branch, "note": "reused existing worktree"}
     site.worktrees.mkdir(exist_ok=True)
     base = git(["rev-parse", "HEAD"], root)
-    exists = git(["branch", "--list", f"wi/{wi}"], root)
-    if exists:
-        git(["worktree", "add", str(wt), f"wi/{wi}"], root)
+    branch = wi_branch(site, wi, root)
+    if git(["branch", "--list", branch], root):
+        git(["worktree", "add", str(wt), branch], root)
     else:
-        git(["worktree", "add", "-b", f"wi/{wi}", str(wt), base], root)
-    return {"worktree": str(wt), "base": base, "note": "new worktree"}
+        git(["worktree", "add", "-b", branch, str(wt), base], root)
+    return {"worktree": str(wt), "base": base, "branch": branch, "note": "new worktree"}
 
 
-def worktree_problem(wt: Path, wi: str) -> str | None:
-    """None when wt is a usable worktree on branch wi/<wi>; otherwise what is wrong."""
+def wi_branches(site: Site, wi: str) -> tuple[str, str]:
+    """(current name, legacy name). New WIs use wi/<site-id>/<WI> so sites never share a branch (D4)."""
+    return f"wi/{site.site_id}/{wi}", f"wi/{wi}"
+
+
+def wi_branch(site: Site, wi: str, root: Path | None = None) -> str:
+    """The branch a WI works on: a legacy wi/<WI> branch that already exists keeps being used, else the site name."""
+    new, legacy = wi_branches(site, wi)
+    if root is not None and (root / ".git").exists() and git(["branch", "--list", legacy], root, check=False) \
+            and not git(["branch", "--list", new], root, check=False):
+        return legacy
+    return new
+
+
+def worktree_problem(wt: Path, wi: str, site: Site | None = None) -> str | None:
+    """None when wt is a usable worktree on its WI branch; otherwise what is wrong."""
     if not Path(wt).is_dir():
         return f"{wt} does not exist"
     proc = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=wt, capture_output=True, text=True)
     if proc.returncode != 0:
         return (proc.stderr or proc.stdout).strip()[-300:] or "not a git worktree"
-    if proc.stdout.strip() != f"wi/{wi}":
-        return f"checked out {proc.stdout.strip()}, not wi/{wi}"
+    names = wi_branches(site, wi) if site else (f"wi/{wi}",)
+    if proc.stdout.strip() not in names:
+        return f"checked out {proc.stdout.strip()}, not {' or '.join(names)}"
     return None
 
 
@@ -158,11 +174,11 @@ def worktree_repair(site: Site, actor: str, wi: str) -> dict:
         git(["worktree", "prune"], root)
         state, env = "pruned", {"env": "ok"}
     else:
-        if worktree_problem(wt, wi) is None:
+        if worktree_problem(wt, wi, site) is None:
             state = "ok"
         else:
             proc = subprocess.run(["git", "worktree", "repair", str(wt)], cwd=root, capture_output=True, text=True)
-            err = worktree_problem(wt, wi)
+            err = worktree_problem(wt, wi, site)
             if err:
                 fail(f"repair of {wt} failed: {err} {(proc.stderr or '').strip()[-300:]}")
             state = "repaired"
@@ -273,7 +289,7 @@ def _render_brief(site: Site, rec: dict, role: str, wt: dict, entry: dict,
              f"Prepared: {utc_now()} for {role}"]
     if wt.get("worktree"):
         base = f", base {wt['base'][:12]}" if wt.get("base") else ""
-        lines.append(f"Work only in: {wt['worktree']} (branch wi/{rec['id']}{base})")
+        lines.append(f"Work only in: {wt['worktree']} (branch {wt.get('branch') or wi_branch(site, rec['id'])}{base})")
     scopes = [s for s in r.write_scopes if not s.startswith("site:")]
     if scopes:
         lines.append("You may write only: " + ", ".join(scopes))
@@ -344,7 +360,7 @@ def wi_stage(site: Site, actor: str, wi: str, summary: str) -> dict:
         head = git(["rev-parse", "HEAD"], wt)
         dirty = git(["status", "--porcelain"], wt)
         if dirty:
-            fail(f"{wi} worktree has uncommitted changes; commit them on wi/{wi} before staging:\n{dirty}")
+            fail(f"{wi} worktree has uncommitted changes; commit them on its branch before staging:\n{dirty}")
     return led.event("wi.staged", actor, wi, {"summary": summary[:4000], "head": head})
 
 
@@ -550,9 +566,12 @@ def wi_promote(site: Site, actor: str, wi: str, memo: str) -> dict:
         if head != verified["payload"].get("head") or git(["status", "--porcelain", "--untracked-files=no"], wt):
             fail(f"{wi} changed after verification; verify again before promotion")
         root = target_root(site, rec["payload"]["target"])
+        if rec["payload"]["target"] in ("harness", "package"):
+            return _contribute(site, led, actor, wi, rec, root, head, memo)
         if git(["status", "--porcelain", "--untracked-files=no"], root):
             fail(f"target {root} has uncommitted changes; promotion needs a clean main tree")
-        git(["merge", "--no-ff", "-m", f"Promote {wi}: {rec['payload']['title']}", f"wi/{wi}"], root)
+        branch = git(["rev-parse", "--abbrev-ref", "HEAD"], wt)
+        git(["merge", "--no-ff", "-m", f"Promote {wi}: {rec['payload']['title']}", branch], root)
         merge = git(["rev-parse", "HEAD"], root)
     dec = led.append("decision", "gate2", actor, wi, {"subject": f"Gate 2 {wi}", "disposition": "approve",
                                                         "by": "desk", "memo": memo,
@@ -564,7 +583,39 @@ def wi_promote(site: Site, actor: str, wi: str, memo: str) -> dict:
     return ev
 
 
+def _contribute(site: Site, led: Ledger, actor: str, wi: str, rec: dict, root: Path, head: str, memo: str) -> dict:
+    """Gate 2 for harness/package work (D2): an opaque contrib/ branch for upstream to review; nothing is merged."""
+    import secrets
+
+    branch = f"contrib/c-{secrets.token_hex(4)}"
+    git(["branch", branch, head], root)
+    dec = led.append("decision", "gate2", actor, wi, {"subject": f"Gate 2 {wi}", "disposition": "approve", "by": "desk",
+                                                        "memo": memo, "binding": {"head": head, "contribution": branch}})
+    ev = led.event("wi.promoted", actor, wi, {"merge": None, "contribution": branch, "head": head, "decision": dec["id"],
+                                              "action_class": "reversible", "compensation": f"git branch -D {branch}"},
+                   [dec["id"]])
+    if (site.config.get("upstream") or {}).get("exchange"):
+        from .upstream import notify
+
+        notify(site, f"contribution {branch} in the {rec['payload']['target']} repository at {head[:12]}: "
+                     f"{rec['payload']['title']}\n\nUpstream reviews it and merges it under its own message; the site does not merge"
+                     " harness or package work.")
+    return ev
+
+
 # ------------------------------------------------------------------ purge
+def _own_branch(site: Site, led: Ledger, wi: str, root: Path, branch: str) -> bool:
+    """This site's branch for wi: its own namespace, or a legacy name whose tip this site recorded for wi."""
+    new, legacy = wi_branches(site, wi)
+    if branch == new:
+        return True
+    if branch != legacy:
+        return False
+    tip = git(["rev-parse", branch], root, check=False)
+    recorded = {e["payload"].get(k) for e in led.events(wi) for k in ("head", "base") if e["payload"].get(k)}
+    return bool(tip) and tip in recorded
+
+
 def purge(site: Site, actor: str, wi: str, dry_run: bool = False) -> dict:
     """Remove a WI's worktree and scratch checkpoints. Validate the whole set first;
     symlinks are removed as links and their targets are never followed."""
@@ -595,9 +646,10 @@ def purge(site: Site, actor: str, wi: str, dry_run: bool = False) -> dict:
             elif it == wt:
                 root = target_root(site, tgt)
                 if root is not None and (root / ".git").exists():
+                    branch = git(["rev-parse", "--abbrev-ref", "HEAD"], wt, check=False)
                     git(["worktree", "remove", "--force", str(wt)], root)
-                    if status != "promoted":
-                        git(["branch", "-D", f"wi/{wi}"], root, check=False)
+                    if status != "promoted" and branch and _own_branch(site, led, wi, root, branch):
+                        git(["branch", "-D", branch], root, check=False)
                 if wt.exists():
                     shutil.rmtree(wt)
             else:

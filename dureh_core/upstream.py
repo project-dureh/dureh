@@ -389,6 +389,18 @@ def send(site: Site, actor: str, kind: str = "request", body_file: str | None = 
     return {"file": str(target), "copy": str(copy), "kind": kind, "refs": refs}
 
 
+def notify(site: Site, body: str) -> dict:
+    """A harness-originated notice to upstream (for example a new contribution branch)."""
+    import tempfile
+
+    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as fh:
+        fh.write(body)
+    try:
+        return send(site, "desk", "notice", fh.name)
+    finally:
+        Path(fh.name).unlink(missing_ok=True)
+
+
 def _received(site: Site) -> set[str]:
     return {e["payload"].get("file") for e in Ledger(site).load("event") if e["type"] == "upstream.received"}
 

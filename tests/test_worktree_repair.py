@@ -61,7 +61,7 @@ class WorktreeRepair(SiteCase):
         wt = self.move_site()
         r = wf.worktree_repair(self.s, "desk", self.wi)
         self.assertEqual(r["state"], "repaired")
-        self.assertEqual(git(wt, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip(), f"wi/{self.wi}")
+        self.assertEqual(git(wt, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip(), f"wi/{self.s.site_id}/{self.wi}")
         self.assertEqual(git(wt, "rev-parse", "HEAD").stdout.strip(), head)
         self.assertNotIn("prunable", git(self.site_root / "modules" / "demo", "worktree", "list").stdout)
         self.assertTrue(any(e["type"] == "worktree.repaired" for e in Ledger(self.s).events(self.wi)))

@@ -59,6 +59,18 @@ Upstream order: triage each UR, report the proposed order, site impact and wheth
 is needed to the Director, implement only after the Director confirms, then hand over the merge
 commands and a reply that states per UR what behavior changes and whether a sync is needed.
 
+## Harness and package work from a site
+
+A site may still propose harness or package changes as work items (decision D2). Gate 2 does not merge
+them: `dureh wi promote` leaves the verified head on an opaque branch `contrib/c-<8 hex>` in the harness
+or package repository (no site id, no WI number in the name), records it in the `wi.promoted` event,
+and sends upstream a `notice` through the mailbox. Upstream reviews the branch and merges it under its
+own message; the site picks the change up with the next release it syncs.
+
+WI branches are `wi/<site-id>/<WI>` (decision D4), so two sites never share a branch. Branches made by
+older harnesses (`wi/<WI>`) keep working; `dureh purge` deletes a legacy branch only when its tip is a
+commit this site recorded for that WI.
+
 ## Mailbox (DUREH-Exchange)
 
 When the Director sets `config.json` `"upstream": {"exchange": "<dir>"}` (environment variables allowed,
