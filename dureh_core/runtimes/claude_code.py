@@ -412,6 +412,72 @@ def _segments(command: str) -> list[list[str]]:
     return [s for s in segs if s]
 
 
+_GIT_READ = {"status", "log", "diff", "show", "rev-parse", "ls-files", "ls-tree", "cat-file", "blame", "grep",
+             "describe", "shortlog", "rev-list", "merge-base", "show-ref", "for-each-ref", "version", "help",
+             "whatchanged", "name-rev", "count-objects", "check-ignore", "diff-tree", "diff-files", "diff-index", "var"}
+_GIT_BRANCH_WRITE = {"-d", "-D", "-m", "-M", "-c", "-C", "-f", "--delete", "--move", "--copy", "--force",
+                     "--set-upstream-to", "-u", "--unset-upstream", "--edit-description", "-t", "--track"}
+
+
+def _git_reads(sub: str, args: list[str]) -> bool:
+    if sub in _GIT_READ:
+        return True
+    pos = [a for a in args if not a.startswith("-")]
+    if sub == "branch":
+        return not pos and not any(a.split("=")[0] in _GIT_BRANCH_WRITE for a in args)
+    if sub == "tag":
+        return not pos or any(a in ("-l", "--list") for a in args)
+    if sub in ("stash", "worktree", "notes"):
+        return bool(pos) and pos[0] in ("list", "show")
+    if sub == "reflog":
+        return not pos or pos[0] == "show"
+    if sub == "config":
+        return any(a.split("=")[0] in ("--get", "--get-all", "--get-regexp", "--list", "-l", "--show-origin") for a in args)
+    if sub == "remote":
+        return not pos or pos[0] in ("show", "get-url")
+    if sub == "submodule":
+        return not pos or pos[0] == "status"
+    return False
+
+
+def _git_check(site: Site, words: list[str], cwd: Path, agent_wi: str | None, agent_id: str | None) -> str | None:
+    """Reason to deny a git command, or None. Writes are allowed only in the bound WI's worktree or scratch."""
+    i, repo = 1, cwd
+    while i < len(words) and words[i].startswith("-"):
+        w = words[i]
+        if w.split("=")[0] in ("--git-dir", "--work-tree", "--namespace", "--exec-path"):
+            return f"git {w.split('=')[0]} cannot be checked; run git inside your WI worktree"
+        if w == "-C" and i + 1 < len(words):
+            repo = (repo / os.path.expanduser(words[i + 1])).resolve()
+            i += 2
+        elif w == "-c":
+            i += 2
+        else:
+            i += 1
+    if i >= len(words):
+        return None
+    sub, args = words[i], words[i + 1:]
+    if _git_reads(sub, args):
+        return None
+    pos = [a for a in args if not a.startswith("-")]
+    if sub == "init" and pos:
+        repo = (repo / os.path.expanduser(pos[-1])).resolve()
+    elif sub == "clone":
+        if len(pos) < 2:
+            return "git clone needs an explicit destination inside your WI worktree or scratch space"
+        repo = (repo / os.path.expanduser(pos[-1])).resolve()
+    t = classify(site, repo, cwd)
+    if t.zone == "scratch":
+        return None
+    if t.zone == "worktree":
+        if agent_id and not agent_wi:
+            return f"git {sub} writes; this agent is not bound to a work item, so it may not write any worktree"
+        if agent_wi and t.wi != agent_wi:
+            return f"git {sub} writes the worktree of {t.wi}; this agent is dispatched for {agent_wi}"
+        return None
+    return f"git {sub} writes only inside your WI worktree or scratch space (target is {t.site_rel or repo})"
+
+
 def guard_bash(site: Site, role: str, data: dict) -> dict | None:
     ti = data.get("tool_input") or {}
     command = ti.get("command") or ""
@@ -439,6 +505,8 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
             env_assign.append(words.pop(0))
         if any(a.startswith("DUREH_") for a in env_assign):
             return _deny("DUREH_* variables are set by the harness, not by the command")
+        if role != "desk" and any(a.startswith("GIT_") for a in env_assign):
+            return _deny("GIT_* variables redirect git and cannot be checked; run git inside your WI worktree")
         while words and words[0] in _WRAPPERS:
             words.pop(0)
             while words and (words[0].startswith("-") or re.match(r"^\d+[smhd]?$", words[0])):
@@ -456,6 +524,10 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
             return _deny(f"`{first}` runs only as a scheduler job; use `dureh slurm submit`")
         if first == "git" and "push" in words[1:3]:
             return _deny("pushes go through `dureh push` with a Director decision bound to the revision")
+        if first == "git" and role != "desk":
+            why = _git_check(site, words, cwd, agent_wi, agent_id)
+            if why:
+                return _deny(why)
         if first == "rm" and any(w.startswith("-") and ("r" in w or "R" in w) for w in words[1:]):
             return _deny("recursive deletion goes through `dureh purge`")
         if first == "cd" and len(words) > 1:
