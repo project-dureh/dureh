@@ -26,6 +26,7 @@ the project. Each promotion is recorded as a run record with `run_type: promotio
 destinations, the run and the resulting commit. Promotions are serialized by the ledger lock.
 
 Requires `datalad` and `git-annex` on the site's PATH (`config.json` `env.path_prepend`).
+
 ## Metadata files
 
 Top-level metadata of a derivatives dataset (`dataset_description.json`, `README`, `README.md`,

@@ -69,4 +69,11 @@ def link_project(site: Site, actor: str, name: str, source: str) -> dict:
         entry["install_error"] = (proc.stderr or proc.stdout).strip()[-500:]
     _config_add(site, "projects", entry)
     Ledger(site).event("site.project-linked", actor, None, entry)
+    entry["generated"] = _after_link(Site(site.root), name)
     return entry
+
+
+def _after_link(site: Site, name: str) -> list[dict]:
+    from . import projectgen
+
+    return projectgen.generate_projects(site, only=name)

@@ -40,6 +40,10 @@ def session_checks(site: Site) -> list[str]:
     out.append(f"unsaved state changes: {len(pending)}" if pending else "state saved")
     d = drift(site)
     out.append("adapter drift: " + "; ".join(d) if d else "adapter files match their generation manifest")
+    from .projectgen import project_drift
+
+    pd = project_drift(site)
+    out.append("project guidance drift: " + "; ".join(pd) if pd else "project guidance matches its generation manifest")
     return out
 
 
