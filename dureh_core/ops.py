@@ -16,6 +16,38 @@ TEXT_SUFFIXES = {".md", ".py", ".sh", ".yaml", ".yml", ".json", ".toml", ".txt",
 
 
 # ----------------------------------------------------------------- status
+def agent_state(led: Ledger, wi: str) -> str:
+    """State of the agent bound to the latest dispatch of a WI: running, ended or not started."""
+    evs = led.events(wi)
+    last = max((i for i, e in enumerate(evs) if e["type"] == "wi.dispatched"), default=None)
+    if last is None:
+        return "not started"
+    later = [e["type"] for e in evs[last + 1:]]
+    if "agent.finished" in later:
+        return "ended"
+    return "running" if "agent.started" in later else "not started"
+
+
+def orphaned(led: Ledger, wis: list[dict]) -> list[dict]:
+    dispatched = [w["id"] for w in wis if w["status"] == "dispatched"]
+    state = {wi: agent_state(led, wi) for wi in dispatched}
+    out = []
+    for wi in dispatched:
+        if state[wi] == "running":
+            continue
+        kids = [w["id"] for w in wis if led.get("work-item", w["id"])["payload"].get("parent") == wi]
+        running = [k for k in kids if state.get(k) == "running"]
+        if state[wi] == "not started":
+            action = f"if no agent is starting, `dispatch stop --wi {wi} --reason ...` (resuming needs Gate 1)"
+        elif running:
+            action = f"wait for {', '.join(running)}, or re-adopt with `dispatch brief --wi {wi}`"
+        else:
+            action = f"re-adopt with `dispatch brief --wi {wi}`, or release with `dispatch stop --wi {wi} --reason ...`"
+        out.append({"wi": wi, "role": led.get("work-item", wi)["payload"]["role"], "agent": state[wi],
+                    "children_running": running, "action": action})
+    return out
+
+
 def status(site: Site) -> dict:
     led = Ledger(site)
     wis = led.work_items()
@@ -32,6 +64,7 @@ def status(site: Site) -> dict:
         "by_status": {k: [f"{w['id']} {w['role']}: {w['title']}" for w in v] for k, v in sorted(by_status.items())},
         "awaiting_gate1": [w["id"] for w in wis if w["status"] == "proposed"],
         "awaiting_gate2": [w["id"] for w in wis if w["status"] == "verified"],
+        "orphaned": orphaned(led, wis),
         "active_lanes": f"{len(active_top)}/{site.limit('max_concurrent_lanes', 2)}",
         "reorg_findings": f"{len(reorg)}/{site.limit('reorg_finding_budget', 3)}",
         "findings": len(led.load("finding")),
@@ -48,6 +81,9 @@ def render_status(st: dict) -> str:
         lines.append("Gate 1 (Director approval) pending: " + ", ".join(st["awaiting_gate1"]))
     if st["awaiting_gate2"]:
         lines.append("Gate 2 (promotion) pending: " + ", ".join(st["awaiting_gate2"]))
+    for o in st.get("orphaned") or []:
+        still = f"; still running: {', '.join(o['children_running'])}" if o["children_running"] else ""
+        lines.append(f"Orphaned: {o['wi']} {o['role']} agent {o['agent']}{still} -> {o['action']}")
     for k, v in st["by_status"].items():
         lines.append(f"[{k}]")
         lines += [f"  {x}" for x in v]

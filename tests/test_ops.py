@@ -28,9 +28,10 @@ class Ops(SiteCase):
 
     def test_purge_removes_links_not_targets(self):
         self.make_module()
-        w = wf.wi_new(self.s, "desk", "t", "g", "py-writer", "modules/demo", ["a"])["id"]
+        b = wf.wi_new(self.s, "desk", "b", "g", "pm-modules", "modules/demo", ["a"])["id"]
+        w = wf.wi_new(self.s, "desk", "t", "g", "py-writer", "modules/demo", ["a"], parent=b)["id"]
         wf.wi_approve(self.s, "desk", w, "ok")
-        # a bundle is not needed for a desk-level check of purge; create the worktree directly
+        # the bundle is never dispatched here; create the worktree directly
         wf._create_worktree(self.s, w, "modules/demo")
         precious = self.tmp / "precious"
         precious.mkdir()

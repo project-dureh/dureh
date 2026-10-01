@@ -176,7 +176,9 @@ def _claude_md(site: Site) -> str:
               f"7. Before moving or deleting a path, run `{dureh} path-refs <path>`. Delete only through `{dureh} purge`.",
               f"8. Compute runs only as scheduler jobs through `{dureh} slurm submit`. External pushes only through `{dureh} push` with a Director decision.",
               f"9. Self-test the harness and this site with `{dureh} verify --self` after any harness or package update.",
-              f"10. Before the session ends, write a short handoff to `state/memory/handoff.md` (what is open, what the Director decided, what is next).", "",
+              f"10. A harness problem (not a site problem) is a finding tagged `upstream`; turn it into a request with `{dureh} upstream draft --finding <id> --type bug|change|decision|friction --severity blocking|degrading|minor`."
+              f" Track it with `{dureh} upstream list|status|export`. The Director forwards it; never work around the harness or send anything yourself.",
+              f"11. Before the session ends, write a short handoff to `state/memory/handoff.md` (what is open, what the Director decided, what is next).", "",
               "Small questions the Director asks may be answered directly. Research that needs many sources goes to `researcher`; long documents go to `doc-writer`.",
               "Reference paths are read-only. Records are append-only: correct history by appending an event, never by editing a record.", "",
               "## Core values", "", values, "",
@@ -400,6 +402,26 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
     return None
 
 
+def _record_spawn(led: Ledger, role: str, target: str, wi: str, digest: str, ti: dict) -> dict | None:
+    events = led.events(wi)
+    prepared = [e for e in events if e["type"] == "dispatch.prepared" and e["payload"].get("brief") == digest]
+    if not prepared:
+        return _deny(f"no recorded brief {digest} for {wi}")
+    if prepared[-1]["payload"].get("by") != role:
+        return _deny(f"brief {digest} was prepared by {prepared[-1]['payload'].get('by')}, not {role}")
+    consumed = [e for e in events if e["type"] in ("wi.dispatched", "checker.dispatched") and e["payload"].get("brief") == digest]
+    if consumed:
+        return _deny(f"brief {digest} was already used; prepare a new brief")
+    try:
+        etype = "checker.dispatched" if prepared[-1]["payload"].get("checking") else "wi.dispatched"
+        led.event(etype, role, wi, {"role": target, "brief": digest, "by": role,
+                                    "model": prepared[-1]["payload"].get("model"),
+                                    "background": bool(ti.get("run_in_background"))}, [prepared[-1]["id"]])
+    except DurehError as exc:
+        return _deny(str(exc))
+    return None
+
+
 def pre_tool_use(site: Site, data: dict) -> dict | None:
     tool = data.get("tool_name") or ""
     role = _role_of(site, data)
@@ -422,23 +444,8 @@ def pre_tool_use(site: Site, data: dict) -> dict | None:
         wi, brief_role, digest = m.groups()
         if brief_role != target:
             return _deny(f"the brief is for {brief_role}, not {target}")
-        events = led.events(wi)
-        prepared = [e for e in events if e["type"] == "dispatch.prepared" and e["payload"].get("brief") == digest]
-        if not prepared:
-            return _deny(f"no recorded brief {digest} for {wi}")
-        if prepared[-1]["payload"].get("by") != role:
-            return _deny(f"brief {digest} was prepared by {prepared[-1]['payload'].get('by')}, not {role}")
-        consumed = [e for e in events if e["type"] in ("wi.dispatched", "checker.dispatched") and e["payload"].get("brief") == digest]
-        if consumed:
-            return _deny(f"brief {digest} was already used; prepare a new brief")
-        try:
-            etype = "checker.dispatched" if prepared[-1]["payload"].get("checking") else "wi.dispatched"
-            led.event(etype, role, wi, {"role": target, "brief": digest, "by": role,
-                                        "model": prepared[-1]["payload"].get("model"),
-                                        "background": bool(ti.get("run_in_background"))}, [prepared[-1]["id"]])
-        except DurehError as exc:
-            return _deny(str(exc))
-        return None
+        with led.lock():
+            return _record_spawn(led, role, target, wi, digest, ti)
     if tool in WRITE_TOOLS:
         path = ti.get("file_path") or ti.get("notebook_path")
         if not path:
@@ -486,14 +493,31 @@ def subagent_start(site: Site, data: dict) -> dict | None:
     if role.startswith("foreign:"):
         return None
     led = Ledger(site)
-    started = {e["refs"][0] for e in led.load("event") if e["type"] == "agent.started" and e["refs"]}
-    pending = [e for e in led.load("event") if e["type"] in ("wi.dispatched", "checker.dispatched")
-               and e["payload"].get("role") == role and e["id"] not in started]
-    if not pending:
-        return None
-    ev = pending[0]
-    led.event("agent.started", role, ev["wi"], {"agent_id": data.get("agent_id"), "brief": ev["payload"].get("brief")}, [ev["id"]])
+    digest = _brief_in_transcript(data.get("agent_transcript_path"))
+    with led.lock():
+        events = led.load("event")
+        started = {e["refs"][0] for e in events if e["type"] == "agent.started" and e["refs"]}
+        pending = [e for e in events if e["type"] in ("wi.dispatched", "checker.dispatched")
+                   and e["payload"].get("role") == role and e["id"] not in started]
+        exact = [e for e in pending if digest and e["payload"].get("brief") == digest]
+        if not (exact or pending):
+            return None
+        ev = (exact or pending)[0]
+        led.event("agent.started", role, ev["wi"], {"agent_id": data.get("agent_id"), "brief": ev["payload"].get("brief"),
+                                                    "bound_by": "brief" if exact else "order"}, [ev["id"]])
     return None
+
+
+def _brief_in_transcript(path: str | None) -> str | None:
+    """The brief digest from the subagent's own prompt, when the runtime supplies its transcript at start."""
+    if not path:
+        return None
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            m = BRIEF_RE.search(fh.read(65536))
+    except OSError:
+        return None
+    return m.group(3) if m else None
 
 
 def subagent_stop(site: Site, data: dict) -> None:

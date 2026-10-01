@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import time
@@ -64,8 +65,9 @@ def run_self(site: Site | None, actor: str = "checker", unit: bool = True) -> di
     except Exception as exc:  # noqa: BLE001 - report any org load failure
         problems.append(f"org definition invalid: {exc}")
     if unit:
+        env = {k: v for k, v in os.environ.items() if k != "DUREH_OBSERVE"}
         proc = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", "."],
-                              cwd=HARNESS_ROOT, capture_output=True, text=True, timeout=1800)
+                              cwd=HARNESS_ROOT, capture_output=True, text=True, timeout=1800, env=env)
         tail = proc.stderr.strip().splitlines()[-3:]
         counts["unit"] = {"exit": proc.returncode, "summary": " | ".join(tail)}
         if proc.returncode != 0:
@@ -83,6 +85,6 @@ def run_self(site: Site | None, actor: str = "checker", unit: bool = True) -> di
             problems.append(f"records failed validation: {exc}")
     result = {"result": "pass" if not problems else "fail", "problems": problems, "counts": counts,
               "seconds": round(time.monotonic() - start, 2)}
-    if site is not None:
+    if site is not None and not site.observe:
         Ledger(site).append("run", "selftest", actor, None, {"run_type": "selftest", "status": result["result"], **result})
     return result

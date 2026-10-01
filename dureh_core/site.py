@@ -10,7 +10,8 @@ from .util import fail, read_json
 
 RECORD_KINDS = ("work-item", "run", "decision", "session", "finding", "event")
 READ_ONLY_SITE_DIRS = ("references", "startup")
-TOOL_NAMES = ("wi", "dispatch", "verify", "ledger", "status", "slurm", "path-refs", "purge", "push", "usage")
+_OBSERVE_DIRS: set = set()
+TOOL_NAMES = ("wi", "dispatch", "verify", "ledger", "status", "slurm", "path-refs", "purge", "push", "usage", "upstream")
 
 
 class Site:
@@ -56,7 +57,21 @@ class Site:
     def site_id(self) -> str:
         return self.config.get("site", {}).get("id") or "unknown-site"
 
+    @property
+    def observe(self) -> bool:
+        return os.environ.get("DUREH_OBSERVE") == "1"
+
     def index_path(self) -> Path:
+        if self.observe:
+            import atexit
+            import shutil
+            import tempfile
+
+            private = Path(tempfile.gettempdir()) / f"dureh-observe-{os.getpid()}-{self.site_id}"
+            if private not in _OBSERVE_DIRS:
+                _OBSERVE_DIRS.add(private)
+                atexit.register(shutil.rmtree, private, True)
+            return private / "index.sqlite"
         configured = (self.config.get("index") or {}).get("path")
         if configured:
             return Path(os.path.expandvars(configured)).expanduser()

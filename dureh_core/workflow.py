@@ -35,15 +35,48 @@ def wi_new(site: Site, actor: str, title: str, goal: str, role: str, target: str
         fail(f"target must be harness, package, site, modules/<name>, or projects/<name>: {target!r}")
     if not acceptance:
         fail("a work item needs at least one acceptance criterion")
-    if parent:
-        Ledger(site).get("work-item", parent)
+    led = Ledger(site)
+    prec = led.get("work-item", parent) if parent else None
+    if prec:
+        owner = prec["payload"]["role"]
+        if role not in org.role(owner).may_dispatch and role not in org.role(actor).may_dispatch:
+            fail(f"parent {parent} is owned by {owner}, which cannot dispatch {role}")
+    elif role not in org.role(actor).may_dispatch:
+        managers = [m for m in org.dispatcher_of(role) if org.role(m).is_manager]
+        fail(f"desk cannot dispatch {role}; create it with --parent <bundle> owned by one of: {', '.join(managers) or 'none'}")
     payload = {"title": title, "goal": goal, "role": role, "target": target, "acceptance": acceptance,
                "lane": lane, "bundle": bundle, "value": value, "checks": list(checks or []),
                "constraints": list(constraints or []), "parent": parent, "source": source,
                "scope_frozen": lane == "reorg", "academic": bool(academic)}
     if outputs:
         payload["outputs"] = list(outputs)
-    return Ledger(site).new_work_item(actor, payload)
+    draft = {"id": "WI-0000", "payload": payload}
+    n, limit = brief_bytes(site, draft), _brief_limit(site, r)
+    if n > limit:
+        fail(f"brief would be {n} bytes, over the {limit}-byte limit; shorten goal, acceptance, checks or constraints, "
+             "or split the work item")
+    if prec and org.role(prec["payload"]["role"]).is_manager:
+        prole = org.role(prec["payload"]["role"])
+        n, limit = brief_bytes(site, prec, extra_children=[draft]), _brief_limit(site, prole)
+        if n > limit:
+            fail(f"bundle {parent} brief would be {n} bytes, over the {limit}-byte limit with this item; "
+                 "shorten the item titles or split the bundle")
+    return led.new_work_item(actor, payload)
+
+
+def _brief_limit(site: Site, role) -> int:
+    return int(site.limit("manager_brief_bytes" if role.is_manager else "worker_brief_bytes", 2048))
+
+
+def brief_bytes(site: Site, rec: dict, extra_children: list[dict] | None = None) -> int:
+    """Size of the brief `dispatch brief` would render for this record, without creating a worktree."""
+    role = site.org.role(rec["payload"]["role"])
+    wt = {"worktree": None, "base": None}
+    if role.is_worker and role.write_scopes and role.isolation == "worktree":
+        root = target_root(site, rec["payload"]["target"])
+        if root is not None and (root / ".git").exists():
+            wt = {"worktree": str(site.worktrees / rec["id"]), "base": "0" * 40}
+    return len(_render_brief(site, rec, role.name, wt, {}, extra_children).encode("utf-8"))
 
 
 def wi_approve(site: Site, actor: str, wi: str, memo: str, by: str = "Director") -> dict:
@@ -167,7 +200,7 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None) -> 
         wt = {"worktree": str(site.worktrees / wi) if checking and (site.worktrees / wi).is_dir() else None,
               "base": None, "note": "role writes no files"}
     text = _render_brief(site, rec, role.name, wt, entry)
-    limit = int(site.limit("manager_brief_bytes" if role.is_manager else "worker_brief_bytes", 2048))
+    limit = _brief_limit(site, role)
     body = text.encode("utf-8")
     if len(body) > limit:
         fail(f"brief for {wi} is {len(body)} bytes, over the {limit}-byte limit; split the work item")
@@ -180,7 +213,8 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None) -> 
             "subagent_type": role.name}
 
 
-def _render_brief(site: Site, rec: dict, role: str, wt: dict, entry: dict) -> str:
+def _render_brief(site: Site, rec: dict, role: str, wt: dict, entry: dict,
+                  extra_children: list[dict] | None = None) -> str:
     p = rec["payload"]
     org = site.org
     r = org.role(role)
@@ -219,6 +253,9 @@ def _render_brief(site: Site, rec: dict, role: str, wt: dict, entry: dict) -> st
         lines.append("\nBundle work items (dispatch each with the brief tool, one worker per item):")
         for k in kids:
             lines.append(f"- {k['id']} [{led.wi_status(k['id'])['status']}] {k['payload']['role']}: {k['payload']['title']}")
+        for k in extra_children or []:
+            lines.append(f"- {k['id']} [proposed] {k['payload']['role']}: {k['payload']['title']}")
+        kids = kids + list(extra_children or [])
         if not kids:
             lines.append("- none yet; report back to the desk with the split you propose")
         lines += ["", "How to run the bundle:",

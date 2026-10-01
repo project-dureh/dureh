@@ -2,6 +2,8 @@
 status projection. Records are authoritative; the index never is."""
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import hashlib
 import json
 import os
@@ -58,6 +60,8 @@ class Ledger:
 
     def append(self, kind: str, type_: str, actor: str, wi: str | None, payload: dict,
                refs: list[str] | None = None, record_id: str | None = None) -> dict:
+        if self.site.observe:
+            fail(f"observe mode: refusing to append a {kind} record ({type_})")
         if not isinstance(payload, dict):
             fail("payload must be a JSON object")
         if not actor or not type_:
@@ -96,6 +100,17 @@ class Ledger:
             fail(f"record store is missing; initialize the site first: {directory}")
         write_create_only(directory / f"{record['id']}.json", dumps(record).encode("utf-8"), 0o644)
         return record
+
+    @contextlib.contextmanager
+    def lock(self):
+        """Exclusive across processes, for read-decide-append sequences run by concurrent hooks."""
+        self.site.worktrees.mkdir(exist_ok=True)
+        with open(self.site.worktrees / ".ledger.lock", "a") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
 
     def event(self, type_: str, actor: str, wi: str | None = None, payload: dict | None = None,
               refs: list[str] | None = None) -> dict:

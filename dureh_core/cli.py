@@ -336,8 +336,11 @@ def cmd_artifact_write(a):
 # ------------------------------------------------------------------- parser
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="dureh", description="DUREH harness tools: wi, dispatch, verify, ledger, status, "
-                                "slurm, path-refs, purge, push, usage (plus install, adapter, hook).")
+                                "slurm, path-refs, purge, push, usage, upstream (plus install, adapter, hook).")
     p.add_argument("--site", help="installed site directory (or DUREH_SITE)")
+    p.add_argument("--observe", action="store_true",
+                   help="read-only: allow only status, wi show/list, ledger query, upstream list, path-refs, usage, "
+                        "verify --self; never record anything (or DUREH_OBSERVE=1)")
     sub = p.add_subparsers(dest="command", required=True)
 
     def add(parent, name, func, help_):
@@ -515,9 +518,25 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
+OBSERVE_ALLOWED = {("status", None), ("wi", "show"), ("wi", "list"), ("ledger", "query"), ("upstream", "list"),
+                   ("path-refs", None), ("usage", None), ("verify", None)}
+
+
+def _check_observe(args) -> None:
+    if args.observe:
+        os.environ["DUREH_OBSERVE"] = "1"
+    if os.environ.get("DUREH_OBSERVE") != "1":
+        return
+    sub = getattr(args, f"{args.command.replace('-', '_')}_command", None)
+    name = f"{args.command} {sub}" if sub else args.command
+    if (args.command, sub) not in OBSERVE_ALLOWED or (args.command == "verify" and not args.self):
+        fail(f"observe mode: `{name}` is not a read-only command; ask the desk to run it")
+
+
 def main(argv=None) -> int:
     try:
         args = parser().parse_args(argv)
+        _check_observe(args)
         args.func(args)
         return 0
     except DurehError as exc:
