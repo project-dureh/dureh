@@ -74,11 +74,21 @@ project data.
 
 When a UR's `Status` reaches `landed <rev>`:
 
-1. Run `dureh adapter sync` to pull the new harness revision's changes into the site's startup
-   package (adapter config, role definitions, hooks) without hand-editing generated files.
-2. Run `dureh verify --self` to self-test the harness and this site against the synced revision.
+1. `dureh adapter sync` does not fetch anything. It regenerates the site's adapter files (`bin/dureh`,
+   `CLAUDE.md`, `.claude/`) from the harness checkout that `bin/dureh` runs, and re-pins
+   `deployment.json` to that checkout's revision. Confirm the checkout is at the landed rev first;
+   until release checkouts exist, the Director updates it.
+2. Run `dureh verify --self` to self-test the harness and this site against that revision.
 3. Only after both succeed, resume or re-open any WI that was waiting on the change, citing the
    landed rev and the `verify --self` result as evidence.
+
+## Upstream access to a site
+
+Upstream developers inspect a site only in observe mode: `dureh --site <site> --observe <command>`
+(or `DUREH_OBSERVE=1`). It allows `status`, `wi show`, `wi list`, `ledger query`, `upstream list`,
+`path-refs`, `usage` and `verify --self`; every other command is refused, records refuse appends,
+and `verify --self` records no run and builds its index in a private temporary directory. Observe
+mode prevents mistakes; it is not a security boundary.
 
 ## Source
 
