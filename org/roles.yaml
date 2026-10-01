@@ -86,10 +86,11 @@ roles:
   data-steward:
     kind: worker
     tier: worker
-    output: DataLad structure and project metadata (init, subdataset registration, links, manifest).
-    never: Data content, pipeline execution, code.
+    output: DataLad structure and project metadata (init, subdataset registration, links, manifest), and promotion of verified results into derivatives/.
+    never: Editing sourcedata or raw BIDS data, pipeline execution, code.
     may_dispatch: []
     write_scopes:
+      - projects/*/derivatives/**
       - projects/*/camri-manifest.yaml
       - projects/*/dataset_description.json
       - projects/*/.datalad/**
