@@ -1,4 +1,5 @@
 """UR-20260930-03: concurrently spawned workers must each bind to their own WI."""
+import json
 import multiprocessing as mp
 import unittest
 
@@ -8,11 +9,12 @@ from dureh_core import workflow as wf
 from dureh_core.records import Ledger
 
 
-def _start(site_root, agent_id, barrier):
+def _start(site_root, agent_id, barrier, session=None):
     from dureh_core.site import Site
 
     barrier.wait()
-    hook(Site(site_root), hook_event_name="SubagentStart", agent_type="py-writer", agent_id=agent_id)
+    extra = {"transcript_path": session} if session else {}
+    hook(Site(site_root), hook_event_name="SubagentStart", agent_type="py-writer", agent_id=agent_id, **extra)
 
 
 class AgentBinding(SiteCase):
@@ -55,16 +57,27 @@ class AgentBinding(SiteCase):
         hook(self.s, hook_event_name="SubagentStart", agent_type="py-writer", agent_id="a-a")
         self.assertEqual(self.bound(), {"a-b": second, "a-a": self.items[0]})
 
-    def test_concurrent_starts_bind_distinct_items(self):
+    def concurrent(self, session=None):
         ctx = mp.get_context("fork")
         barrier = ctx.Barrier(2)
-        procs = [ctx.Process(target=_start, args=(str(self.site_root), aid, barrier)) for aid in ("a-1", "a-2")]
+        procs = [ctx.Process(target=_start, args=(str(self.site_root), aid, barrier, session)) for aid in ("a-1", "a-2")]
         for p in procs:
             p.start()
         for p in procs:
             p.join(30)
-        self.assertEqual(sorted(self.bound().values()), sorted(self.items))
 
+    def test_concurrent_starts_with_transcripts_bind_each_to_its_own_brief(self):
+        session = self.tmp / "sess.jsonl"
+        for aid, wi in (("a-1", self.items[1]), ("a-2", self.items[0])):
+            t = session.with_suffix("") / "subagents" / f"agent-{aid}.jsonl"
+            t.parent.mkdir(parents=True, exist_ok=True)
+            t.write_text(json.dumps({"message": {"content": self.briefs[wi]}}) + "\n")
+        self.concurrent(str(session))
+        self.assertEqual(self.bound(), {"a-1": self.items[1], "a-2": self.items[0]})
+
+    def test_concurrent_starts_without_transcripts_never_guess(self):
+        self.concurrent()
+        self.assertEqual(self.bound(), {})
 
 if __name__ == "__main__":
     unittest.main()

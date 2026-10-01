@@ -295,6 +295,8 @@ def cmd_upstream(a):
         else:
             for r in rows:
                 print(f"{r['id']}\t{r['type']}\t{r['severity']}\t{r['status']}")
+    elif a.upstream_command == "message":
+        sys.stdout.write(upstream.message(site))
     elif a.upstream_command == "status":
         _print(upstream.status(site, actor, a.ur, a.to, a.rev))
     else:
@@ -339,7 +341,7 @@ def parser() -> argparse.ArgumentParser:
                                 "slurm, path-refs, purge, push, usage, upstream (plus install, adapter, hook).")
     p.add_argument("--site", help="installed site directory (or DUREH_SITE)")
     p.add_argument("--observe", action="store_true",
-                   help="read-only: allow only status, wi show/list, ledger query, upstream list, path-refs, usage, "
+                   help="read-only: allow only status, wi show/list, ledger query, upstream list/message, path-refs, usage, "
                         "verify --self; never record anything (or DUREH_OBSERVE=1)")
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -497,6 +499,7 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--actor")
     x = add(up, "list", cmd_upstream, "list upstream requests with id, type, severity, Status")
     x.add_argument("--json", action="store_true")
+    add(up, "message", cmd_upstream, "print the paste-ready message the Director forwards upstream (writes nothing)")
     x = add(up, "status", cmd_upstream, "record a Status transition for an upstream request (desk)")
     x.add_argument("--ur", required=True)
     x.add_argument("--to", required=True, choices=["sent", "accepted", "declined", "landed"])
@@ -518,7 +521,7 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
-OBSERVE_ALLOWED = {("status", None), ("wi", "show"), ("wi", "list"), ("ledger", "query"), ("upstream", "list"),
+OBSERVE_ALLOWED = {("status", None), ("wi", "show"), ("wi", "list"), ("ledger", "query"), ("upstream", "list"), ("upstream", "message"),
                    ("path-refs", None), ("usage", None), ("verify", None)}
 
 

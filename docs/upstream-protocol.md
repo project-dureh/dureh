@@ -27,7 +27,11 @@ developers in one uniform, traceable form, so the harness improves from real use
    directly observed (command, output, path, harness rev); otherwise `reviewed` or `inferred`.
 2. **UR (upstream request)**: the desk writes `notes/upstream/UR-<YYYYMMDD>-<NN>.md`, one issue per
    file, from the template below.
-3. **Forward**: the Director forwards it upstream. Update `Status` and append the date.
+3. **Forward**: the desk runs `dureh upstream message` and gives the Director its output verbatim in
+   one fenced code block (and saves it as `notes/upstream/FORWARD-<YYYYMMDD>.md`). The message lists
+   new requests (`Status: open`) and those awaiting a reply or a landing; landed, declined and
+   withdrawn requests are omitted. The Director pastes it upstream. Then set `Status: sent <date>`.
+   Do the same after recording a reply, so the next message reflects it.
 4. **Decision**: record the upstream answer or Director judgment with `dureh ledger add decision
    --ref <finding id> --disposition approve|revise|defer|reject|record`.
 5. **Landed**: once a harness revision contains the change, set `Status: landed <rev>`, run

@@ -136,6 +136,74 @@ def list_requests(site: Site) -> list[dict]:
     return out
 
 
+CLOSED = ("landed", "declined", "withdrawn")
+SEVERITY_ORDER = {s: i for i, s in enumerate(SEVERITIES)}
+
+
+def _title(text: str, ur: str) -> str:
+    first = text.splitlines()[0] if text else ""
+    return first.split(":", 1)[1].strip() if first.startswith(f"# {ur}:") else ""
+
+
+def _request_line(text: str) -> str:
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() == "## Request":
+            for nxt in lines[i + 1:]:
+                if nxt.startswith("## "):
+                    return ""
+                if nxt.strip():
+                    line = nxt.strip()
+                    return line if len(line) <= 200 else line[:197] + "..."
+    return ""
+
+
+def message(site: Site) -> str:
+    """Paste-ready text the Director forwards upstream. Reads the UR files only; writes nothing."""
+    dep = site.root / "deployment.json"
+    rev = ""
+    if dep.is_file():
+        import json
+
+        rev = (json.loads(dep.read_text(encoding="utf-8")).get("harness") or {}).get("rev") or ""
+    rev = (rev or git_revision(HARNESS_ROOT))[:7]
+    new, waiting = [], []
+    for path in sorted(notes_dir(site).glob("UR-*.md")) if notes_dir(site).is_dir() else []:
+        if not UR_ID.match(path.stem):
+            continue
+        text = path.read_text(encoding="utf-8")
+        st = _field(text, "Status")
+        word = st.split()[0].strip(",;:").lower() if st else "open"
+        if word in CLOSED:
+            continue
+        item = {"id": path.stem, "title": _title(text, path.stem), "type": _field(text, "Type"),
+                "severity": _field(text, "Severity").split()[0] if _field(text, "Severity") else "",
+                "status": st, "request": _request_line(text)}
+        (new if word == "open" else waiting).append(item)
+    if not new and not waiting:
+        return f"No open upstream requests at {site.root.name} (harness rev {rev}).\n"
+    new.sort(key=lambda r: (SEVERITY_ORDER.get(r["severity"], 9), r["id"]))
+    lines = [f"Upstream requests from {site.root.name} (site {site.site_id}, harness rev {rev}).",
+             f"Details, evidence and exact diffs: {notes_dir(site)}/<UR>.md", ""]
+    n = 0
+    if new:
+        lines.append("NEW")
+        for r in new:
+            n += 1
+            lines.append(f"{n}. {r['id']} ({r['type']}, {r['severity']}): {r['title']}")
+            if r["request"]:
+                lines.append(f"   Request: {r['request']}")
+        lines.append("")
+    if waiting:
+        lines.append("AWAITING REPLY OR LANDING")
+        for r in waiting:
+            n += 1
+            lines.append(f"{n}. {r['id']} ({r['severity']}): {r['title']}; status: {r['status']}")
+        lines.append("")
+    lines.append("Please reply per UR (accepted, declined or revised) and give the harness rev when a change lands.")
+    return "\n".join(lines) + "\n"
+
+
 def status(site: Site, actor: str, ur: str, to: str, rev: str | None = None) -> dict:
     """Append event `upstream.status` and update the Status line. Refuses invalid transitions."""
     _require_desk(site, actor)

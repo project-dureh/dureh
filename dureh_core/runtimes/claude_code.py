@@ -177,7 +177,9 @@ def _claude_md(site: Site) -> str:
               f"8. Compute runs only as scheduler jobs through `{dureh} slurm submit`. External pushes only through `{dureh} push` with a Director decision.",
               f"9. Self-test the harness and this site with `{dureh} verify --self` after any harness or package update.",
               f"10. A harness problem (not a site problem) is a finding tagged `upstream`; turn it into a request with `{dureh} upstream draft --finding <id> --type bug|change|decision|friction --severity blocking|degrading|minor`."
-              f" Track it with `{dureh} upstream list|status|export`. The Director forwards it; never work around the harness or send anything yourself.",
+              f" Track it with `{dureh} upstream list|status|export`. The Director forwards it; never work around the harness or send anything yourself."
+              f" Whenever you report to upstream (new requests, replies received, or a status change), finish by running `{dureh} upstream message`"
+              " and give the Director its output verbatim in one fenced code block, ready to copy and paste; save the same text as `notes/upstream/FORWARD-<YYYYMMDD>.md`.",
               f"11. Before the session ends, write a short handoff to `state/memory/handoff.md` (what is open, what the Director decided, what is next).", "",
               "Small questions the Director asks may be answered directly. Research that needs many sources goes to `researcher`; long documents go to `doc-writer`.",
               "Reference paths are read-only. Records are append-only: correct history by appending an event, never by editing a record.", "",
@@ -272,6 +274,21 @@ def _deny(reason: str, event: str = "PreToolUse") -> dict:
                                    "permissionDecisionReason": f"DUREH: {reason}"}}
 
 
+def _write_decision(site: Site, role: str, path: Path, cwd: Path, agent_wi: str | None,
+                    agent_id: str | None) -> tuple[bool, str]:
+    if agent_id and not agent_wi and classify(site, path, cwd).zone == "worktree":
+        return False, ("this agent is not bound to a work item (no DUREH-BRIEF found in its transcript and "
+                       "more than one live dispatch for its role); stop it and re-dispatch")
+    return write_decision(site, role, path, cwd, agent_wi)
+
+
+def _agent_brief(led: Ledger, agent_id: str | None) -> str | None:
+    for ev in reversed(led.load("event")):
+        if ev["type"] == "agent.started" and ev["payload"].get("agent_id") == agent_id:
+            return ev["payload"].get("brief")
+    return None
+
+
 def _agent_wi(led: Ledger, agent_id: str | None) -> str | None:
     if not agent_id:
         return None
@@ -302,8 +319,76 @@ _REDIRECTS = {">", ">>", "&>", ">|", "2>", "2>>", "1>", "&>>"}
 _WRAPPERS = {"timeout", "nice", "env", "command", "time", "stdbuf", "ionice", "xargs"}
 
 
+_INTERPRETERS = {"bash", "sh", "zsh", "dash", "ksh", "fish", "python", "python3", "perl", "ruby", "node", "Rscript",
+                 "ssh", "su", "sudo", "eval", "source", ".", "xargs", "parallel", "apptainer", "singularity"}
+
+
+def _strip_heredocs(command: str) -> str:
+    """Drop heredoc bodies (stdin data) and keep everything shells execute, tracking quotes and comments."""
+    out, i, n, quote, pending = [], 0, len(command), None, []
+    while i < n:
+        c = command[i]
+        if quote:
+            if c == "\\" and quote == '"' and i + 1 < n:
+                out.append(command[i:i + 2])
+                i += 2
+                continue
+            quote = None if c == quote else quote
+            out.append(c)
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            out.append(command[i:i + 2])
+            i += 2
+            continue
+        if c in "'\"":
+            quote = c
+        elif c == "#" and (i == 0 or command[i - 1] in " \t\n;&|"):
+            j = command.find("\n", i)
+            j = n if j < 0 else j
+            out.append(command[i:j])
+            i = j
+            continue
+        elif command.startswith("<<", i) and not command.startswith("<<<", i):
+            j = i + 2
+            strip = j < n and command[j] == "-"
+            j += strip
+            while j < n and command[j] in " \t":
+                j += 1
+            k, word = j, []
+            while k < n and command[k] not in " \t\n;&|<>()":
+                if command[k] in "'\"":
+                    e = command.find(command[k], k + 1)
+                    if e < 0:
+                        break
+                    word.append(command[k + 1:e])
+                    k = e + 1
+                else:
+                    word.append(command[k + 1] if command[k] == "\\" and k + 1 < n else command[k])
+                    k += 2 if command[k] == "\\" else 1
+            if word:
+                pending.append(("".join(word), strip))
+            out.append(command[i:k])
+            i = k
+            continue
+        elif c == "\n" and pending:
+            out.append(c)
+            i += 1
+            for delim, strip in pending:
+                while i < n:
+                    e = command.find("\n", i)
+                    line, i = command[i:e if e >= 0 else n], (e + 1 if e >= 0 else n)
+                    if (line.lstrip("\t") if strip else line) == delim:
+                        break
+            pending = []
+            continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def _segments(command: str) -> list[list[str]]:
-    lex = shlex.shlex(command.replace("\n", " ; "), posix=True, punctuation_chars=";&|<>")
+    lex = shlex.shlex(_strip_heredocs(command).replace("\n", " ; "), posix=True, punctuation_chars=";&|<>")
     lex.whitespace_split = True
     tokens = list(lex)
     segs, cur = [], []
@@ -337,7 +422,7 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
         return _deny("no background jobs (`&`) in the session; use the scheduler")
     agent_id = data.get("agent_id")
     led = Ledger(site)
-    agent_wi = _agent_wi(led, agent_id) if agent_id else None
+    agent_wi = _bind(led, role, data, "first-tool") if agent_id else None
     for seg in words_only:
         words = list(seg)
         env_assign = []
@@ -352,6 +437,10 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
         if not words:
             continue
         first = os.path.basename(words[0])
+        if role != "desk" and (first in _INTERPRETERS or re.match(r"python3?\.\d+$", first)) \
+                and any(w in ("<<", "<<-", "<<<") for w in words):
+            return _deny(f"a heredoc or here-string fed to `{first}` runs its body, which cannot be checked; "
+                         "write a script file in your scope and run it")
         if first in ALWAYS_DENY_FIRST:
             return _deny(ALWAYS_DENY_FIRST[first])
         if any(fnmatchcase(first, pat) for pat in scheduler_only):
@@ -396,7 +485,7 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
         for tgt in targets:
             if tgt in ("/dev/null", "/dev/stdout", "/dev/stderr") or tgt.startswith("&"):
                 continue
-            ok, why = write_decision(site, role, Path(os.path.expanduser(tgt)), cwd, agent_wi)
+            ok, why = _write_decision(site, role, Path(os.path.expanduser(tgt)), cwd, agent_wi, agent_id)
             if not ok:
                 return _deny(f"write to {tgt}: {why}")
     return None
@@ -450,8 +539,9 @@ def pre_tool_use(site: Site, data: dict) -> dict | None:
         path = ti.get("file_path") or ti.get("notebook_path")
         if not path:
             return _deny("write without a path")
-        agent_wi = _agent_wi(led, data.get("agent_id"))
-        ok, why = write_decision(site, role, Path(path), Path(data.get("cwd") or site.root), agent_wi)
+        agent_wi = _bind(led, role, data, "first-tool")
+        ok, why = _write_decision(site, role, Path(path), Path(data.get("cwd") or site.root), agent_wi,
+                                  data.get("agent_id"))
         if not ok:
             return _deny(why)
         t = classify(site, path)
@@ -492,32 +582,75 @@ def subagent_start(site: Site, data: dict) -> dict | None:
     role = _role_of(site, data)
     if role.startswith("foreign:"):
         return None
-    led = Ledger(site)
-    digest = _brief_in_transcript(data.get("agent_transcript_path"))
-    with led.lock():
-        events = led.load("event")
-        started = {e["refs"][0] for e in events if e["type"] == "agent.started" and e["refs"]}
-        pending = [e for e in events if e["type"] in ("wi.dispatched", "checker.dispatched")
-                   and e["payload"].get("role") == role and e["id"] not in started]
-        exact = [e for e in pending if digest and e["payload"].get("brief") == digest]
-        if not (exact or pending):
-            return None
-        ev = (exact or pending)[0]
-        led.event("agent.started", role, ev["wi"], {"agent_id": data.get("agent_id"), "brief": ev["payload"].get("brief"),
-                                                    "bound_by": "brief" if exact else "order"}, [ev["id"]])
+    _bind(Ledger(site), role, data, "start")
     return None
 
 
-def _brief_in_transcript(path: str | None) -> str | None:
-    """The brief digest from the subagent's own prompt, when the runtime supplies its transcript at start."""
-    if not path:
+def _candidates(led: Ledger, role: str) -> list[dict]:
+    """Unbound dispatches of `role` that are still live: the latest dispatch of a WI still in that state."""
+    events = led.events()
+    started = {e["refs"][0] for e in events if e["type"] == "agent.started" and e["refs"]}
+    latest: dict[tuple, dict] = {}
+    for e in events:
+        if e["type"] in ("wi.dispatched", "checker.dispatched"):
+            latest[(e["wi"], e["type"])] = e
+    live = {"wi.dispatched": "dispatched", "checker.dispatched": "staged"}
+    return [e for e in latest.values() if e["payload"].get("role") == role and e["id"] not in started
+            and led.wi_status(e["wi"])["status"] == live[e["type"]]]
+
+
+def _bind(led: Ledger, role: str, data: dict, at: str) -> str | None:
+    """Bind an agent to its WI: by the brief in its own prompt, else by order only when one candidate exists.
+
+    With a single live candidate, that dispatch must be this agent's own: its spawn recorded it and no
+    other agent can have taken it, because other agents bind only by their own brief or the same rule.
+    """
+    agent_id = data.get("agent_id")
+    if not agent_id:
         return None
-    try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            m = BRIEF_RE.search(fh.read(65536))
-    except OSError:
-        return None
-    return m.group(3) if m else None
+    digest = _brief_in_transcript(data)
+    with led.lock():
+        bound = _agent_wi(led, agent_id)
+        if bound:
+            return bound
+        pending = _candidates(led, role)
+        exact = [e for e in pending if digest and e["payload"].get("brief") == digest]
+        if exact:
+            ev, how = exact[0], "brief"
+        elif not digest and len(pending) == 1:
+            ev, how = pending[0], "order"
+        else:
+            return None
+        led.event("agent.started", role, ev["wi"], {"agent_id": agent_id, "brief": ev["payload"].get("brief"),
+                                                    "bound_by": how, "bound_at": at}, [ev["id"]])
+        return ev["wi"]
+
+
+def _transcripts(data: dict) -> list[Path]:
+    """Where the subagent's own transcript can be. Measured on Claude Code 2.1: a subagent of session
+    <dir>/<session>.jsonl writes <dir>/<session>/subagents/agent-<agent_id>.jsonl, prompt on line 1."""
+    agent_id = data.get("agent_id")
+    out = [Path(data["agent_transcript_path"])] if data.get("agent_transcript_path") else []
+    tp = data.get("transcript_path")
+    if tp and agent_id:
+        tp = Path(tp)
+        name = f"agent-{agent_id}.jsonl"
+        out += [tp] if tp.name == name else [tp.with_suffix("") / "subagents" / name,
+                                              tp.parent / "subagents" / name]
+    return out
+
+
+def _brief_in_transcript(data: dict) -> str | None:
+    """The brief digest from the subagent's own prompt (the first DUREH-BRIEF line of its transcript)."""
+    for path in _transcripts(data):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                m = BRIEF_RE.search(fh.read(65536))
+        except OSError:
+            continue
+        if m:
+            return m.group(3)
+    return None
 
 
 def subagent_stop(site: Site, data: dict) -> None:
@@ -566,11 +699,15 @@ def _audit_denial(site: Site, data: dict, out: dict | None) -> dict | None:
         role = _role_of(site, data)
         ti = data.get("tool_input") or {}
         target = ti.get("file_path") or ti.get("command") or ti.get("subagent_type") or ti.get("url") or ""
+        payload = {"tool": data.get("tool_name"), "role": role, "agent_id": data.get("agent_id"),
+                   "target": str(target)[:4000],
+                   "reason": out["hookSpecificOutput"].get("permissionDecisionReason", "")[:500]}
         try:
-            Ledger(site).event("guard.denied", role if role in site.org.roles else "desk", None,
-                               {"tool": data.get("tool_name"), "role": role, "agent_id": data.get("agent_id"),
-                                "target": str(target)[:300],
-                                "reason": out["hookSpecificOutput"].get("permissionDecisionReason", "")[:500]})
+            led = Ledger(site)
+            if data.get("agent_id"):
+                payload.update(bound_wi=_agent_wi(led, data["agent_id"]), bound_brief=_agent_brief(led, data["agent_id"]),
+                               prompt_brief=_brief_in_transcript(data))
+            led.event("guard.denied", role if role in site.org.roles else "desk", None, payload)
         except DurehError:
             pass
     return out
