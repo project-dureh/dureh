@@ -60,6 +60,12 @@ def orphaned(led: Ledger, wis: list[dict]) -> list[dict]:
     return out
 
 
+def _upstream(site: Site) -> dict:
+    from .upstream import collaboration
+
+    return collaboration(site)
+
+
 def status(site: Site) -> dict:
     led = Ledger(site)
     wis = led.work_items()
@@ -77,6 +83,7 @@ def status(site: Site) -> dict:
         "awaiting_gate1": [w["id"] for w in wis if w["status"] == "proposed"],
         "awaiting_gate2": [w["id"] for w in wis if w["status"] == "verified"],
         "orphaned": orphaned(led, wis),
+        "upstream": _upstream(site),
         "active_lanes": f"{len(active_top)}/{site.limit('max_concurrent_lanes', 2)}",
         "reorg_findings": f"{len(reorg)}/{site.limit('reorg_finding_budget', 3)}",
         "findings": len(led.load("finding")),
@@ -93,6 +100,12 @@ def render_status(st: dict) -> str:
         lines.append("Gate 1 (Director approval) pending: " + ", ".join(st["awaiting_gate1"]))
     if st["awaiting_gate2"]:
         lines.append("Gate 2 (promotion) pending: " + ", ".join(st["awaiting_gate2"]))
+    u = st.get("upstream") or {}
+    if u.get("mode") == "collaborating":
+        n = u.get("new_from_upstream") or 0
+        lines.append(f"Upstream: collaborating; open {', '.join(u['open']) or 'none'}; blocked WIs "
+                     f"{', '.join(u['blocked_wis']) or 'none'}; merge window {u['merge_window']}"
+                     + (f"; {n} new message{'s' if n != 1 else ''} from upstream (`dureh upstream inbox`)" if n else ""))
     for o in st.get("orphaned") or []:
         still = f"; still running: {', '.join(o['children_running'])}" if o["children_running"] else ""
         lines.append(f"Orphaned: {o['wi']} {o['role']} agent {o['agent']}{still} -> {o['action']}")

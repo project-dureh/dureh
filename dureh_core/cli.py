@@ -303,6 +303,16 @@ def cmd_upstream(a):
                 print(f"{r['id']}\t{r['type']}\t{r['severity']}\t{r['status']}")
     elif a.upstream_command == "message":
         sys.stdout.write(upstream.message(site))
+    elif a.upstream_command == "send":
+        _print(upstream.send(site, actor, a.kind, a.body_file))
+    elif a.upstream_command == "inbox":
+        msgs = upstream.inbox(site, actor, a.record)
+        if not msgs:
+            print("no new messages from upstream")
+        for m in msgs:
+            print(f"== {m['file']} kind={m['kind']} refs={m['refs']}\n{m['body']}\n")
+        if msgs and a.record:
+            print(f"recorded {len(msgs)} message(s) as received")
     elif a.upstream_command == "status":
         _print(upstream.status(site, actor, a.ur, a.to, a.rev))
     else:
@@ -526,6 +536,13 @@ def parser() -> argparse.ArgumentParser:
     x = add(up, "list", cmd_upstream, "list upstream requests with id, type, severity, Status")
     x.add_argument("--json", action="store_true")
     add(up, "message", cmd_upstream, "print the paste-ready message the Director forwards upstream (writes nothing)")
+    x = add(up, "send", cmd_upstream, "desk: write a message into the upstream exchange (config.json upstream.exchange)")
+    x.add_argument("--kind", default="request", choices=["request", "idle", "notice", "landed"])
+    x.add_argument("--body-file")
+    x.add_argument("--actor")
+    x = add(up, "inbox", cmd_upstream, "new messages from upstream; --record marks them received and keeps approvals")
+    x.add_argument("--record", action="store_true")
+    x.add_argument("--actor")
     x = add(up, "status", cmd_upstream, "record a Status transition for an upstream request (desk)")
     x.add_argument("--ur", required=True)
     x.add_argument("--to", required=True, choices=["sent", "accepted", "declined", "landed"])
@@ -560,7 +577,7 @@ def parser() -> argparse.ArgumentParser:
     return p
 
 
-OBSERVE_ALLOWED = {("status", None), ("wi", "show"), ("wi", "list"), ("ledger", "query"), ("upstream", "list"), ("upstream", "message"),
+OBSERVE_ALLOWED = {("status", None), ("wi", "show"), ("wi", "list"), ("ledger", "query"), ("upstream", "list"), ("upstream", "message"), ("upstream", "inbox"),
                    ("path-refs", None), ("usage", None), ("verify", None)}
 
 
@@ -571,7 +588,8 @@ def _check_observe(args) -> None:
         return
     sub = getattr(args, f"{args.command.replace('-', '_')}_command", None)
     name = f"{args.command} {sub}" if sub else args.command
-    if (args.command, sub) not in OBSERVE_ALLOWED or (args.command == "verify" and not args.self):
+    if (args.command, sub) not in OBSERVE_ALLOWED or (args.command == "verify" and not args.self) \
+            or getattr(args, "record", False):
         fail(f"observe mode: `{name}` is not a read-only command; ask the desk to run it")
 
 

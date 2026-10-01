@@ -184,7 +184,7 @@ def message(site: Site) -> str:
                 "status": st, "request": _request_line(text)}
         (new if word == "open" else waiting).append(item)
     if not new and not waiting:
-        return f"No open upstream requests at {site.root.name} (harness rev {rev}).\n"
+        return f"No open upstream requests at {site.root.name} (harness rev {rev}).\n\n" + "\n".join(_activity(site))
     new.sort(key=lambda r: (SEVERITY_ORDER.get(r["severity"], 9), r["id"]))
     lines = [f"Upstream requests from {site.root.name} (site {site.site_id}, harness rev {rev}).",
              f"Details, evidence and exact diffs: {notes_dir(site)}/<UR>.md", ""]
@@ -209,13 +209,17 @@ def message(site: Site) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _live_agents(st: dict) -> list[str]:
+    orphaned = {o["wi"] for o in st["orphaned"]}
+    return [d.split(":")[0] for d in st["by_status"].get("dispatched", []) if d.split(" ")[0] not in orphaned]
+
+
 def _activity(site: Site) -> list[str]:
     from .ops import status
 
     st = status(site)
     running = [f"{o['wi']} ({o['role']}, agent {o['agent']})" for o in st["orphaned"]]
-    dispatched = st["by_status"].get("dispatched", [])
-    live = [d.split(":")[0] for d in dispatched if d.split(" ")[0] not in {o["wi"] for o in st["orphaned"]}]
+    live = _live_agents(st)
     ready = not live and not st["orphaned"]
     lines = ["SITE ACTIVITY", f"- active lanes {st['active_lanes']}; agents running: {', '.join(live) or 'none'}"]
     if running:
@@ -301,3 +305,141 @@ def export(site: Site, actor: str, ur: str, out: str | None = None) -> dict:
                 "findings": findings, "work_items": work_items}
     write_create_only(bundle / "manifest.json", dumps(manifest).encode("utf-8"), 0o644)
     return {"ur": ur, "bundle": str(bundle), "findings": findings, "work_items": work_items}
+
+
+# ------------------------------------------------------------- mailbox (D6)
+SEND_KINDS = ("request", "idle", "notice", "landed")
+CLOSED_WORDS = CLOSED
+
+
+def exchange_dir(site: Site) -> Path:
+    raw = (site.config.get("upstream") or {}).get("exchange")
+    if not raw:
+        fail("config.json upstream.exchange is not set; the Director sets it to the DUREH-Exchange directory")
+    root = Path(site.expand(raw))
+    if not root.is_dir():
+        fail(f"the upstream exchange {root} does not exist (config.json upstream.exchange)")
+    return root / site.root.name
+
+
+def _header(text: str) -> dict:
+    lines = text.splitlines()
+    out = {}
+    if lines and lines[0].strip() == "---":
+        for line in lines[1:]:
+            if line.strip() == "---":
+                break
+            key, _, value = line.partition(":")
+            out[key.strip()] = value.strip()
+    return out
+
+
+def _body(text: str) -> str:
+    parts = text.split("\n---\n", 1)
+    return parts[1].strip() if text.startswith("---\n") and len(parts) == 2 else text.strip()
+
+
+def _messages(box: Path) -> list[Path]:
+    return sorted(box.glob("*.md")) if box.is_dir() else []
+
+
+def _open_requests(site: Site) -> list[dict]:
+    out = []
+    for r in list_requests(site):
+        word = r["status"].split()[0].strip(",;:").lower() if r["status"] else "open"
+        if word not in CLOSED_WORDS:
+            out.append(r)
+    return out
+
+
+def send(site: Site, actor: str, kind: str = "request", body_file: str | None = None) -> dict:
+    """Write one message into <exchange>/<site>/to-upstream/ and keep a FORWARD copy in notes/upstream/."""
+    _require_desk(site, actor)
+    if kind not in SEND_KINDS:
+        fail(f"--kind must be one of {', '.join(SEND_KINDS)}")
+    box = exchange_dir(site) / "to-upstream"
+    if kind == "idle":
+        from .ops import status
+
+        live = _live_agents(status(site))
+        if live:
+            fail(f"agents are running ({', '.join(live)}); report idle only when none runs")
+        body = "idle\n\n" + "\n".join(_activity(site))
+    elif body_file:
+        body = Path(body_file).read_text(encoding="utf-8")
+    elif kind == "request":
+        body = message(site)
+    else:
+        fail(f"--kind {kind} needs --body-file")
+    refs = [r["id"] for r in _open_requests(site)]
+    now = datetime.now(timezone.utc)
+    import secrets
+
+    mid = secrets.token_hex(3)
+    text = ("---\n" f"id: {mid}\nsite: {site.root.name}\nfrom: site\nkind: {kind}\nrefs: [{', '.join(refs)}]\n"
+            f"created: {now.strftime('%Y-%m-%dT%H:%M:%SZ')}\n---\n" + body.rstrip() + "\n")
+    box.mkdir(parents=True, exist_ok=True)
+    target = box / f"{now.strftime('%Y%m%dT%H%M%SZ')}-{kind}-{mid}.md"
+    write_create_only(target, text.encode("utf-8"), 0o644)
+    copy = notes_dir(site) / f"FORWARD-{now.strftime('%Y%m%d-%H%M%S')}-{kind}.md"
+    notes_dir(site).mkdir(parents=True, exist_ok=True)
+    write_create_only(copy, text.encode("utf-8"), 0o644)
+    Ledger(site).event("upstream.sent", actor, None, {"file": target.name, "kind": kind, "refs": refs})
+    return {"file": str(target), "copy": str(copy), "kind": kind, "refs": refs}
+
+
+def _received(site: Site) -> set[str]:
+    return {e["payload"].get("file") for e in Ledger(site).load("event") if e["type"] == "upstream.received"}
+
+
+def inbox(site: Site, actor: str, record: bool = False) -> list[dict]:
+    """New messages in <exchange>/<site>/from-upstream/; with record, mark them received and keep approvals."""
+    box = exchange_dir(site) / "from-upstream"
+    seen = _received(site)
+    new = []
+    for p in _messages(box):
+        if p.name in seen:
+            continue
+        text = p.read_text(encoding="utf-8", errors="replace")
+        h = _header(text)
+        new.append({"file": p.name, "kind": h.get("kind"), "refs": h.get("refs"), "body": _body(text)})
+    if record and new:
+        _require_desk(site, actor)
+        led = Ledger(site)
+        for m in new:
+            led.event("upstream.received", actor, None, {"file": m["file"], "kind": m["kind"], "refs": m["refs"]})
+            if m["kind"] == "approval":
+                led.append("decision", "upstream-approval", actor, None, {
+                    "subject": f"Director approval relayed by upstream ({m['refs']})", "disposition": "approve",
+                    "by": "Director", "memo": m["body"], "binding": {"via": "upstream", "file": m["file"]}})
+    return new
+
+
+def collaboration(site: Site) -> dict:
+    """independent | collaborating, open requests, blocked WIs, merge window, unread upstream messages."""
+    opened = _open_requests(site)
+    blocked: list[str] = []
+    for r in opened:
+        text = (notes_dir(site) / f"{r['id']}.md").read_text(encoding="utf-8")
+        for line in text.splitlines():
+            if line.strip().startswith("- Blocked WIs:"):
+                blocked += [w for w in WI_ID_RE.findall(line) if w not in blocked]
+    out = {"mode": "collaborating" if opened else "independent", "open": [r["id"] for r in opened],
+           "blocked_wis": blocked, "merge_window": "closed", "new_from_upstream": 0, "exchange": None}
+    raw = (site.config.get("upstream") or {}).get("exchange")
+    if not raw:
+        return out
+    base = Path(site.expand(raw)) / site.root.name
+    out["exchange"] = str(base)
+    incoming = _messages(base / "from-upstream")
+    seen = _received(site)
+    out["new_from_upstream"] = sum(1 for p in incoming if p.name not in seen)
+    windows = [p for p in incoming if "-merge-window-" in p.name]
+    if windows:
+        last = windows[-1]
+        if _body(last.read_text(encoding="utf-8")).lower().startswith("open"):
+            idle_after = [p for p in _messages(base / "to-upstream") if "-idle-" in p.name and p.name[:16] >= last.name[:16]]
+            out["merge_window"] = "open (site idle)" if idle_after else "requested"
+    if out["merge_window"] != "closed" or out["new_from_upstream"]:
+        out["mode"] = "collaborating"
+    return out

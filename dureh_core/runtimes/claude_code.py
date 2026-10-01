@@ -193,7 +193,11 @@ def _claude_md(site: Site) -> str:
               " While a request is open: stop the affected WI at a safe point and list it under `Blocked WIs` in the UR; keep the unaffected WIs going;"
               " batch new requests into one message instead of sending them one by one; never run `adapter sync` or a harness WI, and never work around the issue."
               " When the Director opens a merge window: dispatch nothing new, let running agents finish, confirm with"
-              f" `{dureh} status` that no agent runs and nothing is orphaned, and report \"idle\"; after the merge run `adapter sync` and `verify --self`, record the landed rev, then resume.",
+              f" `{dureh} status` that no agent runs and nothing is orphaned, and report \"idle\"; after the merge run `adapter sync` and `verify --self`, record the landed rev, then resume."
+              f" When `config.json` sets `upstream.exchange`, deliver through the mailbox instead: `{dureh} upstream send` (requests), `{dureh} upstream send --kind idle`"
+              f" (merge window), and read replies with `{dureh} upstream inbox --record`, which also records Director approvals relayed by upstream (by: Director, via: upstream)."
+              " While status shows `Upstream: collaborating`, give the Director only a one-line notice per upstream event; approvals that concern an open request come"
+              " through upstream. Gates for work unrelated to an open request, and anything urgent (data at risk), still go to the Director directly.",
               f"11. Before the session ends, write a short handoff to `state/memory/handoff.md` (what is open, what the Director decided, what is next).", "",
               "Small questions the Director asks may be answered directly. Research that needs many sources goes to `researcher`; long documents go to `doc-writer`.",
               "Reference paths are read-only. Records are append-only: correct history by appending an event, never by editing a record.", "",

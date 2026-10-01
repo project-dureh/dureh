@@ -59,6 +59,25 @@ Upstream order: triage each UR, report the proposed order, site impact and wheth
 is needed to the Director, implement only after the Director confirms, then hand over the merge
 commands and a reply that states per UR what behavior changes and whether a sync is needed.
 
+## Mailbox (DUREH-Exchange)
+
+When the Director sets `config.json` `"upstream": {"exchange": "<dir>"}` (environment variables allowed,
+for example `"$HOME/DUREH-Exchange"`), messages travel through `<dir>/<site>/` instead of copy and paste:
+
+- `dureh upstream send` writes the `upstream message` text to `to-upstream/` and keeps a `FORWARD-*` copy
+  in `notes/upstream/`; `--kind idle` reports the site idle for a merge window and is refused while an
+  agent runs; `--kind notice|landed --body-file F` sends other notes.
+- `dureh upstream inbox` lists new messages in `from-upstream/`; `--record` marks them received and records
+  an `approval` as a decision `by: Director` with the Director's words as the memo and
+  `binding: {via: upstream, file}`. Irreversible steps (merge, push, `adapter sync`) are still the Director's.
+- `dureh status` shows `Upstream: collaborating` while a request is open or a merge window is in play, with
+  the open requests, blocked WIs, the merge window (`closed`, `requested`, `open (site idle)`) and unread
+  upstream messages. An upstream `merge-window` message whose body starts with `open` requests a window;
+  one starting with `closed` ends it.
+
+The site writes only `to-upstream/`, upstream only `from-upstream/`; each side records what it has read
+on its own side. Message format: `DUREH-Exchange/README.md`.
+
 ## Status values
 
 `open` -> `sent` -> `accepted` | `declined` -> `landed`
