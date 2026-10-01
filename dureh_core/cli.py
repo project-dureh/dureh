@@ -315,9 +315,17 @@ def cmd_authorize_write(a):
 
 
 def cmd_promote(a):
-    from .promote import promote
+    from .promote import promote, replace_metadata
 
-    _print(promote(_site(a), _actor(a), a.wi, a.run, a.source, a.dataset, a.dest, os.environ.get("DUREH_AGENT_ID")))
+    agent = os.environ.get("DUREH_AGENT_ID")
+    if a.metadata:
+        if a.source or a.run or a.dest or not a.input:
+            fail("--metadata takes --input and no --source, --run or --dest")
+        _print(replace_metadata(_site(a), _actor(a), a.wi, a.dataset, a.metadata, a.input, agent))
+    else:
+        if not (a.source and a.run) or a.input:
+            fail("promotion needs --source and --run (or use --metadata NAME --input FILE)")
+        _print(promote(_site(a), _actor(a), a.wi, a.run, a.source, a.dataset, a.dest, agent))
 
 
 def cmd_artifact_write(a):
@@ -521,10 +529,12 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--path", required=True)
     x = add(sub, "promote", cmd_promote, "data-steward: promote verified checkpoints into a derivatives subdataset")
     x.add_argument("--wi", required=True)
-    x.add_argument("--run", required=True, help="completed slurm run record that produced the source")
-    x.add_argument("--source", required=True, help="project-relative path under checkpoints/<step>/")
+    x.add_argument("--run", help="completed slurm run record that produced the source")
+    x.add_argument("--source", help="project-relative path under checkpoints/<step>/")
     x.add_argument("--dataset", required=True, help="name of the subdataset under derivatives/")
     x.add_argument("--dest", help="path inside the dataset (default: source path below checkpoints/<step>/)")
+    x.add_argument("--metadata", help="create or replace a top-level metadata file instead, e.g. dataset_description.json")
+    x.add_argument("--input", help="with --metadata: the new file, in your scratch space or under checkpoints/")
     x.add_argument("--actor")
     art = sub.add_parser("artifact", help="harness-mediated artifact writes").add_subparsers(dest="artifact_command", required=True)
     x = add(art, "write", cmd_artifact_write, "create a new authorized artifact")

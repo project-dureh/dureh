@@ -267,7 +267,8 @@ def _render_brief(site: Site, rec: dict, role: str, wt: dict, entry: dict,
         lines += ["", f"Run `{dureh} verify --wi {rec['id']}` and return its measured output. Do not edit files."]
     elif role == "data-steward":
         lines += ["", f"Never write derivatives/ yourself. Promote a verified checkpoint with `{dureh} promote --wi {rec['id']} "
-                  "--run <completed slurm run id> --source checkpoints/<step>/<path> --dataset <derivatives name>`.",
+                  "--run <completed slurm run id> --source checkpoints/<step>/<path> --dataset <derivatives name>`;"
+                  " update dataset_description.json with `--metadata dataset_description.json --input <file in $TMPDIR>`.",
                   f"Commit any metadata edits on the WI branch, then run `{dureh} wi stage --wi {rec['id']} --summary \"...\"`.",
                   "Return at most 30 lines: promotions and paths, commands run with results, open assumptions."]
     elif role == "researcher":

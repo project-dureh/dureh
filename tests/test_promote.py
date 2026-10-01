@@ -43,7 +43,10 @@ class Promote(SiteCase):
         run(["datalad", "create", "-c", "text2git", str(cls.template)])
         (cls.template / ".gitignore").write_text("checkpoints/\n")
         run(["datalad", "save", "-d", str(cls.template), "-m", "ignore checkpoints"])
-        run(["datalad", "create", "-d", str(cls.template), str(cls.template / "derivatives" / "fmriprep")])
+        sub = cls.template / "derivatives" / "fmriprep"
+        run(["datalad", "create", "-d", str(cls.template), str(sub)])
+        (sub / "dataset_description.json").write_text('{"Name": "fmriprep", "GeneratedBy": [{"Version": "TBD"}]}\n')
+        run(["datalad", "save", "-d", str(cls.template), "-r", "-m", "describe"])
         os.environ.clear()
         os.environ.update(cls._saved)
 
@@ -159,6 +162,35 @@ class Promote(SiteCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(cli.main(argv), 0)
         self.assertTrue((self.ds / "sub-01" / "func" / "bold.nii.gz").is_file())
+
+    def test_replaces_dataset_description_from_scratch(self):
+        new = Path(os.environ["TMPDIR"]) / "dataset_description.json"
+        new.write_text('{"Name": "fmriprep", "GeneratedBy": [{"Version": "2.0.0a1"}]}\n')
+        r = pr.replace_metadata(self.s, "data-steward", self.steward, "fmriprep", "dataset_description.json", str(new))
+        self.assertEqual((self.ds / "dataset_description.json").read_text(), new.read_text())
+        self.assertTrue(r["payload"]["replaced"])
+        self.assertEqual(run(["git", "status", "--porcelain"], self.ds), "")
+        self.assertEqual(run(["git", "status", "--porcelain"], self.proj), "")
+        self.assertIn(f"Update dataset_description.json (WI {self.steward})", run(["git", "log", "-1", "--format=%B"], self.ds))
+
+    def test_metadata_refusals(self):
+        scratch = Path(os.environ["TMPDIR"])
+        good = scratch / "d.json"
+        good.write_text("{}")
+        bad_json = scratch / "bad.json"
+        bad_json.write_text("{not json")
+        (self.proj / "rawbids").mkdir()
+        outside = self.proj / "rawbids" / "d.json"
+        outside.write_text("{}")
+        cases = [("sub-01/x.json", good, "must be one of"), ("dataset_description.json", bad_json, "not valid JSON"),
+                 ("dataset_description.json", outside, "scratch space")]
+        for name, path, why in cases:
+            with self.assertRaisesRegex(DurehError, why):
+                pr.replace_metadata(self.s, "data-steward", self.steward, "fmriprep", name, str(path))
+        self.completed()
+        (self.ck.parent.parent / "dataset_description.json").write_text("{}")
+        with self.assertRaisesRegex(DurehError, "use --metadata"):
+            self.promote(source="checkpoints/fmriprep/dataset_description.json")
 
     def test_refuses_other_roles_overwrite_and_dirty_dataset(self):
         self.completed()

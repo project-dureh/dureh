@@ -52,8 +52,10 @@ def _rmtree(path: Path) -> None:
     shutil.rmtree(path, onerror=unlock)
 
 
-def promote(site: Site, actor: str, wi: str, run_id: str, source: str, dataset: str, dest: str | None = None,
-            agent_id: str | None = None) -> dict:
+METADATA_FILES = ("dataset_description.json", "README", "README.md", "CHANGES", "LICENSE")
+
+
+def _context(site: Site, actor: str, wi: str, dataset: str, agent_id: str | None):
     if actor != "data-steward":
         fail("only data-steward promotes into derivatives")
     led = Ledger(site)
@@ -74,7 +76,50 @@ def promote(site: Site, actor: str, wi: str, run_id: str, source: str, dataset: 
     ds = root / "derivatives" / dataset
     if not (ds / ".datalad").is_dir():
         fail(f"{ds} is not a DataLad dataset")
+    return led, p, root, ds
 
+
+def _apply(site: Site, led: Ledger, wi: str, root: Path, ds: Path, dataset: str,
+           pairs: list[tuple[Path, PurePosixPath]], msg: str) -> str:
+    """Copy pairs into a per-WI clone of ds, save, bring ds forward, save the project. Caller holds the lock."""
+    env = site.env()
+    clone = site.worktrees / f"{wi}-promote-{dataset}"
+    if clone.exists():
+        fail(f"{clone} is left over from an earlier promotion; remove it first")
+    remote, uuid = f"dureh-promote-{wi}", ""
+    site.worktrees.mkdir(exist_ok=True)
+    targets = [str(t) for _, t in pairs]
+    try:
+        _run(["datalad", "clone", str(ds), str(clone)], site.root, env)
+        uuid = _run(["git", "config", "annex.uuid"], clone, env, check=False).strip()
+        for f, t in pairs:
+            out = clone / t
+            out.parent.mkdir(parents=True, exist_ok=True)
+            if out.is_symlink() or out.exists():
+                out.unlink()  # an annexed file in a fresh clone is a link to absent content
+            shutil.copyfile(f, out)
+        _run(["datalad", "save", "-d", str(clone), "-m", msg, *targets], clone, env)
+        _run(["git", "remote", "add", remote, str(clone)], ds, env)
+        _run(["datalad", "update", "-d", str(ds), "-s", remote, "--how", "ff-only"], ds, env)
+        _run(["datalad", "get", "-d", str(ds), "-s", remote, *targets], ds, env)
+    finally:
+        _run(["git", "remote", "remove", remote], ds, env, check=False)
+        if uuid:
+            _run(["git", "annex", "dead", uuid], ds, env, check=False)
+        if clone.exists():
+            _rmtree(clone)
+    _run(["datalad", "save", "-d", str(root), "-m", msg, str(ds)], root, env)
+    return _run(["git", "rev-parse", "HEAD"], ds, env).strip()
+
+
+def _require_clean(site: Site, ds: Path, dataset: str) -> None:
+    if _run(["git", "status", "--porcelain"], ds, site.env()).strip():
+        fail(f"derivatives/{dataset} is not clean; save or revert it first")
+
+
+def promote(site: Site, actor: str, wi: str, run_id: str, source: str, dataset: str, dest: str | None = None,
+            agent_id: str | None = None) -> dict:
+    led, p, root, ds = _context(site, actor, wi, dataset, agent_id)
     src_rel = safe_relative(source)
     if len(src_rel.parts) < 3 or src_rel.parts[0] != "checkpoints":
         fail("source must be a file or directory under checkpoints/<step>/")
@@ -96,39 +141,49 @@ def promote(site: Site, actor: str, wi: str, run_id: str, source: str, dataset: 
         if not site.org.scope_allows(actor, f"{p['target']}/derivatives/{dataset}/{t}"):
             fail(f"data-steward may not write derivatives/{dataset}/{t}")
         if (ds / t).exists() or (ds / t).is_symlink():
-            fail(f"derivatives/{dataset}/{t} already exists; derivatives are final, promote to a new path")
-
-    env = site.env()
+            fail(f"derivatives/{dataset}/{t} already exists; derivatives are final, promote to a new path"
+                 + (" (metadata files: use --metadata)" if str(t) in METADATA_FILES else ""))
     with led.lock():
-        if _run(["git", "status", "--porcelain"], ds, env).strip():
-            fail(f"derivatives/{dataset} is not clean; save or revert it first")
+        _require_clean(site, ds, dataset)
         run = _completed_run(led, run_id, p["target"])
         job = run["payload"].get("job_id")
         msg = f"Promote {source} (WI {wi}, run {run_id}, job {job})"
-        clone = site.worktrees / f"{wi}-promote-{dataset}"
-        if clone.exists():
-            fail(f"{clone} is left over from an earlier promotion; remove it first")
-        remote, uuid = f"dureh-promote-{wi}", ""
-        site.worktrees.mkdir(exist_ok=True)
-        try:
-            _run(["datalad", "clone", str(ds), str(clone)], site.root, env)
-            uuid = _run(["git", "config", "annex.uuid"], clone, env, check=False).strip()
-            for f, t in zip(files, targets):
-                (clone / t).parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(f, clone / t)
-            _run(["datalad", "save", "-d", str(clone), "-m", msg, *[str(t) for t in targets]], clone, env)
-            _run(["git", "remote", "add", remote, str(clone)], ds, env)
-            _run(["datalad", "update", "-d", str(ds), "-s", remote, "--how", "ff-only"], ds, env)
-            _run(["datalad", "get", "-d", str(ds), "-s", remote, *[str(t) for t in targets]], ds, env)
-        finally:
-            _run(["git", "remote", "remove", remote], ds, env, check=False)
-            if uuid:
-                _run(["git", "annex", "dead", uuid], ds, env, check=False)
-            if clone.exists():
-                _rmtree(clone)
-        _run(["datalad", "save", "-d", str(root), "-m", msg, str(ds)], root, env)
-        commit = _run(["git", "rev-parse", "HEAD"], ds, env).strip()
+        commit = _apply(site, led, wi, root, ds, dataset, list(zip(files, targets)), msg)
         return led.append("run", "promotion", actor, wi, {
             "run_type": "promotion", "status": "completed", "source": source, "dataset": f"derivatives/{dataset}",
             "dest": [f"derivatives/{dataset}/{t}" for t in targets],
             "from_run": run_id, "job_id": job, "commit": commit}, [run_id])
+
+
+def replace_metadata(site: Site, actor: str, wi: str, dataset: str, name: str, input_path: str,
+                     agent_id: str | None = None) -> dict:
+    """Create or replace one top-level metadata file of a derivatives dataset (e.g. dataset_description.json)."""
+    from .paths import classify
+
+    led, p, root, ds = _context(site, actor, wi, dataset, agent_id)
+    if name not in METADATA_FILES:
+        fail(f"--metadata must be one of {', '.join(METADATA_FILES)}")
+    src = Path(input_path).expanduser()
+    if src.is_symlink() or not src.is_file():
+        fail(f"input must be a regular file: {input_path}")
+    zone = classify(site, src.resolve()).zone
+    if zone != "scratch" and not is_within(src.resolve(), (root / "checkpoints").resolve()):
+        fail("input must be in your scratch space or under the project's checkpoints/")
+    if name.endswith(".json"):
+        import json
+
+        try:
+            if not isinstance(json.loads(src.read_text(encoding="utf-8")), dict):
+                fail(f"{name} must be a JSON object")
+        except (ValueError, UnicodeDecodeError) as exc:
+            fail(f"{name} is not valid JSON: {exc}")
+    if not site.org.scope_allows(actor, f"{p['target']}/derivatives/{dataset}/{name}"):
+        fail(f"data-steward may not write derivatives/{dataset}/{name}")
+    with led.lock():
+        _require_clean(site, ds, dataset)
+        old = (ds / name).exists() or (ds / name).is_symlink()
+        msg = f"{'Update' if old else 'Add'} {name} (WI {wi})"
+        commit = _apply(site, led, wi, root, ds, dataset, [(src, PurePosixPath(name))], msg)
+        return led.append("run", "promotion", actor, wi, {
+            "run_type": "promotion", "status": "completed", "source": "metadata", "dataset": f"derivatives/{dataset}",
+            "dest": [f"derivatives/{dataset}/{name}"], "replaced": old, "commit": commit})

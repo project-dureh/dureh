@@ -26,5 +26,16 @@ the project. Each promotion is recorded as a run record with `run_type: promotio
 destinations, the run and the resulting commit. Promotions are serialized by the ledger lock.
 
 Requires `datalad` and `git-annex` on the site's PATH (`config.json` `env.path_prepend`).
-Not covered yet: replacing metadata files that already exist in a subdataset, such as
-`dataset_description.json`.
+## Metadata files
+
+Top-level metadata of a derivatives dataset (`dataset_description.json`, `README`, `README.md`,
+`CHANGES`, `LICENSE`) is the one thing that may be replaced, because it describes the dataset rather
+than being a result:
+
+```
+dureh promote --wi <WI> --dataset <name> --metadata dataset_description.json --input <file>
+```
+
+The input is a regular file in the data-steward's scratch space (`$TMPDIR`) or under `checkpoints/`;
+JSON files must parse as an object. The save message is `Update <name> (WI <wi>)` (or `Add`), and the
+run record notes whether a file was replaced. Promoting such a path with `--source` is refused.
