@@ -64,7 +64,8 @@
             "verify",
             "exam",
             "agent",
-            "selftest"
+            "selftest",
+            "promotion"
           ]
         },
         "status": {

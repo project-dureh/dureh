@@ -265,6 +265,11 @@ def _render_brief(site: Site, rec: dict, role: str, wt: dict, entry: dict,
                   f"4. When every item is verified, run `{dureh} wi stage --wi {rec['id']} --summary ...` and return a summary of at most 30 lines."]
     elif role == "checker":
         lines += ["", f"Run `{dureh} verify --wi {rec['id']}` and return its measured output. Do not edit files."]
+    elif role == "data-steward":
+        lines += ["", f"Never write derivatives/ yourself. Promote a verified checkpoint with `{dureh} promote --wi {rec['id']} "
+                  "--run <completed slurm run id> --source checkpoints/<step>/<path> --dataset <derivatives name>`.",
+                  f"Commit any metadata edits on the WI branch, then run `{dureh} wi stage --wi {rec['id']} --summary \"...\"`.",
+                  "Return at most 30 lines: promotions and paths, commands run with results, open assumptions."]
     elif role == "researcher":
         lines += ["", f"Record each result with `{dureh} ledger add finding --wi {rec['id']} --summary ... --evidence-level ...`.",
                   "Keep sources (identity, retrieval time, passage or hash). Do not write files."]

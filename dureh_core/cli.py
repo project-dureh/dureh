@@ -314,6 +314,12 @@ def cmd_authorize_write(a):
     print(f"authorized: {a.role} -> {a.path} ({why})")
 
 
+def cmd_promote(a):
+    from .promote import promote
+
+    _print(promote(_site(a), _actor(a), a.wi, a.run, a.source, a.dataset, a.dest, os.environ.get("DUREH_AGENT_ID")))
+
+
 def cmd_artifact_write(a):
     from .paths import write_decision
     from .util import reject_symlinks, safe_relative, write_create_only
@@ -338,7 +344,7 @@ def cmd_artifact_write(a):
 # ------------------------------------------------------------------- parser
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="dureh", description="DUREH harness tools: wi, dispatch, verify, ledger, status, "
-                                "slurm, path-refs, purge, push, usage, upstream (plus install, adapter, hook).")
+                                "slurm, path-refs, purge, push, usage, upstream, promote (plus install, adapter, hook).")
     p.add_argument("--site", help="installed site directory (or DUREH_SITE)")
     p.add_argument("--observe", action="store_true",
                    help="read-only: allow only status, wi show/list, ledger query, upstream list/message, path-refs, usage, "
@@ -513,6 +519,13 @@ def parser() -> argparse.ArgumentParser:
     x = add(sub, "authorize-write", cmd_authorize_write, "check a role's write to a site path")
     x.add_argument("--role", required=True)
     x.add_argument("--path", required=True)
+    x = add(sub, "promote", cmd_promote, "data-steward: promote verified checkpoints into a derivatives subdataset")
+    x.add_argument("--wi", required=True)
+    x.add_argument("--run", required=True, help="completed slurm run record that produced the source")
+    x.add_argument("--source", required=True, help="project-relative path under checkpoints/<step>/")
+    x.add_argument("--dataset", required=True, help="name of the subdataset under derivatives/")
+    x.add_argument("--dest", help="path inside the dataset (default: source path below checkpoints/<step>/)")
+    x.add_argument("--actor")
     art = sub.add_parser("artifact", help="harness-mediated artifact writes").add_subparsers(dest="artifact_command", required=True)
     x = add(art, "write", cmd_artifact_write, "create a new authorized artifact")
     x.add_argument("--role", required=True)
