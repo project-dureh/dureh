@@ -58,6 +58,11 @@ class Message(SiteCase):
         led.event("wi.approved", "desk", wi, {})
         led.event("wi.dispatched", "desk", wi, {"role": "pm-modules", "brief": "0" * 16, "by": "desk"})
         self.assertIn("merge window: not ready", up.message(self.s))
+        led.event("agent.started", "desk", wi, {"agent_id": "a1", "brief": "0" * 16, "bound_by": "brief"})
+        led.event("agent.finished", "desk", wi, {"agent_id": "a1"})
+        text = up.message(self.s)
+        self.assertIn(f"orphaned: {wi}", text)
+        self.assertIn("merge window: ready (no running agents)", text, "an orphan whose agent ended does not block")
 
     def test_cli_prints_it_in_observe_mode_without_writing(self):
         before = sorted(os.listdir(up.notes_dir(self.s)))

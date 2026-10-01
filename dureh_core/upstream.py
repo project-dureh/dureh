@@ -220,7 +220,8 @@ def _activity(site: Site) -> list[str]:
     st = status(site)
     running = [f"{o['wi']} ({o['role']}, agent {o['agent']})" for o in st["orphaned"]]
     live = _live_agents(st)
-    ready = not live and not st["orphaned"]
+    # an orphan whose agent ended does not block a merge; one whose spawn has no start yet may be starting
+    ready = not live and not any(o["agent"] == "not started" for o in st["orphaned"])
     lines = ["SITE ACTIVITY", f"- active lanes {st['active_lanes']}; agents running: {', '.join(live) or 'none'}"]
     if running:
         lines.append(f"- orphaned: {', '.join(running)}")

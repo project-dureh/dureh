@@ -494,6 +494,69 @@ def _git_check(site: Site, words: list[str], cwd: Path, agent_wi: str | None, ag
     return f"git {sub} writes only inside your WI worktree or scratch space (target is {t.site_rel or repo})"
 
 
+_DATALAD_READ = {"status", "diff", "subdatasets", "wtf", "ls", "search", "--version", "--help", "-h", "help"}
+_DATALAD_NEVER = {
+    "run": "computation runs only as scheduler jobs (`dureh slurm submit`); put `datalad run` inside the job script",
+    "rerun": "computation runs only as scheduler jobs (`dureh slurm submit`); put `datalad rerun` inside the job script",
+    "containers-run": "computation runs only as scheduler jobs (`dureh slurm submit`); put it inside the job script",
+    "drop": "deleting data goes through `dureh purge` or the desk, never a worker",
+    "remove": "deleting data goes through `dureh purge` or the desk, never a worker",
+    "uninstall": "deleting data goes through `dureh purge` or the desk, never a worker",
+    "push": "external pushes go through `dureh push` with a Director decision",
+}
+
+
+def _datalad_check(site: Site, words: list[str], cwd: Path, agent_wi: str | None, agent_id: str | None) -> str | None:
+    """Reason to deny a datalad command, or None. Writes only in the bound WI's worktree or scratch."""
+    i, base = 1, cwd
+    while i < len(words) and words[i].startswith("-") and words[i] not in _DATALAD_READ:
+        if words[i] == "-C" and i + 1 < len(words):
+            base = (base / os.path.expanduser(words[i + 1])).resolve()
+            i += 2
+        elif words[i] in ("-c", "-l", "--log-level", "-f", "--output-format"):
+            i += 2
+        else:
+            i += 1
+    if i >= len(words):
+        return None
+    sub, args = words[i], words[i + 1:]
+    if sub in _DATALAD_READ or (sub == "siblings" and not [a for a in args if not a.startswith("-") and a in
+                                                            ("add", "configure", "remove", "enable")]):
+        return None
+    if sub in _DATALAD_NEVER:
+        return f"datalad {sub}: {_DATALAD_NEVER[sub]}"
+    target, explicit, pos, j = base, False, [], 0
+    while j < len(args):
+        a = args[j]
+        if a in ("-d", "--dataset") and j + 1 < len(args):
+            target = (base / os.path.expanduser(args[j + 1])).resolve() if args[j + 1] not in ("^", "^.") else base
+            explicit = True
+            j += 2
+            continue
+        if a.startswith("--dataset="):
+            target = (base / os.path.expanduser(a.split("=", 1)[1])).resolve()
+            explicit = True
+        elif not a.startswith("-"):
+            pos.append(a)
+        j += 1
+    targets = [target]
+    if sub in ("create", "clone", "install") and pos:
+        made = (base / os.path.expanduser(pos[-1])).resolve()
+        targets = [target, made] if explicit else [made]  # without -d the new dataset is the only thing written
+    for t in targets:
+        z = classify(site, t, cwd)
+        if z.zone == "scratch":
+            continue
+        if z.zone == "worktree":
+            if agent_id and not agent_wi:
+                return f"datalad {sub} writes; this agent is not bound to a work item, so it may not write any worktree"
+            if agent_wi and z.wi != agent_wi:
+                return f"datalad {sub} writes the worktree of {z.wi}; this agent is dispatched for {agent_wi}"
+            continue
+        return f"datalad {sub} writes only inside your WI worktree or scratch space (target is {z.site_rel or t})"
+    return None
+
+
 def guard_bash(site: Site, role: str, data: dict) -> dict | None:
     ti = data.get("tool_input") or {}
     command = ti.get("command") or ""
@@ -542,6 +605,10 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
             return _deny("pushes go through `dureh push` with a Director decision bound to the revision")
         if first == "git" and role != "desk":
             why = _git_check(site, words, cwd, agent_wi, agent_id)
+            if why:
+                return _deny(why)
+        if first == "datalad" and role != "desk":
+            why = _datalad_check(site, words, cwd, agent_wi, agent_id)
             if why:
                 return _deny(why)
         if first == "rm" and any(w.startswith("-") and ("r" in w or "R" in w) for w in words[1:]):
