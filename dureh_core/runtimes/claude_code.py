@@ -576,9 +576,65 @@ def _datalad_check(site: Site, words: list[str], cwd: Path, agent_wi: str | None
     return None
 
 
+# `$(cat <<'EOF' ... EOF)`: a quoted heredoc is literal text, the form Claude Code uses for commit messages.
+_LITERAL_SUBST = re.compile(r"\$\(\s*cat\s+<<-?\s*(['\"])(\w+)\1[ \t]*\n.*?\n[ \t]*\2[ \t]*\n?\s*\)", re.S)
+# Read-only filters a dureh command may be piped into.
+_READ_FILTERS = {"head", "tail", "grep", "egrep", "fgrep", "wc", "sort", "uniq", "cut", "jq", "cat", "tr", "column", "less"}
+_HARMLESS_REDIRECT_TARGETS = {"1", "2", "/dev/null"}
+
+
+_KEYWORDS = {"do", "then", "else", "elif", "if", "while", "until", "!", "{", "}", "time", "done", "fi"}
+
+
+def _strip_lead(words: list[str]) -> list[str]:
+    """Drop what only wraps a command: wrappers with their options, shell keywords, opening parentheses."""
+    words = list(words)
+    while words:
+        if words[0].startswith("(") and words[0] != "(":
+            words[0] = words[0].lstrip("(")
+        elif words[0] in _WRAPPERS:
+            words.pop(0)
+            while words and (words[0].startswith("-") or re.match(r"^\d+[smhd]?$", words[0])):
+                words.pop(0)
+        elif words[0] in _KEYWORDS or words[0] == "(":
+            words.pop(0)
+        else:
+            break
+    return words
+
+
+def _names_harness(word: str) -> bool:
+    w = word.rstrip(")")
+    return os.path.basename(w) in ("dureh", "dureh.py") or "dureh_core" in w
+
+
+def _dureh_combination(site: Site, segs: list[list[str]]) -> str | None:
+    """A dureh command may follow `cd` and be piped into read-only filters; nothing else is combined with it."""
+    after_pipe = False
+    for seg in segs:
+        if seg[0] in _SEPARATORS:
+            after_pipe = seg[0] in ("|", "|&")
+            continue
+        words = _strip_lead([w for w in seg if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w)] if
+                            re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", seg[0]) else seg)
+        if words != list(seg) and words and (_is_dureh(words[0], site) or seg[0] in _KEYWORDS):
+            return "run a dureh command on its own, not inside a loop, a condition or a group"
+        if not words:
+            return "run a dureh command on its own, not inside a loop, a condition or a group"
+        first = os.path.basename(words[0])
+        if _is_dureh(words[0], site) or first == "cd" and not after_pipe:
+            continue
+        if after_pipe and first in _READ_FILTERS:
+            continue
+        return (f"run a dureh command on its own; it may only follow `cd` and be piped into {', '.join(sorted(_READ_FILTERS))}"
+                f" (`{first}` is not allowed with it)")
+    return None
+
+
 def guard_bash(site: Site, role: str, data: dict) -> dict | None:
     ti = data.get("tool_input") or {}
-    command = ti.get("command") or ""
+    original = ti.get("command") or ""
+    command = _LITERAL_SUBST.sub("LITERAL", original)  # checked form; the original runs
     if ti.get("run_in_background"):
         return _deny("no hidden background work in the session; submit computation with `dureh slurm submit`")
     if "`" in command or "$(" in command:
@@ -605,13 +661,19 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
             return _deny("DUREH_* variables are set by the harness, not by the command")
         if role != "desk" and any(a.startswith("GIT_") for a in env_assign):
             return _deny("GIT_* variables redirect git and cannot be checked; run git inside your WI worktree")
-        while words and words[0] in _WRAPPERS:
-            words.pop(0)
-            while words and (words[0].startswith("-") or re.match(r"^\d+[smhd]?$", words[0])):
-                words.pop(0)
+        grouped = bool(words) and (words[0] in _KEYWORDS or words[0].startswith("("))
+        words = _strip_lead(words)
         if not words:
             continue
+        if grouped and _is_dureh(words[0], site):
+            return _deny("run a dureh command on its own, not inside a loop, a condition or a group")
         first = os.path.basename(words[0])
+        if role != "desk":
+            if words[0].startswith("$"):
+                return _deny("a command named by a variable cannot be checked; write the command out")
+            if not _is_dureh(words[0], site) and any(_names_harness(w) for w in words):
+                return _deny("call the harness only as `bin/dureh <command>`, written out (not through an interpreter, "
+                             "a loop or a group), so the hook can set your identity")
         if role != "desk" and (first in _INTERPRETERS or re.match(r"python3?\.\d+$", first)) \
                 and any(w in ("<<", "<<-", "<<<") for w in words):
             return _deny(f"a heredoc or here-string fed to `{first}` runs its body, which cannot be checked; "
@@ -637,14 +699,26 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
             continue
         if _is_dureh(words[0], site):
             if len(words_only) != 1:
-                return _deny("run a dureh command on its own, not combined with other commands")
+                why = _dureh_combination(site, segs)
+                if why:
+                    return _deny(why)
+            for other in words_only:  # output redirected to a file is a write like any other
+                for i, tok in enumerate(other[:-1]):
+                    tgt = other[i + 1]
+                    if tok in _REDIRECTS | {">&"} and tgt not in _HARMLESS_REDIRECT_TARGETS and not tgt.startswith("&"):
+                        ok, why = _write_decision(site, role, Path(os.path.expanduser(tgt)), cwd, agent_wi, agent_id)
+                        if not ok:
+                            return _deny(f"write to {tgt}: {why}")
             if "--actor" in words and words[words.index("--actor") + 1: words.index("--actor") + 2] != [role]:
                 return _deny("--actor must be your own role; the hook sets identity")
             if "--site" in words and words[words.index("--site") + 1: words.index("--site") + 2] != [str(site.root)]:
                 return _deny("dureh commands must target this site")
-            prefix = f"DUREH_ACTOR={shlex.quote(role)} " + (f"DUREH_AGENT_ID={shlex.quote(agent_id)} " if agent_id else "")
+            ident = f"DUREH_ACTOR={shlex.quote(role)}" + (f" DUREH_AGENT_ID={shlex.quote(agent_id)}" if agent_id else "")
             new_input = dict(ti)
-            new_input["command"] = prefix + command
+            if len(words_only) == 1:
+                new_input["command"] = f"{ident} {original}"
+            else:  # identity for every dureh in the line, confined to a subshell
+                new_input["command"] = f"( export {ident}\n{original}\n)"
             return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
                                            "permissionDecisionReason": "DUREH harness tool; identity set by hook",
                                            "updatedInput": new_input}}

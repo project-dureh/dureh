@@ -1,0 +1,70 @@
+"""Friction seen at UNC_Lee_CAMRI-ORG on 2026-10-03 (upstream health check, no UR):
+`cd X && bin/dureh ...`, `bin/dureh ... | head` and Claude Code's `git commit -m "$(cat <<'EOF' ...)"` were refused."""
+import unittest
+
+from helpers import SiteCase, denied, hook
+
+
+class BashFriction(SiteCase):
+    def setUp(self):
+        super().setUp()
+        self.install()
+        self.s = self.site()
+        self.dureh = str(self.site_root / "bin" / "dureh")
+
+    def bash(self, command, role="py-writer"):
+        data = dict(hook_event_name="PreToolUse", tool_name="Bash", tool_input={"command": command},
+                    cwd=str(self.site_root))
+        if role != "desk":
+            data.update(agent_type=role, agent_id="a1")
+        return hook(self.s, **data)
+
+    def allowed_command(self, out):
+        self.assertFalse(denied(out), out)
+        return out["hookSpecificOutput"]["updatedInput"]["command"]
+
+    def test_cd_then_dureh(self):
+        cmd = self.allowed_command(self.bash(f"cd {self.site_root} && {self.dureh} wi stage --wi WI-0001 --summary x"))
+        self.assertTrue(cmd.startswith("( export DUREH_ACTOR=py-writer DUREH_AGENT_ID=a1\n"))
+        self.assertTrue(cmd.endswith("\n)"))
+
+    def test_dureh_piped_into_read_only_filters(self):
+        self.allowed_command(self.bash("bin/dureh status 2>&1 | head -60"))
+        self.allowed_command(self.bash("bin/dureh wi show --wi WI-0001 | grep status | wc -l", role="desk"))
+
+    def test_single_dureh_keeps_the_plain_prefix(self):
+        self.assertEqual(self.allowed_command(self.bash("bin/dureh status")), "DUREH_ACTOR=py-writer DUREH_AGENT_ID=a1 bin/dureh status")
+
+    def test_still_refused(self):
+        for c in ("bin/dureh status | python3 -c 'import sys'", "bin/dureh status > notes/x.txt",
+                  "bin/dureh status; rm notes/x", "for w in a b; do bin/dureh wi show --wi $w; done",
+                  "ls | bin/dureh status", "bin/dureh status | cd /"):
+            self.assertTrue(denied(self.bash(c)), c)
+
+    def test_hidden_harness_calls_cannot_borrow_the_desk_identity(self):
+        # without the hook's prefix the CLI's default actor is the desk
+        for c in ("python3 /x/dureh.py wi approve --wi WI-0001 --memo ok", "python3 -m dureh_core.cli status",
+                  "X=bin/dureh; $X wi approve --wi WI-0001 --memo ok", "(bin/dureh wi approve --wi WI-0001 --memo ok)",
+                  "if true; then bin/dureh wi approve --wi WI-0001 --memo ok; fi", "{ bin/dureh status; }",
+                  "/other/path/bin/dureh wi approve --wi WI-0001 --memo ok"):
+            self.assertTrue(denied(self.bash(c)), c)
+
+    def test_desk_keeps_its_freedom(self):
+        self.assertFalse(denied(self.bash("python3 -m dureh_core.cli status", role="desk")))
+
+    def test_commit_message_from_a_quoted_heredoc(self):
+        wt = self.site_root  # the check under test is the substitution, not the worktree rule
+        cmd = (f"cd {wt} && git status --short && git commit -m \"$(cat <<'EOF'\n"
+               "camri: add step\n\nUses $(not run) and `backticks` literally.\nEOF\n)\"")
+        out = self.bash(cmd)  # a worker: other rules may still apply (worktree), the substitution no longer does
+        self.assertNotIn("command substitution", str(out))
+        self.assertIn("command substitution", str(self.bash("git commit -m \"$(date)\"")))
+
+    def test_unquoted_heredoc_or_other_substitution_still_refused(self):
+        for c in ("git commit -m \"$(cat <<EOF\nmsg $(id)\nEOF\n)\"", "git commit -m \"$(date)\"",
+                  "git commit -m \"$(cat <<'EOF'\nmsg\nEOF\n)\" $(rm -rf x)"):
+            self.assertTrue(denied(self.bash(c)), c)
+
+
+if __name__ == "__main__":
+    unittest.main()
