@@ -357,6 +357,24 @@ def cmd_site_workday(a):
         _print(workday.status(site))
 
 
+def cmd_site_cluster(a):
+    from . import cluster
+
+    site = _site(a)
+    if a.action == "show":
+        _print(cluster.profile(site))
+    elif a.write:
+        _print(cluster.write(site, _actor(a), cluster.detect(site)))
+    else:
+        _print(cluster.detect(site))
+
+
+def cmd_site_session(a):
+    from . import sessions
+
+    _print(sessions.plan(_site(a), a.purpose))
+
+
 def cmd_day(a):
     from . import workday
 
@@ -659,6 +677,14 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("action", choices=["on", "off", "calibrate", "status"])
     x.add_argument("--memo", help="the Director's reason (on/off)")
     x.add_argument("--weekly-percent", type=_percent, help="calibrate: current week's usage percent shown by Claude Code /usage")
+
+    x = add(st, "cluster", cmd_site_cluster, "cluster profile: detect from sinfo/sacctmgr, or show config.json `cluster`")
+    x.add_argument("action", choices=["detect", "show"])
+    x.add_argument("--write", action="store_true", help="detect: save into config.json `cluster` (desk/Director)")
+    x.add_argument("--actor")
+    x = add(st, "session", cmd_site_session, "print the sbatch script that would start the day's session (never submits)")
+    x.add_argument("action", choices=["plan"])
+    x.add_argument("--purpose", default="desk", choices=["desk"])
 
     dy = sub.add_parser("day", help="workday mode: day plan, approval, decisions, end report, overtime"
                         ).add_subparsers(dest="day_command", required=True)

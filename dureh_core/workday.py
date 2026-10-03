@@ -32,6 +32,7 @@ from .site import Site
 from .util import DurehError, fail
 
 DEFAULT_HOURS = 8.0
+DEFAULT_OVERTIME_HOURS = 16.0  # the session job's wall time covers the day plus this, capped at 24 h
 DAY_TYPES = ("day.planned", "day.approved", "day.decision", "day.ended", "day.overtime", "day.closed")
 URGENT = "day.urgent"
 
@@ -50,9 +51,11 @@ def _parse(ts: str) -> datetime:
 
 
 def settings(site: Site) -> dict:
-    """config.json `workday` (hours, daily_share, model_weights, transcripts); defaults otherwise."""
+    """config.json `workday` (hours, overtime_hours, daily_share, model_weights, transcripts); defaults otherwise."""
     cfg = site.config.get("workday") or {}
+    ot = cfg.get("overtime_hours")
     return {"hours": float(cfg.get("hours") or DEFAULT_HOURS),
+            "overtime_hours": float(DEFAULT_OVERTIME_HOURS if ot is None else ot),
             "daily_share": float(cfg.get("daily_share") or 1 / 7),
             "model_weights": cfg.get("model_weights") or {},
             "transcripts": cfg.get("transcripts") or claude_usage.DEFAULT_ROOTS}

@@ -152,17 +152,33 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str, dry_run: bool = F
     for key, flag in (("account", "--account"), ("partition", "--partition"), ("time", "--time")):
         if cfg.get(key):
             cmd.append(f"{flag}={cfg[key]}")
+    # relative #SBATCH -o/-e resolve against the job's directory: the WI target, not the agent's shell cwd
+    chdir = _sbatch_opt(path, extra or [], "-D", "--chdir")
+    if chdir is None:
+        chdir = str(_job_root(site, rec["payload"].get("target")))
+        cmd.append(f"--chdir={chdir}")
+    else:
+        chdir = os.path.join(os.getcwd(), site.expand(chdir))
     logs = None
     if not _sets_output(path, extra or []):
         # sbatch writes slurm-<job>.out into the submitting directory (a project tree) unless told otherwise
         logs = site.root / "logs" / "slurm" / wi
-        if not dry_run:
-            logs.mkdir(parents=True, exist_ok=True)
         cmd += [f"--output={logs}/%x-%j.out", f"--error={logs}/%x-%j.err"]
+        log_out, log_err = f"{logs}/%x-%j.out", f"{logs}/%x-%j.err"
+    else:
+        out = _sbatch_opt(path, extra or [], "-o", "--output") or "slurm-%j.out"
+        log_out = os.path.join(chdir, out)
+        log_err = os.path.join(chdir, _sbatch_opt(path, extra or [], "-e", "--error") or out)
     cmd += list(extra or []) + [str(path)]
     payload = {"run_type": "slurm", "status": "not-run" if dry_run else "submitted", "command": cmd,
-               "script_sha256": sha256_file(path), "script": str(path), "logs": str(logs) if logs else None}
+               "script_sha256": sha256_file(path), "script": str(path), "logs": str(logs) if logs else None,
+               "chdir": chdir, "log_out": log_out, "log_err": log_err}
     if not dry_run:
+        check = _day_check(site, cmd, path, extra or [], cfg)
+        if check is not None:
+            payload["start_check"] = check
+        if logs:
+            logs.mkdir(parents=True, exist_ok=True)
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=site.env())
         if proc.returncode != 0:
             payload.update(status="failed", stderr=proc.stderr[-2000:])
@@ -172,6 +188,88 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str, dry_run: bool = F
     if payload["status"] == "failed":
         fail(f"sbatch failed: {payload.get('stderr', '').strip()} (recorded {run['id']})")
     return run
+
+
+def _job_root(site: Site, target: str | None) -> Path:
+    """The directory a WI's job runs in: its module or project, else the site."""
+    from .paths import target_root
+
+    if target in (None, "site", "harness", "package"):
+        return site.root
+    return target_root(site, target) or site.root
+
+
+def _scan_opt(words: list[str], short: str, long: str) -> str | None:
+    """Last value of an sbatch option in a list of arguments (`--long=v`, `--long v`, `-s v`, `-sv`)."""
+    found = None
+    for i, w in enumerate(words):
+        if w.startswith(long + "="):
+            found = w.split("=", 1)[1]
+        elif w in (short, long):
+            found = words[i + 1] if i + 1 < len(words) else found
+        elif w.startswith(short) and not w.startswith("--"):
+            found = w[len(short):].lstrip("=")
+    return found
+
+
+def _script_opt(script: Path, short: str, long: str) -> str | None:
+    found = None
+    for line in script.read_text(encoding="utf-8", errors="replace").splitlines():
+        words = line.strip().split()
+        if words[:1] == ["#SBATCH"]:
+            found = _scan_opt(words[1:], short, long) or found
+    return found
+
+
+def _sbatch_opt(script: Path, extra: list[str], short: str, long: str) -> str | None:
+    """An sbatch option as the job gets it: command-line arguments win over #SBATCH directives."""
+    value = _scan_opt(extra, short, long)
+    return value if value is not None else _script_opt(script, short, long)
+
+
+def _requested_time(script: Path, extra: list[str], cfg: dict) -> str | None:
+    """The job's --time: the last sbatch argument, else config slurm.time, else an #SBATCH directive."""
+    return _scan_opt(extra, "-t", "--time") or (str(cfg["time"]) if cfg.get("time") else None) \
+        or _script_opt(script, "-t", "--time")
+
+
+def _day_check(site: Site, cmd: list[str], script: Path, extra: list[str], cfg: dict):
+    """In workday mode, during an on-duty day: refuse a job whose expected start (`sbatch --test-only`)
+    plus its requested --time ends after today's end. None when not checked, "unavailable" when the
+    scheduler gave no usable answer (the job is submitted as usual)."""
+    import re
+    from datetime import datetime
+
+    from . import cluster, workday
+
+    if not workday.enabled(site):
+        return None
+    d = workday.day(site)
+    if d["phase"] != "on-duty":
+        return None
+    wall = cluster.parse_time(_requested_time(script, extra, cfg))
+    if wall is None:
+        return "skipped: no --time requested"
+    try:
+        proc = subprocess.run([cmd[0], "--test-only", *cmd[1:]], capture_output=True, text=True, timeout=120,
+                              env=site.env())
+        m = re.search(r"to start at (\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)", proc.stderr + proc.stdout)
+    except (OSError, subprocess.SubprocessError):
+        m = None
+    if not m:
+        return "unavailable"
+    day_end = datetime.fromisoformat(d["end"])
+    start = datetime.fromisoformat(m.group(1))
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=day_end.tzinfo)  # sbatch prints the cluster's local time
+    ends = start + wall
+    if ends > day_end:
+        fail(f"workday mode: this job is expected to start at {start.isoformat(timespec='seconds')} and, with "
+             f"--time {_requested_time(script, extra, cfg)}, end at {ends.isoformat(timespec='seconds')}, after "
+             f"today's end {d['end']}. Nothing was submitted; ask for a shorter --time, or submit it in the next "
+             "approved day.")
+    return {"expected_start": start.isoformat(timespec="seconds"), "expected_end": ends.isoformat(timespec="seconds"),
+            "day_end": d["end"]}
 
 
 def _sets_output(script: Path, extra: list[str]) -> bool:
