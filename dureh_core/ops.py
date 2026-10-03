@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 
 from .org import HARNESS_ROOT
+from .util import harness_label
 from .records import ACTIVE, Ledger
 from .site import Site
 from .util import fail, git, sha256_file
@@ -78,6 +79,7 @@ def status(site: Site) -> dict:
     return {
         "site": str(site.root),
         "package": (site.config.get("startup") or {}).get("id"),
+        "harness": f"{harness_label(site.harness_root)} at {site.harness_root}",
         "work_items": len(wis),
         "by_status": {k: [f"{w['id']} {w['role']}: {w['title']}" for w in v] for k, v in sorted(by_status.items())},
         "awaiting_gate1": [w["id"] for w in wis if w["status"] == "proposed"],
@@ -94,6 +96,7 @@ def status(site: Site) -> dict:
 
 def render_status(st: dict) -> str:
     lines = [f"DUREH site {st['site']} (package {st['package']})",
+             f"harness {st['harness']}",
              f"work items {st['work_items']} · active lanes {st['active_lanes']} · findings {st['findings']}"
              f" · reorg findings {st['reorg_findings']} · index fresh {st['index_fresh']}"]
     if st["awaiting_gate1"]:

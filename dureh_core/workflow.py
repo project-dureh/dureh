@@ -597,7 +597,7 @@ def _contribute(site: Site, led: Ledger, actor: str, wi: str, rec: dict, root: P
     if (site.config.get("upstream") or {}).get("exchange"):
         from .upstream import notify
 
-        notify(site, f"contribution {branch} in the {rec['payload']['target']} repository at {head[:12]}: "
+        notify(site, f"contribution {branch} in the {rec['payload']['target']} repository {root} at {head[:12]}: "
                      f"{rec['payload']['title']}\n\nUpstream reviews it and merges it under its own message; the site does not merge"
                      " harness or package work.")
     return ev

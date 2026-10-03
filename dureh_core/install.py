@@ -12,7 +12,7 @@ from pathlib import Path
 from . import SCHEMA_VERSION, yamlsub
 from .org import HARNESS_ROOT, Org
 from .site import RECORD_KINDS, Site
-from .util import DurehError, dumps, fail, git_revision, read_json, utc_now
+from .util import DurehError, dumps, fail, git_revision, read_json, utc_now, write_replace
 
 FORBIDDEN_PACKAGE_DIRS = {"state", "records", "persona", "memory"}
 DEFAULT_MODELS = {
@@ -243,11 +243,21 @@ def refresh_deployment(site: Site) -> dict:
     new = dict(dep)
     new["harness"] = {"url": _remote(HARNESS_ROOT), "rev": git_revision(HARNESS_ROOT)}
     new["package"] = {**dep.get("package", {}), "rev": git_revision(src) if src.exists() else dep.get("package", {}).get("rev")}
-    if new["harness"] != dep.get("harness") or new["package"] != dep.get("package"):
+    old_root = (site.config.get("harness") or {}).get("root")
+    root_changed = old_root != str(HARNESS_ROOT)
+    if root_changed:
+        # D1: the site now runs this checkout (bin/dureh and the hooks were just regenerated to exec it)
+        cfg = dict(site.config)
+        cfg["harness"] = {**(cfg.get("harness") or {}), "root": str(HARNESS_ROOT)}
+        write_replace(site.config_path, json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", site.config_path.stat().st_mode & 0o777)
+        site.config = cfg
+    if new["harness"] != dep.get("harness") or new["package"] != dep.get("package") or root_changed:
         new["recorded"] = utc_now()
         Ledger(site).event("deployment.updated", "desk", None, {"previous": {"harness": dep.get("harness"),
-                                                                             "package": dep.get("package")},
-                                                                "current": {"harness": new["harness"], "package": new["package"]}})
+                                                                             "package": dep.get("package"),
+                                                                             "harness_root": old_root},
+                                                                "current": {"harness": new["harness"], "package": new["package"],
+                                                                            "harness_root": str(HARNESS_ROOT)}})
         tmp = path.with_name(".deployment.json.tmp")
         tmp.write_text(json.dumps(new, indent=2) + "\n", encoding="utf-8")
         tmp.chmod(0o600)

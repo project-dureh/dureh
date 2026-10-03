@@ -47,6 +47,16 @@ def cmd_adapter_sync(a):
     from .runtimes import claude_code
 
     site = _site(a)
+    if a.harness:
+        # D1: switch the site to another checkout by running that checkout's own dureh, which then
+        # regenerates bin/dureh and the hooks to exec itself and re-pins deployment.json to its revision.
+        other = Path(a.harness).resolve()
+        exe = other / "dureh"
+        if not (other / "dureh_core").is_dir() or not os.access(exe, os.X_OK):
+            fail(f"{other} is not a harness checkout (no executable dureh with dureh_core/)")
+        if other != site.harness_root.resolve():
+            os.execv(str(exe), [str(exe), "--site", str(site.root), "adapter", "sync"])
+    old_root = (site.config.get("harness") or {}).get("root")
     m = claude_code.generate(site)
     print(f"generated {len(m['files'])} files for claude-code")
     from .projectgen import generate_projects
@@ -59,6 +69,10 @@ def cmd_adapter_sync(a):
 
     dep = refresh_deployment(site)
     print(f"deployment pins: harness {dep['harness']['rev'][:12]} package {str(dep['package']['rev'])[:12]}")
+    from .util import harness_label
+
+    switched = f" (was {old_root})" if old_root != str(site.harness_root) else ""
+    print(f"harness: {harness_label(site.harness_root)} at {site.harness_root}{switched}")
 
 
 def cmd_hook(a):
@@ -397,7 +411,8 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--skip-unit", action="store_true", help="skip harness unit tests in the install self-test")
 
     ad = sub.add_parser("adapter", help="runtime adapter output").add_subparsers(dest="adapter_command", required=True)
-    add(ad, "sync", cmd_adapter_sync, "regenerate runtime files from org/ and the package")
+    x = add(ad, "sync", cmd_adapter_sync, "regenerate runtime files from org/ and the package")
+    x.add_argument("--harness", help="switch this site to that harness checkout (a release under releases/) and sync from it")
 
     h = add(sub, "hook", cmd_hook, "runtime hook entry point (reads the event JSON on stdin)")
     h.add_argument("runtime", choices=["claude-code"])

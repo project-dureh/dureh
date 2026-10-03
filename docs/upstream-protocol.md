@@ -132,9 +132,11 @@ project data.
 When a UR's `Status` reaches `landed <rev>`:
 
 1. `dureh adapter sync` does not fetch anything. It regenerates the site's adapter files (`bin/dureh`,
-   `CLAUDE.md`, `.claude/`) from the harness checkout that `bin/dureh` runs, and re-pins
-   `deployment.json` to that checkout's revision. Confirm the checkout is at the landed rev first;
-   until release checkouts exist, the Director updates it.
+   `CLAUDE.md`, `.claude/`) from the harness checkout that runs it, re-pins `deployment.json` to that
+   checkout's revision and records the checkout in `config.json` `harness.root`. A landed revision
+   arrives as a release checkout (below); the Director switches the site to it with
+   `bin/dureh adapter sync --harness <releases>/dureh-<tag>`, which runs that checkout's own `dureh`
+   so `bin/dureh` and the hooks exec it from then on.
 2. Run `dureh verify --self` to self-test the harness and this site against that revision.
 3. Only after both succeed, resume or re-open any WI that was waiting on the change, citing the
    landed rev and the `verify --self` result as evidence.
@@ -151,3 +153,16 @@ mode prevents mistakes; it is not a security boundary.
 
 Based on `notes/upstream/README.md` at the site (`$DUREH_SITE`); see that file and the existing
 `notes/upstream/UR-*.md` records for worked examples.
+
+## Releases (decision D1)
+
+Sites never run the integration clone. Upstream cuts a release with `tools/release.py cut` (in the
+harness repository): it tags the pushed revision `rYYYY.MM.DD-N`, pushes the tag, and clones it
+read-only to `<workspace>/releases/dureh-<tag>/` with `origin` set to the harness remote, so the
+pinned revision in `deployment.json` is always fetchable. The working tree has no write bits; `.git`
+keeps them because a site's harness WIs branch from the release it runs and leave their
+`contrib/c-<8 hex>` branches there (upstream fetches them from that clone). `tools/release.py list`
+shows which site runs which release; `tools/release.py prune` deletes releases no site runs, keeping
+for each release in use the one cut just before it, and holds any release that still has WI
+worktrees or branches attached. `verify --self` fails when `config.json` names a different harness
+than the one running the command, and `dureh status` shows the release the site runs.

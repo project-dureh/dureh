@@ -108,6 +108,26 @@ def git(args: list[str], cwd: Path, *, check: bool = True, env: dict | None = No
     return proc.stdout.strip()
 
 
+def git_tag(path: Path) -> str | None:
+    """The tag that points exactly at HEAD (a release checkout), else None."""
+    path = Path(path)
+    if not (path / ".git").exists():
+        return None
+    proc = subprocess.run(["git", "describe", "--tags", "--exact-match", "HEAD"], cwd=path, capture_output=True, text=True)
+    return proc.stdout.strip() or None if proc.returncode == 0 else None
+
+
+def harness_label(path: Path) -> str:
+    """'<rev7> (release <tag>)' for a release checkout, '<rev7> (<branch>, not a release)' otherwise."""
+    rev = git_revision(path)[:7]
+    tag = git_tag(path)
+    if tag:
+        return f"{rev} (release {tag})"
+    proc = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=path, capture_output=True, text=True)
+    branch = proc.stdout.strip() if proc.returncode == 0 else "?"
+    return f"{rev} ({branch}, not a release)"
+
+
 def git_revision(path: Path) -> str:
     """Return HEAD sha plus '+dirty' when the tree has uncommitted changes, or 'not-a-git-repo'."""
     path = Path(path)

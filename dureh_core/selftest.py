@@ -36,6 +36,10 @@ def session_checks(site: Site) -> list[str]:
     out.append(f"index rebuilt: {info['records']} records in {time.monotonic() - t0:.2f}s at {info['path']}")
     ok, why = compat_ok(site)
     out.append(("compat ok: " if ok else "COMPAT FAIL: ") + why)
+    from .util import harness_label
+
+    hc = harness_checks(site)
+    out.append(f"harness {harness_label(site.harness_root)} at {site.harness_root}" + (f"; HARNESS MISMATCH: {hc[0]}" if hc else ""))
     pending = unsaved(site)
     out.append(f"unsaved state changes: {len(pending)}" if pending else "state saved")
     d = drift(site)
@@ -45,6 +49,16 @@ def session_checks(site: Site) -> list[str]:
     pd = project_drift(site)
     out.append("project guidance drift: " + "; ".join(pd) if pd else "project guidance matches its generation manifest")
     return out
+
+
+def harness_checks(site: Site) -> list[str]:
+    """D1: config.json harness.root must be the checkout this command runs from."""
+    named = (site.config.get("harness") or {}).get("root")
+    running = site.harness_root.resolve()
+    if named and Path(named).resolve() != running:
+        return [f"config.json names harness {named} but this command runs from {running}; "
+                f"run `{running}/dureh --site {site.root} adapter sync` (or `bin/dureh adapter sync --harness {running}`)"]
+    return []
 
 
 def tool_coverage(site: Site | None) -> list[str]:
@@ -77,6 +91,7 @@ def run_self(site: Site | None, actor: str = "checker", unit: bool = True) -> di
         if proc.returncode != 0:
             problems.append("unit tests failed: " + " | ".join(tail))
     if site is not None:
+        problems += harness_checks(site)
         problems += tool_coverage(site)
         from .runtimes.claude_code import drift
         problems += drift(site)
