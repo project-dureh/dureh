@@ -659,6 +659,7 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
     ti = data.get("tool_input") or {}
     original = ti.get("command") or ""
     command = _LITERAL_SUBST.sub("LITERAL", original)  # checked form; the original runs
+    command = re.sub(r"\$\(\s*pwd\s*\)", "$PWD", command)  # same value as $PWD, which is not a command
     if ti.get("run_in_background"):
         return _deny("no hidden background work in the session; submit computation with `dureh slurm submit`")
     if "`" in command or "$(" in command:
@@ -677,8 +678,16 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
     led = Ledger(site)
     agent_wi = _bind(led, role, data, "first-tool") if agent_id else None
     dureh_seen = False
+    literals: dict[str, str] = {}  # NAME=value assignments earlier in this line
     for seg in words_only:
         words = list(seg)
+        if all(re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w) for w in words):
+            for w in words:
+                name, _, value = w.partition("=")
+                literals[name] = value
+        m = re.match(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$", words[0]) if words else None
+        if m and m.group(1) in literals and _is_dureh(literals[m.group(1)], site):
+            words[0] = literals[m.group(1)]  # `B=bin/dureh; $B ...` is a written-out dureh call
         env_assign = []
         while words and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
             env_assign.append(words.pop(0))

@@ -48,6 +48,17 @@ class BashFriction(SiteCase):
             cmd = self.allowed_command(self.bash(c))
             self.assertTrue(cmd.startswith("( export DUREH_ACTOR=py-writer"), c)
 
+    def test_variable_holding_the_dureh_path_in_the_same_line(self):
+        # release 18: agents kept writing `B=<site>/bin/dureh; $B ...`
+        cmd = self.allowed_command(self.bash(f"B={self.dureh}; $B wi show --wi WI-0001 | head -20; $B status"))
+        self.assertTrue(cmd.startswith("( export DUREH_ACTOR=py-writer"))
+        self.assertTrue(denied(self.bash("$B status")), "unknown variable")
+        self.assertTrue(denied(self.bash("B=/bin/rm; $B -rf x")), "a variable naming something else")
+
+    def test_pwd_substitution_is_allowed(self):
+        self.assertFalse(denied(self.bash('ls "$(pwd)/src"')))
+        self.assertTrue(denied(self.bash('ls "$(id)"')))
+
     def test_git_archive_and_branch_listing_are_reads(self):
         import os
         scratch = os.environ["TMPDIR"]
@@ -59,10 +70,14 @@ class BashFriction(SiteCase):
     def test_hidden_harness_calls_cannot_borrow_the_desk_identity(self):
         # without the hook's prefix the CLI's default actor is the desk
         for c in ("python3 /x/dureh.py wi approve --wi WI-0001 --memo ok", "python3 -m dureh_core.cli status",
-                  "X=bin/dureh; $X wi approve --wi WI-0001 --memo ok", "(bin/dureh wi approve --wi WI-0001 --memo ok)",
+                  "(bin/dureh wi approve --wi WI-0001 --memo ok)",
                   "if true; then bin/dureh wi approve --wi WI-0001 --memo ok; fi", "{ bin/dureh status; }",
                   "/other/path/bin/dureh wi approve --wi WI-0001 --memo ok"):
             self.assertTrue(denied(self.bash(c)), c)
+
+    def test_variable_dureh_runs_with_the_workers_identity(self):
+        cmd = self.allowed_command(self.bash("X=bin/dureh; $X wi approve --wi WI-0001 --memo ok"))
+        self.assertTrue(cmd.startswith("( export DUREH_ACTOR=py-writer DUREH_AGENT_ID=a1\n"), "not the desk")
 
     def test_desk_keeps_its_freedom(self):
         self.assertFalse(denied(self.bash("python3 -m dureh_core.cli status", role="desk")))
