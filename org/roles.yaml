@@ -59,6 +59,7 @@ roles:
       - modules/*/src/**
       - modules/*/tests/**
       - modules/*/pyproject.toml
+      - modules/*/uv.lock
   web-writer:
     kind: worker
     tier: worker
