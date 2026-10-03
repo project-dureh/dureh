@@ -580,14 +580,20 @@ def verify_wi(site: Site, actor: str, wi: str, timeout: int = 1800) -> dict:
 
 
 def _verify_bundle(site: Site, actor: str, wi: str, start: float) -> dict:
-    """A bundle passes when it has children and every child is verified or promoted."""
+    """A bundle passes when every child that was not stopped is verified or promoted, and there is one.
+
+    Stopped children (superseded or dropped, each with a recorded reason) are listed but not counted."""
     led = Ledger(site)
     kids = _children(site, wi)
     states = {k["id"]: led.wi_status(k["id"])["status"] for k in kids}
-    open_items = {k: v for k, v in states.items() if v not in ("verified", "promoted")}
-    passed = bool(kids) and not open_items
-    note = (f"{len(kids) - len(open_items)}/{len(kids)} bundle items verified or promoted" if kids
-            else "bundle has no work items")
+    stopped = sorted(k for k, v in states.items() if v == "stopped")
+    counted = {k: v for k, v in states.items() if v != "stopped"}
+    open_items = {k: v for k, v in counted.items() if v not in ("verified", "promoted")}
+    passed = bool(counted) and not open_items
+    note = (f"{len(counted) - len(open_items)}/{len(counted)} bundle items verified or promoted" if counted
+            else "bundle has no work items that were not stopped")
+    if stopped:
+        note += f"; not counted (stopped): {', '.join(stopped)}"
     payload = {"result": "pass" if passed else "fail", "head": None, "changed": [], "violations": [],
                "missing_outputs": [], "checks": [], "children": states, "artifact_sha256": {},
                "seconds": round(time.monotonic() - start, 2), "note": note}

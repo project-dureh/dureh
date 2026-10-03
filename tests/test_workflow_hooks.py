@@ -106,6 +106,37 @@ class Bundle(SiteCase):
         self.assertFalse(wt.exists())
         self.assertIn(str(wt), p["removed"])
 
+    def test_stopped_children_are_not_counted_in_the_bundle_recount(self):
+        # UNC_Lee_CAMRI-ORG finding fnd-20261003T184341577481Z-02e9dca5: superseded items made WI-0014 fail forever
+        old = wf.wi_new(self.s, "desk", "old try", "Add g", "py-writer", "modules/demo", ["g"], parent=self.bundle)["id"]
+        for w in (self.bundle, self.item, old):
+            wf.wi_approve(self.s, "desk", w, "ok")
+        wf.dispatch_stop(self.s, "desk", old, "superseded by the item")
+        self.assertIsNone(self.spawn("desk", "pm-modules", wf.dispatch_brief(self.s, self.bundle, "desk")["brief"]))
+        self.start("pm-modules", "a-pm")
+        wb = wf.dispatch_brief(self.s, self.item, "pm-modules")
+        self.assertIsNone(self.spawn("pm-modules", "py-writer", wb["brief"], "a-pm"))
+        self.start("py-writer", "a-py")
+        wt = Path(wb["worktree"])
+        (wt / "src" / "demo.py").write_text("def f():\n    return 1\n\n\ndef g():\n    return 2\n")
+        subprocess.run(["git", "commit", "-qam", "add g"], cwd=wt, check=True)
+        wf.wi_stage(self.s, "py-writer", self.item, "added g")
+        hook(self.s, hook_event_name="SubagentStop", agent_type="py-writer", agent_id="a-py")
+        self.assertIsNone(self.spawn("pm-modules", "checker", wf.dispatch_brief(self.s, self.item, "pm-modules", "checker")["brief"], "a-pm"))
+        self.assertEqual(wf.verify_wi(self.s, "checker", self.item)["result"], "pass")
+        wf.wi_stage(self.s, "pm-modules", self.bundle, "bundle done")
+        r = wf.verify_wi(self.s, "checker", self.bundle)
+        self.assertEqual(r["result"], "pass", r)
+        self.assertIn(f"not counted (stopped): {old}", r["note"])
+
+    def test_bundle_with_only_stopped_children_fails(self):
+        wf.wi_approve(self.s, "desk", self.bundle, "ok")
+        wf.wi_approve(self.s, "desk", self.item, "ok")
+        wf.dispatch_stop(self.s, "desk", self.item, "dropped")
+        self.assertIsNone(self.spawn("desk", "pm-modules", wf.dispatch_brief(self.s, self.bundle, "desk")["brief"]))
+        wf.wi_stage(self.s, "pm-modules", self.bundle, "nothing left")
+        self.assertEqual(wf.verify_wi(self.s, "checker", self.bundle)["result"], "fail")
+
     def test_verify_catches_out_of_scope_and_missing_output(self):
         for w in (self.bundle, self.item):
             wf.wi_approve(self.s, "desk", w, "ok")
