@@ -201,7 +201,18 @@ def _claude_md(site: Site) -> str:
               f" (merge window), and read replies with `{dureh} upstream inbox --record`, which also records Director approvals relayed by upstream (by: Director, via: upstream)."
               " While status shows `Upstream: collaborating`, give the Director only a one-line notice per upstream event; approvals that concern an open request come"
               " through upstream. Gates for work unrelated to an open request, and anything urgent (data at risk), still go to the Director directly.",
-              f"11. Before the session ends, write a short handoff to `state/memory/handoff.md` (what is open, what the Director decided, what is next).", "",
+              f"11. Workday mode (when status shows a `Workday:` line; only the Director switches it with `dureh site workday on|off`):"
+              f" at the start of the day report a plan to the Director (goal, work items, order, expected usage) and record it with `{dureh} day plan --goal ... --file <plan>`;"
+              f" when the Director approves, record it with `{dureh} day approve --memo \"<Director's words>\"`; this starts the 8-hour clock."
+              " Until the end time work toward the plan's goal without asking again: Gate 1 for work items inside the approved plan is the plan approval"
+              f" (approve them with the plan approval's words); at an important decision follow your own proposal and record it with `{dureh} day decide --title ... --choice ... --why ... [--rev <commit>]`,"
+              " which commits state as a rollback point. If the Director later rolls back to such a point, fix forward from there and reflect every change made since."
+              f" When the hours run out (or today's Claude usage reaches the daily share) no new agent starts: write the end report with `{dureh} day end --done ... --problems ... --overtime <WI>...`"
+              " and give it to the Director (done, decisions with commits, errors, usage, proposed overtime). Overtime is only for fixing errors from the day's work and normalization tests,"
+              f" and only for the items the Director accepts: `{dureh} day overtime --items <WI>... --memo \"<Director's words>\"`; then `{dureh} day close`."
+              " Talk to the Director at the start and the end of the day; between them only for data at risk. `dureh day status` shows the phase and usage;"
+              " the usage budget is shared by every company and upstream, so check it before each work item.",
+              f"12. Before the session ends, write a short handoff to `state/memory/handoff.md` (what is open, what the Director decided, what is next).", "",
               "Small questions the Director asks may be answered directly. Research that needs many sources goes to `researcher`; long documents go to `doc-writer`.",
               "Reference paths are read-only. Records are append-only: correct history by appending an event, never by editing a record.", "",
               "## Core values", "", values, "",
@@ -708,6 +719,11 @@ def pre_tool_use(site: Site, data: dict) -> dict | None:
         wi, brief_role, digest = m.groups()
         if brief_role != target:
             return _deny(f"the brief is for {brief_role}, not {target}")
+        from ..workday import gate
+
+        why = gate(site, wi)
+        if why:
+            return _deny(why)
         with led.lock():
             return _record_spawn(led, role, target, wi, digest, ti)
     if tool in WRITE_TOOLS:

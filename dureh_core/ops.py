@@ -10,7 +10,7 @@ from .org import HARNESS_ROOT
 from .util import harness_label
 from .records import ACTIVE, Ledger
 from .site import Site
-from .util import fail, git, sha256_file
+from .util import DurehError, fail, git, sha256_file
 
 TEXT_SUFFIXES = {".md", ".py", ".sh", ".yaml", ".yml", ".json", ".toml", ".txt", ".mjs", ".js", ".ts", ".astro",
                  ".cfg", ".ini", ".erb", ".tsv", ".jsonl", ""}
@@ -91,7 +91,17 @@ def status(site: Site) -> dict:
         "findings": len(led.load("finding")),
         "last_session": sessions[-1]["ts"] if sessions else None,
         "index_fresh": led.index_fresh(),
+        "workday": _workday(site),
     }
+
+
+def _workday(site: Site) -> dict:
+    from .workday import status as workday_status
+
+    try:
+        return workday_status(site)
+    except DurehError as exc:
+        return {"enabled": None, "error": str(exc)}
 
 
 def render_status(st: dict) -> str:
@@ -103,6 +113,11 @@ def render_status(st: dict) -> str:
         lines.append("Gate 1 (Director approval) pending: " + ", ".join(st["awaiting_gate1"]))
     if st["awaiting_gate2"]:
         lines.append("Gate 2 (promotion) pending: " + ", ".join(st["awaiting_gate2"]))
+    from .workday import render as render_workday
+
+    wline = render_workday(st.get("workday") or {})
+    if wline:
+        lines.append(wline)
     u = st.get("upstream") or {}
     if u.get("mode") == "collaborating":
         n = u.get("new_from_upstream") or 0

@@ -1,0 +1,49 @@
+# Workday mode
+
+An optional working rhythm for a site's desk. Off by default; only the Director switches it.
+
+## The day
+
+1. **Start.** The desk reports a plan to the Director (goal, work items, order, expected usage) and
+   records it: `dureh day plan --goal ... --file plan.md`.
+2. **Approval.** When the Director approves, the desk records the Director's words:
+   `dureh day approve --memo "..."`. This starts an 8-hour clock (`workday.hours` in config.json).
+3. **Work.** Until the end time the desk works toward the goal without asking again. Work items
+   inside the approved plan are approved with the plan's words. At an important decision the desk
+   follows its own proposal and records it: `dureh day decide --title ... --choice ... --why ...
+   [--rev <commit>]`. That commits the state repository, giving a rollback point. If the Director
+   later rolls back to such a point, the desk fixes forward from there, reflecting every change made since.
+4. **End.** When the hours run out, no new agent starts. The desk writes the end report:
+   `dureh day end --done ... --problems ... --overtime <WI>...`, and gives it to the Director.
+5. **Overtime.** Only for fixing errors from the day's work and normalization tests, and only for
+   the items the Director accepts: `dureh day overtime --items <WI>... --memo "..."`. Then `dureh day close`.
+
+The desk talks to the Director at the start and at the end of the day; in between only when data is at risk.
+
+## Usage budget
+
+Every company and the upstream team run as the same user and share one weekly Claude allowance
+(all models, Fable included). Each work unit (an agent spawn, and `dispatch brief`) checks today's
+usage against the daily share, by default 1/7 of the weekly allowance (`workday.daily_share`).
+
+- Usage is read from Claude Code transcripts (`workday.transcripts`, default `~/.claude/projects`),
+  weighted by token kind (input 1, cache write 1.25, cache read 0.1, output 5) and optionally by
+  model (`workday.model_weights`, matched by substring of the model id).
+- The allowance is calibrated by the Director against the weekly percentage Claude Code shows in
+  `/usage`: `dureh site workday calibrate --weekly-percent P`. With `upstream.exchange` set, the
+  calibration is written to `<exchange>/usage-budget.json` and every site and upstream read it.
+- Limits: sessions on other machines (web, app) leave no local transcript and are not counted;
+  the rolling seven days differ from the provider's weekly reset. Recalibrate now and then.
+- Accepted overtime items are not held back by the budget; the end report shows the usage.
+
+## Director commands
+
+Run from your own terminal; they are refused inside any Claude session.
+
+```text
+bin/dureh site workday on --memo "..."      # off: bin/dureh site workday off --memo "..."
+bin/dureh site workday calibrate --weekly-percent 23
+bin/dureh site workday status
+```
+
+`dureh status` and the session start show a `Workday:` line while the mode is on.

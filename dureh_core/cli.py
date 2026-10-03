@@ -10,6 +10,9 @@ from pathlib import Path
 from .util import DurehError, dumps, fail
 
 
+RESERVED_EVENT_PREFIXES = ("workday.", "day.")
+
+
 def _site(args):
     from .site import find_site
 
@@ -143,7 +146,11 @@ def cmd_wi_promote(a):
 
 def cmd_dispatch_brief(a):
     from .workflow import dispatch_brief
+    from .workday import gate
 
+    why = gate(_site(a), a.wi)
+    if why:
+        fail(why)
     r = dispatch_brief(_site(a), a.wi, _actor(a), a.role)
     print(f"# spawn subagent_type={r['subagent_type']} model={r['model']}; pass everything below as the prompt")
     print(r["brief"], end="")
@@ -200,6 +207,8 @@ def cmd_ledger_add(a):
             payload = json.loads(a.payload or "{}")
         except json.JSONDecodeError as exc:
             fail(f"--payload must be valid JSON: {exc}")
+        if (a.type or "").startswith(RESERVED_EVENT_PREFIXES):
+            fail(f"{a.type} events are written only by `dureh day` and `dureh site workday`")
         rec = led.event(a.type or fail("--type is required for events"), actor, a.wi, payload, a.ref)
     elif a.kind == "decision":
         rec = led.append("decision", a.type or "record", actor, a.wi,
@@ -232,6 +241,8 @@ def cmd_event_add(a):
         fail(f"--payload must be valid JSON: {exc}")
     if not a.kind.strip() or not a.wi.strip() or not _actor(a).strip():
         fail("--kind, --wi, and --actor must be nonempty")
+    if a.kind.startswith(RESERVED_EVENT_PREFIXES):
+        fail(f"{a.kind} events are written only by `dureh day` and `dureh site workday`")
     _print(Ledger(_site(a)).event(a.kind, _actor(a), a.wi, payload))
 
 
@@ -299,6 +310,42 @@ def cmd_site(a):
         _print(sitelinks.link_module(site, _actor(a), a.id, a.source, a.rev))
     else:
         _print(sitelinks.link_project(site, _actor(a), a.name, a.source))
+
+
+def cmd_site_workday(a):
+    from . import workday
+
+    site = _site(a)
+    if a.action in ("on", "off"):
+        _print(workday.switch(site, a.action == "on", a.memo or ""))
+    elif a.action == "calibrate":
+        if a.weekly_percent is None:
+            fail("calibrate needs --weekly-percent (the current week's percentage from Claude Code /usage)")
+        _print(workday.calibrate(site, a.weekly_percent))
+    else:
+        _print(workday.status(site))
+
+
+def cmd_day(a):
+    from . import workday
+
+    site, actor, c = _site(a), _actor(a), a.day_command
+    if c == "status":
+        st = workday.status(site)
+        _print(st if a.json else (workday.render(st) or "Workday: off (the Director switches it on)"))
+    elif c == "plan":
+        text = Path(a.file).read_text(encoding="utf-8") if a.file else sys.stdin.read()
+        _print(workday.plan(site, actor, a.goal, text))
+    elif c == "approve":
+        _print(workday.approve(site, actor, a.memo))
+    elif c == "decide":
+        _print(workday.decide(site, actor, a.title, a.choice, a.why, a.rev or []))
+    elif c == "end":
+        _print(workday.end(site, actor, a.done, a.problems or "", a.overtime or []))
+    elif c == "overtime":
+        _print(workday.overtime(site, actor, a.items, a.memo))
+    elif c == "close":
+        _print(workday.close(site, actor, a.note or ""))
 
 
 def cmd_upstream(a):
@@ -390,7 +437,7 @@ def cmd_artifact_write(a):
 # ------------------------------------------------------------------- parser
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="dureh", description="DUREH harness tools: wi, dispatch, verify, ledger, status, "
-                                "slurm, path-refs, purge, push, usage, upstream, promote, worktree (plus install, adapter, hook).")
+                                "slurm, path-refs, purge, push, usage, upstream, promote, worktree, day (plus install, adapter, hook).")
     p.add_argument("--site", help="installed site directory (or DUREH_SITE)")
     p.add_argument("--observe", action="store_true",
                    help="read-only: allow only status, wi show/list, ledger query, upstream list/message, path-refs, usage, "
@@ -542,6 +589,37 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--source", required=True)
     x.add_argument("--actor")
 
+    x = add(st, "workday", cmd_site_workday, "Director's switch for workday mode (8-hour day, plan/report, usage budget)")
+    x.add_argument("action", choices=["on", "off", "calibrate", "status"])
+    x.add_argument("--memo", help="the Director's reason (on/off)")
+    x.add_argument("--weekly-percent", type=float, help="calibrate: current week's usage percent shown by Claude Code /usage")
+
+    dy = sub.add_parser("day", help="workday mode: day plan, approval, decisions, end report, overtime"
+                        ).add_subparsers(dest="day_command", required=True)
+    x = add(dy, "status", cmd_day, "phase of the day and today's Claude usage against the daily share")
+    x.add_argument("--json", action="store_true")
+    x = add(dy, "plan", cmd_day, "record the day plan for the Director (text from --file or stdin)")
+    x.add_argument("--goal", required=True)
+    x.add_argument("--file")
+    x = add(dy, "approve", cmd_day, "record the Director's approval of the plan; starts the clock")
+    x.add_argument("--memo", required=True)
+    x = add(dy, "decide", cmd_day, "record a decision point (own proposal followed) and commit state as a rollback point")
+    x.add_argument("--title", required=True)
+    x.add_argument("--choice", required=True)
+    x.add_argument("--why", required=True)
+    x.add_argument("--rev", action="append", help="commit(s) made for this decision (repeatable)")
+    x = add(dy, "end", cmd_day, "record the end report (done, problems, proposed overtime WIs)")
+    x.add_argument("--done", required=True)
+    x.add_argument("--problems")
+    x.add_argument("--overtime", nargs="*", help="WIs proposed for overtime (fixes and normalization tests only)")
+    x = add(dy, "overtime", cmd_day, "record the overtime items the Director accepted")
+    x.add_argument("--items", nargs="+", required=True)
+    x.add_argument("--memo", required=True)
+    x = add(dy, "close", cmd_day, "close the day (no overtime, or overtime finished)")
+    x.add_argument("--note")
+    for sp in dy.choices.values():
+        sp.add_argument("--actor")
+
     up = sub.add_parser("upstream", help="upstream requests: harness problems routed back to the harness "
                          "developers (desk-only; never pushes or contacts a remote)").add_subparsers(
         dest="upstream_command", required=True)
@@ -597,7 +675,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 OBSERVE_ALLOWED = {("status", None), ("wi", "show"), ("wi", "list"), ("ledger", "query"), ("upstream", "list"), ("upstream", "message"), ("upstream", "inbox"),
-                   ("path-refs", None), ("usage", None), ("verify", None)}
+                   ("path-refs", None), ("usage", None), ("verify", None), ("day", "status")}
 
 
 def _check_observe(args) -> None:
