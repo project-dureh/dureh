@@ -324,6 +324,9 @@ def cmd_site(a):
     site = _site(a)
     if a.site_command == "link-module":
         _print(sitelinks.link_module(site, _actor(a), a.id, a.source, a.rev))
+    elif a.site_command == "new-module":
+        _print(sitelinks.new_module(site, _actor(a), a.id, a.package, a.source, a.python, a.depends or [],
+                                    a.env_rebuild))
     else:
         _print(sitelinks.link_project(site, _actor(a), a.name, a.source))
 
@@ -611,6 +614,14 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--id", required=True)
     x.add_argument("--source", required=True)
     x.add_argument("--rev", required=True)
+    x.add_argument("--actor")
+    x = add(st, "new-module", cmd_site, "create a NEW module repository from the standard skeleton and register it")
+    x.add_argument("--id", required=True)
+    x.add_argument("--package", required=True, help="Python package name (src/<package>)")
+    x.add_argument("--source", help="create the repository here (outside the site) and link it; default modules/<id>")
+    x.add_argument("--python", help="python pin (default: an existing module's .python-version, else 3.11)")
+    x.add_argument("--depends", action="append", help="site module it imports; pinned by git revision (repeat)")
+    x.add_argument("--env-rebuild", default="uv sync --frozen --all-groups --all-extras")
     x.add_argument("--actor")
     x = add(st, "link-project", cmd_site, "DataLad-clone a project into projects/<name> without fetching data")
     x.add_argument("--name", required=True)
