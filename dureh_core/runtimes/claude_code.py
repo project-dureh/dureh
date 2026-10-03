@@ -717,7 +717,10 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
             targets.append(args[-1])
             if first == "mv":
                 targets += args[:-1]
-        elif first in ("rm", "mkdir", "touch", "rmdir", "truncate", "chmod", "chown"):
+        elif first == "mkdir":
+            # a directory that is the root of an allowed `<dir>/**` scope is inside that scope (UR-20261003-04)
+            targets += [a.rstrip("/") + "/.dureh-dir" for a in args]
+        elif first in ("rm", "touch", "rmdir", "truncate", "chmod", "chown"):
             targets += args[1:] if first in ("chmod", "chown") else args
         elif first == "sed" and any(w.startswith("-i") for w in words[1:]):
             targets += args[1:]
@@ -728,7 +731,7 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
                 continue
             ok, why = _write_decision(site, role, Path(os.path.expanduser(tgt)), cwd, agent_wi, agent_id)
             if not ok:
-                return _deny(f"write to {tgt}: {why}")
+                return _deny(f"write to {tgt.removesuffix('/.dureh-dir')}: {why}")
     if dureh_seen:  # every segment passed its own checks; give each dureh in the line this role's identity
         ident = f"DUREH_ACTOR={shlex.quote(role)}" + (f" DUREH_AGENT_ID={shlex.quote(agent_id)}" if agent_id else "")
         new_input = dict(ti)

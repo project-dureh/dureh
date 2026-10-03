@@ -129,6 +129,25 @@ class Bundle(SiteCase):
         self.assertEqual(r["result"], "pass", r)
         self.assertIn(f"not counted (stopped): {old}", r["note"])
 
+    def test_mkdir_of_a_scope_root_is_allowed(self):
+        # UR-20261003-04: `mkdir -p <dir>` where <dir>/** is the role's scope
+        for w in (self.bundle, self.item):
+            wf.wi_approve(self.s, "desk", w, "ok")
+        self.assertIsNone(self.spawn("desk", "pm-modules", wf.dispatch_brief(self.s, self.bundle, "desk")["brief"]))
+        self.start("pm-modules", "a-pm")
+        wb = wf.dispatch_brief(self.s, self.item, "pm-modules")
+        self.assertIsNone(self.spawn("pm-modules", "py-writer", wb["brief"], "a-pm"))
+        self.start("py-writer", "a-py")
+        wt = Path(wb["worktree"])
+
+        def bash(cmd):
+            return hook(self.s, hook_event_name="PreToolUse", tool_name="Bash", tool_input={"command": cmd},
+                        cwd=str(wt), agent_type="py-writer", agent_id="a-py")
+        (wt / "tests").rename(wt / "tests-old")
+        self.assertFalse(denied(bash(f"mkdir -p {wt}/tests")), "scope root")
+        self.assertFalse(denied(bash(f"mkdir -p {wt}/src/pkg/sub")))
+        self.assertTrue(denied(bash(f"mkdir -p {wt}/docs")), "outside every scope")
+
     def test_bundle_with_only_stopped_children_fails(self):
         wf.wi_approve(self.s, "desk", self.bundle, "ok")
         wf.wi_approve(self.s, "desk", self.item, "ok")
