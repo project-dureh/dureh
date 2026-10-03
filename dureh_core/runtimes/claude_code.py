@@ -188,7 +188,8 @@ def _claude_md(site: Site) -> str:
               f" If a dispatch or verify reports a broken worktree or a stale `.venv` (for example after the site moved), run `{dureh} worktree repair --wi <WI>`"
               f" (or `--target <target>` for a main tree's `.venv`); it rebuilds the environment with `env_rebuild` from config.json. Never edit `.git` files or rebuild environments by hand.",
               f"8. Compute runs only as scheduler jobs through `{dureh} slurm submit`. External pushes only through `{dureh} push` with a Director decision."
-              f" Verified checkpoints reach `derivatives/` only through `{dureh} promote`, run by a dispatched data-steward.",
+              f" Verified checkpoints reach `derivatives/` only through `{dureh} promote`, run by a dispatched data-steward;"
+              f" a code-generated report lands with `{dureh} promote --kind report ... --dataset <pipeline> --name <report>` in derivatives/<pipeline>/reports/<report>/ with provenance.json.",
               f"9. Self-test the harness and this site with `{dureh} verify --self` after any harness or package update."
               f" A NEW module starts with `{dureh} site new-module --id <id> --package <pkg> [--depends <site module>] [--source <dir>]`"
               " (standard skeleton, registered with env_rebuild, a WI target at once; site modules it imports are pinned by git revision).",

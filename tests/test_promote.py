@@ -103,6 +103,46 @@ class Promote(SiteCase):
         args.update(kw)
         return pr.promote(self.s, **args)
 
+    def report_dir(self):
+        rep = self.proj / "checkpoints" / "report" / "run-1"
+        (rep / "figures").mkdir(parents=True)
+        (rep / "index.html").write_text("<html>LNA report</html>\n")
+        (rep / "figures" / "fig1.png").write_bytes(b"\x89PNG" + os.urandom(2048))
+        return "checkpoints/report/run-1"
+
+    def test_report_lands_under_derivatives_reports_with_provenance(self):
+        # UR-20261003-02, Director: the final report follows BIDS, inside derivatives, in a reports folder
+        self.completed()
+        src = self.report_dir()
+        r = pr.promote_report(self.s, "data-steward", self.steward, self.run_id, src, "fmriprep", "lna-2026-10-03")
+        out = self.ds / "reports" / "lna-2026-10-03"
+        self.assertEqual((out / "index.html").read_text(), "<html>LNA report</html>\n")
+        self.assertEqual((out / "figures" / "fig1.png").read_bytes(),
+                         (self.proj / src / "figures" / "fig1.png").read_bytes())
+        import json as _json
+        prov = _json.loads((out / "provenance.json").read_text())
+        self.assertEqual(prov["run"], self.run_id)
+        self.assertEqual(prov["job_id"], "4242")
+        self.assertEqual(set(prov["files"]), {"index.html", "figures/fig1.png"})
+        self.assertEqual(r["payload"]["kind"], "report")
+        self.assertIn("derivatives/fmriprep/reports/lna-2026-10-03/provenance.json", r["payload"]["dest"])
+        self.assertEqual(run(["git", "status", "--porcelain"], self.ds).strip(), "")
+        with self.assertRaises(DurehError):  # final: a second landing needs a new name
+            pr.promote_report(self.s, "data-steward", self.steward, self.run_id, src, "fmriprep", "lna-2026-10-03")
+
+    def test_report_refusals(self):
+        src = self.report_dir()
+        with self.assertRaises(DurehError):  # run not completed
+            pr.promote_report(self.s, "data-steward", self.steward, self.run_id, src, "fmriprep", "r1")
+        self.completed()
+        with self.assertRaises(DurehError):
+            pr.promote_report(self.s, "pipeline-runner", self.runner, self.run_id, src, "fmriprep", "r1")
+        with self.assertRaises(DurehError):
+            pr.promote_report(self.s, "data-steward", self.steward, self.run_id, "rawbids/x", "fmriprep", "r1")
+        (self.proj / src / "provenance.json").write_text("{}")
+        with self.assertRaises(DurehError):
+            pr.promote_report(self.s, "data-steward", self.steward, self.run_id, src, "fmriprep", "r1")
+
     def test_promotes_into_the_subdataset_and_records_it(self):
         self.completed()
         r = self.promote()

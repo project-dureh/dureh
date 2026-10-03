@@ -40,3 +40,20 @@ dureh promote --wi <WI> --dataset <name> --metadata dataset_description.json --i
 The input is a regular file in the data-steward's scratch space (`$TMPDIR`) or under `checkpoints/`;
 JSON files must parse as an object. The save message is `Update <name> (WI <wi>)` (or `Add`), and the
 run record notes whether a file was replaced. Promoting such a path with `--source` is refused.
+
+## Generated reports
+
+A report produced by code on the scheduler (for example camri + camri-vis: html, pdf, png) is final
+output and follows BIDS: it lives inside the derivatives dataset, in a reports folder below it
+(Director's decision, 2026-10-03, UR-20261003-02).
+
+```
+dureh promote --kind report --wi <WI> --run <slurm run id> --source checkpoints/<step>/<run>/report --dataset <name> --name <report name>
+```
+
+The report lands in `derivatives/<name>/reports/<report name>/` with the same checks as a promotion
+(data-steward's own dispatched WI, a completed run, sources inside `checkpoints/`, a clean subdataset,
+a new destination). The harness writes `provenance.json` next to it: work item, run and job id, the
+revision of every site module, containers and inputs recorded in the run, and the sha256 of every file.
+Reports are final; land the next one under a new name. Agents review and interpret reports
+(`reports/interpretation/**`); they do not write them.

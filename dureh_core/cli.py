@@ -424,6 +424,15 @@ def cmd_promote(a):
     from .promote import promote, replace_metadata
 
     agent = os.environ.get("DUREH_AGENT_ID")
+    if a.kind == "report":
+        from .promote import promote_report
+
+        if not (a.source and a.run and a.name and a.dataset) or a.metadata or a.dest or a.input:
+            fail("--kind report takes --source, --run, --dataset and --name")
+        _print(promote_report(_site(a), _actor(a), a.wi, a.run, a.source, a.dataset, a.name, agent))
+        return
+    if not a.dataset:
+        fail("--dataset is required (derivatives/<name>)")
     if a.metadata:
         if a.source or a.run or a.dest or not a.input:
             fail("--metadata takes --input and no --source, --run or --dest")
@@ -700,11 +709,14 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--wi")
     x.add_argument("--target")
     x.add_argument("--actor")
-    x = add(sub, "promote", cmd_promote, "data-steward: promote verified checkpoints into a derivatives subdataset")
+    x = add(sub, "promote", cmd_promote, "data-steward: promote verified checkpoints into a derivatives subdataset, "
+            "or (--kind report) land a generated report into derivatives/<dataset>/reports/<name>/")
+    x.add_argument("--kind", choices=["derivative", "report"], default="derivative")
+    x.add_argument("--name", help="with --kind report: directory under derivatives/<dataset>/reports/")
     x.add_argument("--wi", required=True)
     x.add_argument("--run", help="completed slurm run record that produced the source")
     x.add_argument("--source", help="project-relative path under checkpoints/<step>/")
-    x.add_argument("--dataset", required=True, help="name of the subdataset under derivatives/")
+    x.add_argument("--dataset", help="name of the subdataset under derivatives/")
     x.add_argument("--dest", help="path inside the dataset (default: source path below checkpoints/<step>/)")
     x.add_argument("--metadata", help="create or replace a top-level metadata file instead, e.g. dataset_description.json")
     x.add_argument("--input", help="with --metadata: the new file, in your scratch space or under checkpoints/")
