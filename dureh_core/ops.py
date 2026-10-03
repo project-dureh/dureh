@@ -152,9 +152,16 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str, dry_run: bool = F
     for key, flag in (("account", "--account"), ("partition", "--partition"), ("time", "--time")):
         if cfg.get(key):
             cmd.append(f"{flag}={cfg[key]}")
+    logs = None
+    if not _sets_output(path, extra or []):
+        # sbatch writes slurm-<job>.out into the submitting directory (a project tree) unless told otherwise
+        logs = site.root / "logs" / "slurm" / wi
+        if not dry_run:
+            logs.mkdir(parents=True, exist_ok=True)
+        cmd += [f"--output={logs}/%x-%j.out", f"--error={logs}/%x-%j.err"]
     cmd += list(extra or []) + [str(path)]
     payload = {"run_type": "slurm", "status": "not-run" if dry_run else "submitted", "command": cmd,
-               "script_sha256": sha256_file(path), "script": str(path)}
+               "script_sha256": sha256_file(path), "script": str(path), "logs": str(logs) if logs else None}
     if not dry_run:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=site.env())
         if proc.returncode != 0:
@@ -165,6 +172,18 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str, dry_run: bool = F
     if payload["status"] == "failed":
         fail(f"sbatch failed: {payload.get('stderr', '').strip()} (recorded {run['id']})")
     return run
+
+
+def _sets_output(script: Path, extra: list[str]) -> bool:
+    """The job chooses its own log files (an sbatch argument or an #SBATCH directive)."""
+    flags = ("-o", "--output", "-e", "--error")
+    if any(a.split("=")[0] in flags for a in extra):
+        return True
+    for line in script.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if line.startswith("#SBATCH") and any(w.split("=")[0] in flags for w in line.split()[1:]):
+            return True
+    return False
 
 
 def slurm_status(site: Site, actor: str, run_id: str) -> dict:

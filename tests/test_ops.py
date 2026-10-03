@@ -99,6 +99,15 @@ class Ops(SiteCase):
         self.assertIn("--account=acct-x", (fake / "args").read_text())
         dry = ops.slurm_submit(s, "desk", w, str(script), dry_run=True)
         self.assertEqual(dry["payload"]["status"], "not-run")
+        # logs go to the site, not into the submitting (project) directory
+        args = (fake / "args").read_text()
+        self.assertIn(f"--output={self.site_root}/logs/slurm/{w}/%x-%j.out", args)
+        self.assertIn(f"--error={self.site_root}/logs/slurm/{w}/%x-%j.err", args)
+        self.assertTrue((self.site_root / "logs" / "slurm" / w).is_dir())
+        own = self.tmp / "own.sh"
+        own.write_text("#!/bin/sh\n#SBATCH --output=/tmp/x.out\necho hi\n")
+        self.assertIsNone(ops.slurm_submit(s, "desk", w, str(own), dry_run=True)["payload"]["logs"])
+        self.assertIsNone(ops.slurm_submit(s, "desk", w, str(script), dry_run=True, extra=["-o", "y.out"])["payload"]["logs"])
 
     def test_usage_reports_undefined_without_promotions(self):
         t = self.tmp / "t.jsonl"
