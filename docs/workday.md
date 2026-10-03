@@ -30,7 +30,8 @@ What the plan approval covers (agreed with the CAMRI-ORG desk, 2026-10-03):
 
 - The plan lists each work item with its expected agent spawns and a rough usage estimate, and the day
   total against the daily share, so the Director can cut items at plan time.
-- A replacement WI that keeps a plan WI's goal and only fixes its checks, base or constraints (`day decide`).
+- Amending a plan WI's checks, acceptance, constraints, outputs or base (`wi amend`, which also re-opens a
+  stopped item); a different goal is a new WI.
 - Gate 2 for checker-verified module and project WIs in the plan. Promotion into derivatives and
   harness/package contributions wait for the end report.
 - After the end time, one checker run for an item staged during the day. A re-dispatch after a failed

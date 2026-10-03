@@ -191,9 +191,69 @@ def worktree_repair(site: Site, actor: str, wi: str) -> dict:
 
 def _base_of(site: Site, wi: str) -> str | None:
     for ev in reversed(Ledger(site).events(wi)):
+        if ev["type"] == "wi.amended" and ev["payload"].get("rebase_onto"):
+            return ev["payload"]["rebase_onto"]
         if ev["type"] == "dispatch.prepared" and ev["payload"].get("base"):
             return ev["payload"]["base"]
     return None
+
+
+def _pending_rebase(site: Site, wi: str) -> str | None:
+    """The base an amendment moved this WI to, if no dispatch has carried it yet."""
+    for ev in reversed(Ledger(site).events(wi)):
+        if ev["type"] == "dispatch.prepared" and not ev["payload"].get("checking"):
+            return None
+        if ev["type"] == "wi.amended" and ev["payload"].get("rebase_onto"):
+            return ev["payload"]["rebase_onto"]
+    return None
+
+
+AMENDABLE = ("acceptance", "checks", "constraints", "outputs")
+
+
+def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: str | None = None) -> dict:
+    """Change a WI's acceptance, checks, constraints or outputs, or move its base, without a replacement WI.
+
+    The goal, role and target never change (that is a new WI). The amendment is approved like Gate 1:
+    --memo carries the Director's words (or, in workday mode, the plan approval that covers it)."""
+    from .ops import agent_state
+
+    if site.org.role(actor).kind != "desk":
+        fail("only the desk amends work items")
+    if not memo.strip():
+        fail("--memo must carry the Director's words (or the day plan approval that covers the amendment)")
+    led = Ledger(site)
+    rec = led.get("work-item", wi)
+    st = led.wi_status(wi)["status"]
+    if st not in ("approved", "rework", "dispatched", "proposed", "stopped"):
+        fail(f"{wi} is {st}; amend only proposed, approved, rework, stopped or dispatched-and-ended items")
+    if st == "dispatched" and agent_state(led, wi) in ("running", "starting"):
+        fail(f"an agent is running for {wi}; stop it at a safe point before amending")
+    bad = [k for k in fields if k not in AMENDABLE]
+    if bad:
+        fail(f"cannot amend {', '.join(bad)}; a different goal, role or target is a new work item")
+    fields = {k: list(v) for k, v in fields.items() if v is not None}
+    if "acceptance" in fields and not fields["acceptance"]:
+        fail("a work item needs at least one acceptance criterion")
+    rebase_onto = None
+    if rebase is not None:
+        root = target_root(site, rec["payload"]["target"])
+        if root is None or not (root / ".git").exists():
+            fail(f"{wi} targets {rec['payload']['target']}, which is not a git repository")
+        rebase_onto = git(["rev-parse", rebase or "HEAD"], root)
+    if not fields and not rebase_onto:
+        fail("nothing to amend: give --acceptance, --check, --constraint, --output or --rebase")
+    draft = {"id": wi, "payload": {**rec["payload"], **fields}}
+    role = site.org.role(rec["payload"]["role"])
+    n, limit = brief_bytes(site, draft), _brief_limit(site, role)
+    if n > limit:
+        fail(f"amended brief would be {n} bytes, over the {limit}-byte limit")
+    before = {k: rec["payload"].get(k) for k in fields}
+    ev = led.event("wi.amended", actor, wi, {"fields": fields, "before": before, "rebase_onto": rebase_onto,
+                                              "memo": memo, "by": "Director"})
+    if st == "stopped":  # an amended stopped item is re-opened with the same approval words
+        wi_approve(site, actor, wi, f"amended ({ev['id']}): {memo}")
+    return ev
 
 
 def _skill_for(site: Site, role: str, value: str | None) -> str | None:
@@ -290,6 +350,10 @@ def _render_brief(site: Site, rec: dict, role: str, wt: dict, entry: dict,
     if wt.get("worktree"):
         base = f", base {wt['base'][:12]}" if wt.get("base") else ""
         lines.append(f"Work only in: {wt['worktree']} (branch {wt.get('branch') or wi_branch(site, rec['id'])}{base})")
+        pending = _pending_rebase(site, rec["id"]) if rec["id"] != "WI-0000" else None
+        if pending and role == p["role"]:
+            lines.append(f"First: the base moved. In your worktree run `git rebase {pending[:12]}`, resolve conflicts,"
+                         " and commit; then do the work against the new base.")
     scopes = [s for s in r.write_scopes if not s.startswith("site:")]
     if scopes:
         lines.append("You may write only: " + ", ".join(scopes))

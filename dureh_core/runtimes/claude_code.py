@@ -177,7 +177,8 @@ def _claude_md(site: Site) -> str:
               f"2. Gate 1: show the plan to the Director. Only after the Director approves, run `{dureh} wi approve --wi <WI> --memo \"<Director's words>\"`.",
               f"3. Dispatch: `{dureh} dispatch brief --wi <WI>`, then use the Agent tool with `subagent_type` = the named role and the printed brief as the whole prompt."
               " The hook refuses any spawn without a recorded brief.",
-              f"4. Stop or rework: `{dureh} dispatch stop --wi <WI> --reason ...` (the runtime stop ends the agent; the record keeps the reason).",
+              f"4. Stop or rework: `{dureh} dispatch stop --wi <WI> --reason ...` (the runtime stop ends the agent; the record keeps the reason)."
+              f" Wrong checks or a stale base: `{dureh} wi amend --wi <WI> --memo \"<Director's words>\" --check ... | --rebase` keeps the WI (Gate 1 words required, as for approval).",
               f"5. Gate 2: after the checker verified the item, report it to the Director and promote with `{dureh} wi promote --wi <WI> --memo ...`."
               f" For a bundle the manager staged, run `{dureh} verify --wi <bundle>` (a recount of its items' states); promoting the bundle merges any verified items not yet promoted."
               " Items whose target is `harness` or `package` are not merged: promotion leaves an opaque `contrib/c-<id>` branch for upstream to review"
@@ -212,7 +213,8 @@ def _claude_md(site: Site) -> str:
               " and give it to the Director (done, decisions with commits, errors, usage, proposed overtime). Overtime is only for fixing errors from the day's work and normalization tests,"
               f" and only for the items the Director accepts: `{dureh} day overtime --items <WI>... --memo \"<Director's words>\"`; then `{dureh} day close`."
               " The plan lists each work item with its expected agent spawns and a rough usage estimate, and the day total against the daily share."
-              " A replacement WI that keeps a plan WI's goal and only fixes its checks, base or constraints is covered by the plan approval; record it with `day decide`."
+              f" To fix a WI's checks, acceptance, constraints, outputs or stale base, amend it instead of replacing it: `{dureh} wi amend --wi <WI> --memo ... [--check ...] [--rebase]`"
+              " (a stopped item re-opens; inside a day plan the plan approval covers it). A different goal, role or target is a new WI."
               " Promotion (Gate 2) of checker-verified module and project WIs in the plan is covered by the plan approval; promotion into derivatives and harness/package contributions wait for the end report."
               " After the end time one checker run is still allowed for an item staged during the day; a re-dispatch after a failed check is overtime."
               " Never held by the plan or the clock: stopping an agent (`dispatch stop`) or a scheduler job, merge-window handling (idle, adapter sync, verify --self), recording upstream replies."

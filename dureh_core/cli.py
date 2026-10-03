@@ -120,6 +120,14 @@ def cmd_wi_approve(a):
     print(f"{a.wi} approved (Gate 1) by {a.by}: {ev['id']}")
 
 
+def cmd_wi_amend(a):
+    from .workflow import wi_amend
+
+    fields = {"acceptance": a.acceptance, "checks": a.check, "constraints": a.constraint, "outputs": a.output}
+    _print(wi_amend(_site(a), _actor(a), a.wi, a.memo, {k: v for k, v in fields.items() if v is not None},
+                    a.rebase))
+
+
 def cmd_wi_show(a):
     from .records import Ledger
 
@@ -494,6 +502,16 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--wi", required=True)
     x.add_argument("--memo", required=True)
     x.add_argument("--by", default="Director")
+    x.add_argument("--actor")
+    x = add(wi, "amend", cmd_wi_amend, "change acceptance/checks/constraints/outputs or move the base (desk; Director's words)")
+    x.add_argument("--wi", required=True)
+    x.add_argument("--memo", required=True)
+    x.add_argument("--acceptance", action="append", help="replaces the whole list (repeat)")
+    x.add_argument("--check", action="append", help="replaces the whole list (repeat)")
+    x.add_argument("--constraint", action="append", help="replaces the whole list (repeat)")
+    x.add_argument("--output", action="append", help="replaces the whole list (repeat)")
+    x.add_argument("--rebase", nargs="?", const="", default=None,
+                   help="move the base to REV (default: the target's current HEAD); the next brief tells the worker to rebase")
     x.add_argument("--actor")
     x = add(wi, "show", cmd_wi_show, "show a work item with its events")
     x.add_argument("--wi", required=True)

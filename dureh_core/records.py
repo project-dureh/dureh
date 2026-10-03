@@ -150,6 +150,12 @@ class Ledger:
             fail(f"no {kind} record {record_id}")
         rec = read_json(path)
         check_record(rec)
+        if kind == "work-item":
+            amended = [e for e in self.events(record_id) if e["type"] == "wi.amended"]
+            for e in amended:  # records stay create-only; amendments apply on read, in order
+                rec["payload"].update(e["payload"].get("fields") or {})
+            if amended:
+                rec["amended_by"] = [e["id"] for e in amended]
         return rec
 
     def events(self, wi: str | None = None) -> list[dict]:
