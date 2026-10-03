@@ -44,7 +44,7 @@ Site and upstream work at the same time. Four things can collide; each has one r
 | Collision | Rule |
 |---|---|
 | Code: a site harness WI and upstream write the same branch | The site reports harness problems as URs, never fixes them in a harness WI. |
-| Live swap: the harness changes under running agents | Merges and `adapter sync` happen only in a merge window the Director opens. |
+| Live swap: the harness changes under running agents | Sites run read-only release checkouts; a site switches release (`adapter sync --harness`) only in a merge window, while idle. |
 | Project files: `adapter sync` commits into linked projects | Same merge window; no data-steward or pipeline-runner runs in that project meanwhile. |
 | Site records | Upstream never writes them; it reads in observe mode. |
 
@@ -52,8 +52,9 @@ Site (desk) order: stop the affected WI at a safe point; record the finding and 
 `Blocked WIs` and `Continuing WIs`; batch requests into one `dureh upstream message` (its
 `SITE ACTIVITY` section shows running agents and whether a merge window could open now); keep
 unaffected WIs going and do not sync while waiting; in a merge window dispatch nothing new, let
-running agents finish, confirm with `dureh status`, report "idle"; after the merge run
-`adapter sync` and `verify --self`, record `landed <rev>`, resume.
+running agents finish, confirm with `dureh status`, report "idle"; when the `landed` message names a
+release checkout, the desk switches itself with `adapter sync --harness <checkout>` and runs `verify --self`,
+records `landed <rev>`, reports the result, and resumes.
 
 Upstream order: triage each UR, report the proposed order, site impact and whether a merge window
 is needed to the Director, implement only after the Director confirms, then hand over the merge
@@ -81,7 +82,8 @@ for example `"$HOME/DUREH-Exchange"`), messages travel through `<dir>/<site>/` i
   agent runs; `--kind notice|landed --body-file F` sends other notes.
 - `dureh upstream inbox` lists new messages in `from-upstream/`; `--record` marks them received and records
   an `approval` as a decision `by: Director` with the Director's words as the memo and
-  `binding: {via: upstream, file}`. Irreversible steps (merge, push, `adapter sync`) are still the Director's.
+  `binding: {via: upstream, file}`. Upstream merges, pushes and cuts releases on its own (the Director's charter, 2026-10-03: anything but `main`);
+  the site switches release itself in the merge window; changes to `main` stay the Director's.
 - `dureh status` shows `Upstream: collaborating` while a request is open or a merge window is in play, with
   the open requests, blocked WIs, the merge window (`closed`, `requested`, `open (site idle)`) and unread
   upstream messages. An upstream `merge-window` message whose body starts with `open` requests a window;

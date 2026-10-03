@@ -349,7 +349,7 @@ def cmd_day(a):
     elif c == "decide":
         _print(workday.decide(site, actor, a.title, a.choice, a.why, a.rev or []))
     elif c == "end":
-        _print(workday.end(site, actor, a.done, a.problems or "", a.overtime or []))
+        _print(workday.end(site, actor, a.done, a.problems or "", a.overtime or [], a.early or ""))
     elif c == "overtime":
         _print(workday.overtime(site, actor, a.items, a.memo))
     elif c == "close":
@@ -622,6 +622,7 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--done", required=True)
     x.add_argument("--problems")
     x.add_argument("--overtime", nargs="*", help="WIs proposed for overtime (fixes and normalization tests only)")
+    x.add_argument("--early", help="end before the end time: the Director's words")
     x = add(dy, "overtime", cmd_day, "record the overtime items the Director accepted")
     x.add_argument("--items", nargs="+", required=True)
     x.add_argument("--memo", required=True)

@@ -232,10 +232,27 @@ class Workday(SiteCase):
         self.assertAlmostEqual(u["today_units"], 5.0)
         self.assertAlmostEqual(u["this_site_units"], 2.0)
 
+    def test_the_day_runs_to_its_end_time(self):
+        self.start_day()
+        self.at(T0 + timedelta(hours=3))
+        with self.assertRaises(DurehError) as cm:
+            workday.end(self.s, "desk", "plan done", "", [])
+        self.assertIn("stay on duty", str(cm.exception))
+        rec = workday.end(self.s, "desk", "plan done", "", [], early="오늘은 일찍 마칩시다")
+        self.assertEqual(rec["payload"]["early"], "오늘은 일찍 마칩시다")
+
+    def test_plan_and_end_record_rollback_heads(self):
+        workday.switch(self.s, True, "trial")
+        rec = workday.plan(self.s, "desk", "g", "p")
+        self.assertIn("modules/demo", rec["payload"]["heads"])
+        self.assertRegex(rec["payload"]["heads"]["modules/demo"] or "", r"^[0-9a-f]{40}$")
+
     def test_desk_instructions_mention_workday(self):
         text = (self.site_root / "CLAUDE.md").read_text()
         self.assertIn("day plan", text)
         self.assertIn("day overtime", text)
+        self.assertIn("stay on duty", text)
+        self.assertIn("adapter sync --harness <release checkout>", text)
 
 
 if __name__ == "__main__":

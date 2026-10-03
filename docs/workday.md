@@ -20,6 +20,12 @@ An optional working rhythm for a site's desk. Off by default; only the Director 
 
 The desk talks to the Director at the start and at the end of the day; in between only when data is at risk.
 
+The day runs to its end time even when the plan is done: the desk stays on duty while idle. When everything is
+idle it proposes the next work; if that fits the goals the Director set, it proceeds on its own recommendation
+(`day decide`) and reports it at the end. `day end` before the end time needs `--early "<Director's words>"`.
+Where the Director would decide, the desk picks something easy to change, records it as provisional, and keeps
+going. `day plan` and `day end` record the heads of state and of every module and project: rollback points.
+
 What the plan approval covers (agreed with the CAMRI-ORG desk, 2026-10-03):
 
 - The plan lists each work item with its expected agent spawns and a rough usage estimate, and the day

@@ -281,7 +281,7 @@ def plan(site: Site, actor: str, goal: str, text: str) -> dict:
         fail(f"the current day ({d['plan']}) is still open; write its end report first")
     u = usage(site)
     return Ledger(site).event("day.planned", actor, None, {"date": _now().date().isoformat(), "goal": goal,
-                                                           "plan": text, "usage_at_plan": u})
+                                                           "plan": text, "usage_at_plan": u, "heads": heads(site)})
 
 
 def approve(site: Site, actor: str, memo: str) -> dict:
@@ -295,6 +295,23 @@ def approve(site: Site, actor: str, memo: str) -> dict:
     end = start + timedelta(hours=settings(site)["hours"])
     return Ledger(site).event("day.approved", actor, None,
                               {"start": _ts(start), "end": _ts(end), "memo": memo, "by": "Director"}, [d["plan"]])
+
+
+def heads(site: Site) -> dict[str, str | None]:
+    """HEAD of state and of every linked module and project repository: a rollback point for the day."""
+    out = {"state": _state_head(site)}
+    for group in ("modules", "projects"):
+        base = site.root / group
+        if not base.is_dir():
+            continue
+        for d in sorted(base.iterdir()):
+            if (d / ".git").exists():
+                try:
+                    p = subprocess.run(["git", "rev-parse", "HEAD"], cwd=d, capture_output=True, text=True, timeout=30)
+                    out[f"{group}/{d.name}"] = p.stdout.strip() or None
+                except (OSError, subprocess.SubprocessError):
+                    out[f"{group}/{d.name}"] = None
+    return out
 
 
 def _state_head(site: Site) -> str | None:
@@ -324,11 +341,14 @@ def decide(site: Site, actor: str, title: str, choice: str, why: str, revs: list
                                         "and reflect every change made since this point"}
 
 
-def end(site: Site, actor: str, done: str, problems: str, overtime: list[str]) -> dict:
+def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], early: str = "") -> dict:
     _require_on(site)
     d = day(site)
     if d["phase"] not in ("on-duty", "past-end"):
         fail(f"no open day to end (phase {d['phase']})")
+    if d["phase"] == "on-duty" and not early.strip():
+        fail(f"the day runs to {d['end']}; stay on duty even when idle (propose next work, watch upstream messages)."
+             " End early only on the Director's word: --early \"<Director's words>\"")
     if not done.strip():
         fail("--done is required")
     led = Ledger(site)
@@ -336,7 +356,7 @@ def end(site: Site, actor: str, done: str, problems: str, overtime: list[str]) -
         led.get("work-item", w)
     report = {"done": done, "problems": problems, "overtime_proposed": overtime,
               "decisions": d["decisions"], "start": d["start"], "end": d["end"], "ended_at": _ts(_now()),
-              "usage": usage(site)}
+              "early": early or None, "usage": usage(site), "heads": heads(site)}
     rec = led.event("day.ended", actor, None, report, [d["plan"]])
     return {**rec, "next": "give the Director this report; record accepted overtime with "
                            "`dureh day overtime --items ... --memo \"<Director's words>\"`, else `dureh day close`"}
