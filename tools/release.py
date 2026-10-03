@@ -104,6 +104,9 @@ def cmd_cut(a) -> None:
     tag = existing[0] if existing else next_tag(repo, dt.datetime.now(dt.timezone.utc).date())
     dest = releases / f"dureh-{tag}"
     if dest.exists():
+        if existing:  # cutting the same revision twice is a no-op, not an error
+            print(f"release {tag} = {rev[:12]} already exists at {dest}; nothing to do")
+            return
         sys.exit(f"release: {dest} already exists")
     if not existing:
         git(["tag", "-a", tag, rev, "-m", f"DUREH harness release {tag}"], repo)

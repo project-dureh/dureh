@@ -78,7 +78,7 @@ class Release(unittest.TestCase):
         self.assertTrue(os.access(rel / ".git", os.W_OK), "worktrees and contrib branches still need .git")
         self.assertIn("adapter sync --harness", out)
         # a second release the same day gets -2; the same revision is not re-tagged
-        self.run_script("cut", ok=False)
+        self.assertIn("nothing to do", self.run_script("cut"))  # re-cutting a released revision is a no-op
         self.commit("second")
         git(["push", "-q"], self.repo)
         out = self.run_script("cut")
