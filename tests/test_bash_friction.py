@@ -37,7 +37,10 @@ class BashFriction(SiteCase):
 
     def test_still_refused(self):
         for c in ("bin/dureh status > notes/x.txt", "bin/dureh status; rm notes/x",
-                  "for w in a b; do bin/dureh wi show --wi $w; done", "bin/dureh status && touch notes/y"):
+                  "bin/dureh status && touch notes/y",
+                  "for w in a b; do bin/dureh wi show --wi $w > notes/$w.txt; done",
+                  "if true; then bin/dureh status --actor desk; fi", "{ bin/dureh status --site /elsewhere; }",
+                  "(bin/dureh status &)", "for w in a b; do $B wi show --wi $w; done"):
             self.assertTrue(denied(self.bash(c)), c)
 
     def test_any_checked_combination_keeps_the_identity(self):
@@ -70,10 +73,22 @@ class BashFriction(SiteCase):
     def test_hidden_harness_calls_cannot_borrow_the_desk_identity(self):
         # without the hook's prefix the CLI's default actor is the desk
         for c in ("python3 /x/dureh.py wi approve --wi WI-0001 --memo ok", "python3 -m dureh_core.cli status",
-                  "(bin/dureh wi approve --wi WI-0001 --memo ok)",
-                  "if true; then bin/dureh wi approve --wi WI-0001 --memo ok; fi", "{ bin/dureh status; }",
-                  "/other/path/bin/dureh wi approve --wi WI-0001 --memo ok"):
+                  "/other/path/bin/dureh wi approve --wi WI-0001 --memo ok", "$B status"):
             self.assertTrue(denied(self.bash(c)), c)
+
+    def test_dureh_inside_loops_conditions_and_groups_gets_the_workers_identity(self):
+        # release 20: the line-wide `( export DUREH_ACTOR=... )` wrapper covers every dureh in the line,
+        # so a dureh after a shell keyword or an opening parenthesis is checked and allowed like any other
+        for c in ("for w in A B; do echo x; bin/dureh wi show --wi $w; done",  # replay pair
+                  "for w in A B; do bin/dureh wi show --wi $w; done",
+                  "for w in a b; do bin/dureh wi show --wi $w; done",
+                  "(bin/dureh wi approve --wi WI-0001 --memo ok)",
+                  "if true; then bin/dureh wi approve --wi WI-0001 --memo ok; fi",
+                  "{ bin/dureh status; }",
+                  "while false; do bin/dureh status; done"):
+            cmd = self.allowed_command(self.bash(c))
+            self.assertTrue(cmd.startswith("( export DUREH_ACTOR=py-writer DUREH_AGENT_ID=a1\n"), (c, cmd))
+            self.assertTrue(cmd.endswith("\n)"), c)
 
     def test_variable_dureh_runs_with_the_workers_identity(self):
         cmd = self.allowed_command(self.bash("X=bin/dureh; $X wi approve --wi WI-0001 --memo ok"))

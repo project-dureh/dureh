@@ -677,7 +677,7 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
     agent_id = data.get("agent_id")
     led = Ledger(site)
     agent_wi = _bind(led, role, data, "first-tool") if agent_id else None
-    dureh_seen = False
+    dureh_seen = keyword_lead = False
     literals: dict[str, str] = {}  # NAME=value assignments earlier in this line
     for seg in words_only:
         words = list(seg)
@@ -695,21 +695,20 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
             return _deny("DUREH_* variables are set by the harness, not by the command")
         if role != "desk" and any(a.startswith("GIT_") for a in env_assign):
             return _deny("GIT_* variables redirect git and cannot be checked; run git inside your WI worktree")
-        grouped = bool(words) and (words[0] in _KEYWORDS or words[0].startswith("("))
+        # loops, conditions and groups are fine: the wrapper below exports the identity for the whole line
+        if words and (words[0] in _KEYWORDS or words[0].startswith("(")):
+            keyword_lead = True  # `ID=x (cmd)` or `ID=x if ...` is not valid shell; such a line takes the wrapper
         words = _strip_lead(words)
         if not words:
             continue
-        if grouped and _is_dureh(words[0], site):
-            return _deny("write dureh commands out, not inside a loop, a condition or a group"
-                         " (to wait for a job: `bin/dureh slurm wait --run <id>`; several WIs: `bin/dureh wi show --wi A --wi B`)")
         first = os.path.basename(words[0])
         if role != "desk":
             if words[0].startswith("$"):
                 return _deny("a command named by a variable cannot be checked; write the command out"
                              " (for several work items: `bin/dureh wi show --wi A --wi B`)")
             if not _is_dureh(words[0], site) and any(_names_harness(w) for w in words):
-                return _deny("call the harness only as `bin/dureh <command>`, written out (not through an interpreter, "
-                             "a loop or a group), so the hook can set your identity")
+                return _deny("call the harness only as `bin/dureh <command>`, written out (not through an interpreter "
+                             "or another path), so the hook can set your identity")
         if role != "desk" and (first in _INTERPRETERS or re.match(r"python3?\.\d+$", first)) \
                 and any(w in ("<<", "<<-", "<<<") for w in words):
             return _deny(f"a heredoc or here-string fed to `{first}` runs its body, which cannot be checked; "
@@ -766,7 +765,7 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
     if dureh_seen:  # every segment passed its own checks; give each dureh in the line this role's identity
         ident = f"DUREH_ACTOR={shlex.quote(role)}" + (f" DUREH_AGENT_ID={shlex.quote(agent_id)}" if agent_id else "")
         new_input = dict(ti)
-        new_input["command"] = f"{ident} {original}" if len(words_only) == 1 else f"( export {ident}\n{original}\n)"
+        new_input["command"] = f"{ident} {original}" if len(words_only) == 1 and not keyword_lead else f"( export {ident}\n{original}\n)"
         return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
                                        "permissionDecisionReason": "DUREH harness tool; identity set by hook",
                                        "updatedInput": new_input}}
