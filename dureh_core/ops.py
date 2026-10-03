@@ -201,6 +201,35 @@ def slurm_status(site: Site, actor: str, run_id: str) -> dict:
     return ev
 
 
+TERMINAL_STATES = ("COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED",
+                   "BOOT_FAIL", "DEADLINE")
+
+
+def slurm_wait(site: Site, actor: str, run_id: str, timeout: int = 3600, interval: int = 60) -> dict:
+    """Check a job until it reaches a terminal state or the timeout; record only the final state."""
+    import time
+
+    led = Ledger(site)
+    run = led.get("run", run_id)
+    job = run["payload"].get("job_id") or fail(f"{run_id} has no scheduler job id")
+    deadline = time.monotonic() + max(0, timeout)
+    while True:
+        proc = subprocess.run(["sacct", "-n", "-P", "-X", "-j", job, "--format=State,ExitCode,Elapsed"],
+                              capture_output=True, text=True, timeout=60, env=site.env())
+        line = (proc.stdout.strip().splitlines() or [""])[0]
+        state = line.split("|")[0] if line else "UNKNOWN"
+        if state.split()[0] in TERMINAL_STATES or time.monotonic() >= deadline:
+            break
+        time.sleep(max(1, min(interval, deadline - time.monotonic())))
+    final = state.split()[0] in TERMINAL_STATES
+    ev = led.event("run.status", actor if actor in ("pipeline-runner", "desk") else "desk", run["wi"],
+                   {"run": run_id, "job_id": job, "scheduler_state": state, "raw": line,
+                    "waited": True, "final": final}, [run_id])
+    if not final:
+        ev["note"] = f"still {state} after {timeout} s; wait again or check later"
+    return ev
+
+
 def slurm_cancel(site: Site, actor: str, run_id: str) -> dict:
     led = Ledger(site)
     run = led.get("run", run_id)

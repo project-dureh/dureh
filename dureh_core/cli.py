@@ -132,9 +132,19 @@ def cmd_wi_show(a):
     from .records import Ledger
 
     led = Ledger(_site(a))
-    rec = led.get("work-item", a.wi)
-    _print({"work_item": rec, "status": led.wi_status(a.wi),
-            "events": [{"ts": e["ts"], "type": e["type"], "actor": e["actor"], "payload": e["payload"]} for e in led.events(a.wi)]})
+    out = []
+    for wi in a.wi:
+        rec = led.get("work-item", wi)
+        evs = led.events(wi)
+        if a.summary:
+            out.append({"wi": wi, "title": rec["payload"]["title"], "role": rec["payload"]["role"],
+                        "status": led.wi_status(wi)["status"],
+                        "last_events": [f"{e['ts'][11:19]} {e['type']} {e['actor']}" for e in evs[-5:]]})
+        else:
+            out.append({"work_item": rec, "status": led.wi_status(wi),
+                        "events": [{"ts": e["ts"], "type": e["type"], "actor": e["actor"], "payload": e["payload"]}
+                                   for e in evs]})
+    _print(out[0] if len(out) == 1 else out)
 
 
 def cmd_wi_list(a):
@@ -283,6 +293,8 @@ def cmd_slurm(a):
         _print(ops.slurm_submit(site, _actor(a), a.wi, a.script, a.dry_run, a.sbatch_arg))
     elif a.slurm_command == "status":
         _print(ops.slurm_status(site, _actor(a), a.run))
+    elif a.slurm_command == "wait":
+        _print(ops.slurm_wait(site, _actor(a), a.run, a.timeout, a.interval))
     else:
         _print(ops.slurm_cancel(site, _actor(a), a.run))
 
@@ -525,8 +537,9 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--rebase", nargs="?", const="", default=None,
                    help="move the base to REV (default: the target's current HEAD); the next brief tells the worker to rebase")
     x.add_argument("--actor")
-    x = add(wi, "show", cmd_wi_show, "show a work item with its events")
-    x.add_argument("--wi", required=True)
+    x = add(wi, "show", cmd_wi_show, "show work items with their events (repeat --wi; --summary for status and last events)")
+    x.add_argument("--wi", required=True, action="append")
+    x.add_argument("--summary", action="store_true")
     x = add(wi, "list", cmd_wi_list, "list work items with projected status")
     x.add_argument("--status")
     x = add(wi, "stage", cmd_wi_stage, "mark committed work ready for the checker")
@@ -599,6 +612,11 @@ def parser() -> argparse.ArgumentParser:
         x = add(sl, name, cmd_slurm, f"{name} a recorded job")
         x.add_argument("--run", required=True)
         x.add_argument("--actor")
+    x = add(sl, "wait", cmd_slurm, "block until a recorded job ends (records its final state); instead of polling loops")
+    x.add_argument("--run", required=True)
+    x.add_argument("--timeout", type=int, default=3600, help="seconds (default 3600)")
+    x.add_argument("--interval", type=int, default=60, help="seconds between checks (default 60)")
+    x.add_argument("--actor")
 
     x = add(sub, "path-refs", cmd_path_refs, "find references to a path before moving or deleting it")
     x.add_argument("path")

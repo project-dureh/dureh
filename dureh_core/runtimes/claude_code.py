@@ -191,6 +191,7 @@ def _claude_md(site: Site) -> str:
               f" Verified checkpoints reach `derivatives/` only through `{dureh} promote`, run by a dispatched data-steward;"
               f" a code-generated report lands with `{dureh} promote --kind report ... --dataset <pipeline> --name <report>` in derivatives/<pipeline>/reports/<report>/ with provenance.json.",
               f"9. Self-test the harness and this site with `{dureh} verify --self` after any harness or package update."
+              f" Several work items at once: `{dureh} wi show --wi A --wi B --summary`. Wait for a scheduler job with `{dureh} slurm wait --run <id>`, not a polling loop."
               f" A NEW module starts with `{dureh} site new-module --id <id> --package <pkg> [--depends <site module>] [--source <dir>]`"
               " (standard skeleton, registered with env_rebuild, a WI target at once; site modules it imports are pinned by git revision).",
               f"10. A harness problem (not a site problem) is a finding tagged `upstream`; turn it into a request with `{dureh} upstream draft --finding <id> --type bug|change|decision|friction --severity blocking|degrading|minor`."
@@ -470,7 +471,13 @@ def _git_reads(sub: str, args: list[str]) -> bool:
         return True
     pos = [a for a in args if not a.startswith("-")]
     if sub == "branch":
+        listing = {"-a", "--all", "-r", "--remotes", "-l", "--list", "--contains", "--no-contains", "--merged",
+                   "--no-merged", "--points-at", "--show-current", "-v", "-vv", "--verbose", "--format", "--sort"}
+        if any(a.split("=")[0] in listing for a in args) and not any(a.split("=")[0] in _GIT_BRANCH_WRITE for a in args):
+            return True
         return not pos and not any(a.split("=")[0] in _GIT_BRANCH_WRITE for a in args)
+    if sub == "archive":  # writes only through -o/--output, which _git_check checks as a write
+        return not any(a in ("-o", "--output") or a.startswith("--output=") for a in args)
     if sub == "tag":
         return not pos or any(a in ("-l", "--list") for a in args)
     if sub in ("stash", "worktree", "notes"):
@@ -512,6 +519,13 @@ def _git_check(site: Site, words: list[str], cwd: Path, agent_wi: str | None, ag
         if len(pos) < 2:
             return "git clone needs an explicit destination inside your WI worktree or scratch space"
         repo = (repo / os.path.expanduser(pos[-1])).resolve()
+    if sub == "archive":
+        out = next((args[k + 1] for k, a in enumerate(args[:-1]) if a in ("-o", "--output")), None) \
+            or next((a.split("=", 1)[1] for a in args if a.startswith("--output=")), None)
+        t_out = classify(site, (cwd / os.path.expanduser(out)).resolve(), cwd)
+        if t_out.zone == "scratch" or (t_out.zone == "worktree" and (not agent_wi or t_out.wi == agent_wi)):
+            return None
+        return f"git archive -o writes only inside your WI worktree or scratch space (target is {t_out.site_rel or out})"
     t = classify(site, repo, cwd)
     if t.zone == "scratch":
         return None
@@ -589,9 +603,6 @@ def _datalad_check(site: Site, words: list[str], cwd: Path, agent_wi: str | None
 
 # `$(cat <<'EOF' ... EOF)`: a quoted heredoc is literal text, the form Claude Code uses for commit messages.
 _LITERAL_SUBST = re.compile(r"\$\(\s*cat\s+<<-?\s*(['\"])(\w+)\1[ \t]*\n.*?\n[ \t]*\2[ \t]*\n?\s*\)", re.S)
-# Read-only filters a dureh command may be piped into.
-_READ_FILTERS = {"head", "tail", "grep", "egrep", "fgrep", "wc", "sort", "uniq", "cut", "jq", "cat", "tr", "column", "less"}
-_HARMLESS_REDIRECT_TARGETS = {"1", "2", "/dev/null"}
 
 
 _KEYWORDS = {"do", "then", "else", "elif", "if", "while", "until", "!", "{", "}", "time", "done", "fi"}
@@ -619,29 +630,6 @@ def _names_harness(word: str) -> bool:
     return os.path.basename(w) in ("dureh", "dureh.py") or "dureh_core" in w
 
 
-def _dureh_combination(site: Site, segs: list[list[str]]) -> str | None:
-    """A dureh command may follow `cd` and be piped into read-only filters; nothing else is combined with it."""
-    after_pipe = False
-    for seg in segs:
-        if seg[0] in _SEPARATORS:
-            after_pipe = seg[0] in ("|", "|&")
-            continue
-        words = _strip_lead([w for w in seg if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", w)] if
-                            re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", seg[0]) else seg)
-        if words != list(seg) and words and (_is_dureh(words[0], site) or seg[0] in _KEYWORDS):
-            return "run a dureh command on its own, not inside a loop, a condition or a group"
-        if not words:
-            return "run a dureh command on its own, not inside a loop, a condition or a group"
-        first = os.path.basename(words[0])
-        if _is_dureh(words[0], site) or first == "cd" and not after_pipe:
-            continue
-        if after_pipe and first in _READ_FILTERS:
-            continue
-        return (f"run a dureh command on its own; it may only follow `cd` and be piped into {', '.join(sorted(_READ_FILTERS))}"
-                f" (`{first}` is not allowed with it)")
-    return None
-
-
 def guard_bash(site: Site, role: str, data: dict) -> dict | None:
     ti = data.get("tool_input") or {}
     original = ti.get("command") or ""
@@ -663,6 +651,7 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
     agent_id = data.get("agent_id")
     led = Ledger(site)
     agent_wi = _bind(led, role, data, "first-tool") if agent_id else None
+    dureh_seen = False
     for seg in words_only:
         words = list(seg)
         env_assign = []
@@ -677,11 +666,13 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
         if not words:
             continue
         if grouped and _is_dureh(words[0], site):
-            return _deny("run a dureh command on its own, not inside a loop, a condition or a group")
+            return _deny("write dureh commands out, not inside a loop, a condition or a group"
+                         " (to wait for a job: `bin/dureh slurm wait --run <id>`; several WIs: `bin/dureh wi show --wi A --wi B`)")
         first = os.path.basename(words[0])
         if role != "desk":
             if words[0].startswith("$"):
-                return _deny("a command named by a variable cannot be checked; write the command out")
+                return _deny("a command named by a variable cannot be checked; write the command out"
+                             " (for several work items: `bin/dureh wi show --wi A --wi B`)")
             if not _is_dureh(words[0], site) and any(_names_harness(w) for w in words):
                 return _deny("call the harness only as `bin/dureh <command>`, written out (not through an interpreter, "
                              "a loop or a group), so the hook can set your identity")
@@ -709,30 +700,12 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
             cwd = (cwd / os.path.expanduser(words[1])).resolve()
             continue
         if _is_dureh(words[0], site):
-            if len(words_only) != 1:
-                why = _dureh_combination(site, segs)
-                if why:
-                    return _deny(why)
-            for other in words_only:  # output redirected to a file is a write like any other
-                for i, tok in enumerate(other[:-1]):
-                    tgt = other[i + 1]
-                    if tok in _REDIRECTS | {">&"} and tgt not in _HARMLESS_REDIRECT_TARGETS and not tgt.startswith("&"):
-                        ok, why = _write_decision(site, role, Path(os.path.expanduser(tgt)), cwd, agent_wi, agent_id)
-                        if not ok:
-                            return _deny(f"write to {tgt}: {why}")
             if "--actor" in words and words[words.index("--actor") + 1: words.index("--actor") + 2] != [role]:
                 return _deny("--actor must be your own role; the hook sets identity")
             if "--site" in words and words[words.index("--site") + 1: words.index("--site") + 2] != [str(site.root)]:
                 return _deny("dureh commands must target this site")
-            ident = f"DUREH_ACTOR={shlex.quote(role)}" + (f" DUREH_AGENT_ID={shlex.quote(agent_id)}" if agent_id else "")
-            new_input = dict(ti)
-            if len(words_only) == 1:
-                new_input["command"] = f"{ident} {original}"
-            else:  # identity for every dureh in the line, confined to a subshell
-                new_input["command"] = f"( export {ident}\n{original}\n)"
-            return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
-                                           "permissionDecisionReason": "DUREH harness tool; identity set by hook",
-                                           "updatedInput": new_input}}
+            dureh_seen = True
+            first = "dureh"  # its arguments are not write targets; its redirects are checked below
         targets = []
         for i, w in enumerate(seg):
             if w in _REDIRECTS and i + 1 < len(seg):
@@ -756,6 +729,13 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
             ok, why = _write_decision(site, role, Path(os.path.expanduser(tgt)), cwd, agent_wi, agent_id)
             if not ok:
                 return _deny(f"write to {tgt}: {why}")
+    if dureh_seen:  # every segment passed its own checks; give each dureh in the line this role's identity
+        ident = f"DUREH_ACTOR={shlex.quote(role)}" + (f" DUREH_AGENT_ID={shlex.quote(agent_id)}" if agent_id else "")
+        new_input = dict(ti)
+        new_input["command"] = f"{ident} {original}" if len(words_only) == 1 else f"( export {ident}\n{original}\n)"
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+                                       "permissionDecisionReason": "DUREH harness tool; identity set by hook",
+                                       "updatedInput": new_input}}
     return None
 
 

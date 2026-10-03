@@ -109,6 +109,45 @@ class Ops(SiteCase):
         self.assertIsNone(ops.slurm_submit(s, "desk", w, str(own), dry_run=True)["payload"]["logs"])
         self.assertIsNone(ops.slurm_submit(s, "desk", w, str(script), dry_run=True, extra=["-o", "y.out"])["payload"]["logs"])
 
+    def test_slurm_wait_records_only_the_final_state(self):
+        fake = self.tmp / "fakebin"
+        fake.mkdir()
+        counter = self.tmp / "n"
+        (fake / "sbatch").write_text("#!/bin/sh\necho 4243\n")
+        (fake / "sacct").write_text(f"#!/bin/sh\nn=$(cat {counter} 2>/dev/null || echo 0); n=$((n+1)); echo $n > {counter}\n"
+                                    "if [ $n -lt 3 ]; then echo 'RUNNING|0:0|00:01'; else echo 'COMPLETED|0:0|00:02'; fi\n")
+        for f in ("sbatch", "sacct"):
+            (fake / f).chmod(0o755)
+        cfg = json.loads(self.s.config_path.read_text())
+        cfg["env"] = {"path_prepend": [str(fake)]}
+        self.s.config_path.write_text(json.dumps(cfg))
+        from dureh_core.site import Site
+        s = Site(self.site_root)
+        w = wf.wi_new(s, "desk", "run", "g", "researcher", "site", ["a"])["id"]
+        wf.wi_approve(s, "desk", w, "ok")
+        Ledger(s).event("wi.dispatched", "desk", w, {"role": "researcher"})
+        script = self.tmp / "job.sh"
+        script.write_text("#!/bin/sh\necho hi\n")
+        run = ops.slurm_submit(s, "desk", w, str(script))
+        ev = ops.slurm_wait(s, "desk", run["id"], timeout=30, interval=1)
+        self.assertEqual(ev["payload"]["scheduler_state"], "COMPLETED")
+        self.assertTrue(ev["payload"]["final"])
+        states = [e for e in Ledger(s).events(w) if e["type"] == "run.status"]
+        self.assertEqual(len(states), 1, "only the final state is recorded")
+
+    def test_wi_show_several_with_summary(self):
+        import contextlib
+        import io
+        from dureh_core import cli
+        a = wf.wi_new(self.s, "desk", "A", "g", "researcher", "site", ["a"])["id"]
+        b = wf.wi_new(self.s, "desk", "B", "g", "researcher", "site", ["a"])["id"]
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(cli.main(["--site", str(self.site_root), "wi", "show", "--wi", a, "--wi", b, "--summary"]), 0)
+        out = json.loads(buf.getvalue())
+        self.assertEqual([o["wi"] for o in out], [a, b])
+        self.assertIn("last_events", out[0])
+
     def test_usage_reports_undefined_without_promotions(self):
         t = self.tmp / "t.jsonl"
         t.write_text(json.dumps({"message": {"id": "m1", "usage": {"input_tokens": 10, "output_tokens": 5}}}) + "\n" +

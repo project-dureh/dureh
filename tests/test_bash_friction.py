@@ -36,10 +36,25 @@ class BashFriction(SiteCase):
         self.assertEqual(self.allowed_command(self.bash("bin/dureh status")), "DUREH_ACTOR=py-writer DUREH_AGENT_ID=a1 bin/dureh status")
 
     def test_still_refused(self):
-        for c in ("bin/dureh status | python3 -c 'import sys'", "bin/dureh status > notes/x.txt",
-                  "bin/dureh status; rm notes/x", "for w in a b; do bin/dureh wi show --wi $w; done",
-                  "ls | bin/dureh status", "bin/dureh status | cd /"):
+        for c in ("bin/dureh status > notes/x.txt", "bin/dureh status; rm notes/x",
+                  "for w in a b; do bin/dureh wi show --wi $w; done", "bin/dureh status && touch notes/y"):
             self.assertTrue(denied(self.bash(c)), c)
+
+    def test_any_checked_combination_keeps_the_identity(self):
+        # release 14: every segment is checked by its own rules; each dureh in the line gets the identity
+        for c in ("bin/dureh wi show --wi WI-0001 | python3 -c 'import json,sys; print(1)'",
+                  "echo start\nbin/dureh slurm --help\necho ---\nbin/dureh status",
+                  f"cd {self.site_root} && ls && bin/dureh status"):
+            cmd = self.allowed_command(self.bash(c))
+            self.assertTrue(cmd.startswith("( export DUREH_ACTOR=py-writer"), c)
+
+    def test_git_archive_and_branch_listing_are_reads(self):
+        import os
+        scratch = os.environ["TMPDIR"]
+        self.assertFalse(denied(self.bash(f"git -C {self.site_root} branch -a --contains abc123")))
+        self.assertFalse(denied(self.bash(f"git -C {self.site_root} archive HEAD | tar -x -C {scratch}")))
+        self.assertFalse(denied(self.bash(f"git -C {self.site_root} archive -o {scratch}/a.tar HEAD")))
+        self.assertTrue(denied(self.bash(f"git -C {self.site_root} archive -o {self.site_root}/notes/a.tar HEAD")))
 
     def test_hidden_harness_calls_cannot_borrow_the_desk_identity(self):
         # without the hook's prefix the CLI's default actor is the desk
