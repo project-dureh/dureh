@@ -20,6 +20,21 @@ An optional working rhythm for a site's desk. Off by default; only the Director 
 
 The desk talks to the Director at the start and at the end of the day; in between only when data is at risk.
 
+What the plan approval covers (agreed with the CAMRI-ORG desk, 2026-10-03):
+
+- The plan lists each work item with its expected agent spawns and a rough usage estimate, and the day
+  total against the daily share, so the Director can cut items at plan time.
+- A replacement WI that keeps a plan WI's goal and only fixes its checks, base or constraints (`day decide`).
+- Gate 2 for checker-verified module and project WIs in the plan. Promotion into derivatives and
+  harness/package contributions wait for the end report.
+- After the end time, one checker run for an item staged during the day. A re-dispatch after a failed
+  check is overtime.
+
+Never held by the plan or the clock: stopping an agent (`dispatch stop`) or a scheduler job, merge-window
+handling (idle, `adapter sync`, `verify --self`), recording upstream replies. For data at risk the desk
+tells the Director at once; on the Director's word `dureh day urgent --wi <WI>... --memo "..."` releases
+those WIs from the plan, the clock and the budget until the next day.
+
 ## Usage budget
 
 Every company and the upstream team run as the same user and share one weekly Claude allowance
@@ -35,6 +50,8 @@ usage against the daily share, by default 1/7 of the weekly allowance (`workday.
 - Limits: sessions on other machines (web, app) leave no local transcript and are not counted;
   the rolling seven days differ from the provider's weekly reset. Recalibrate now and then.
 - Accepted overtime items are not held back by the budget; the end report shows the usage.
+- `dureh day status` shows the account total and this site's part (sessions whose working directory is
+  inside the site), so one site cannot silently use up the day for the others.
 
 ## Director commands
 

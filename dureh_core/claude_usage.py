@@ -90,8 +90,12 @@ def _model_weight(model: str, weights: dict) -> float:
     return 1.0
 
 
-def scan(roots: list[str] | None = None, today: date | None = None) -> dict[str, dict[str, dict]]:
-    """{day: {model: {token kind: count}}} for the last WINDOW_DAYS local days, across all transcripts."""
+def scan(roots: list[str] | None = None, today: date | None = None,
+         by_project: bool = False) -> dict:
+    """{day: {model: {token kind: count}}} for the last WINDOW_DAYS local days, across all transcripts.
+
+    by_project: {project dir: {day: {model: ...}}}, the project dir being the transcript folder that
+    Claude Code names after the session's working directory (see project_key)."""
     today = today or date.today()
     first = (today - timedelta(days=WINDOW_DAYS - 1)).isoformat()
     cutoff = time.time() - (WINDOW_DAYS + 1) * 86400
@@ -117,6 +121,7 @@ def scan(roots: list[str] | None = None, today: date | None = None) -> dict[str,
                 continue
             key = str(path)
             seen.add(key)
+            project = path.relative_to(base).parts[0]
             entry = files.get(key) or {}
             if entry.get("size") != st.st_size:
                 try:
@@ -124,6 +129,7 @@ def scan(roots: list[str] | None = None, today: date | None = None) -> dict[str,
                 except OSError:
                     continue
             entry["days"] = {d: v for d, v in entry.get("days", {}).items() if d >= first}
+            entry["project"] = project
             files[key] = entry
     cache["files"] = {k: v for k, v in files.items() if k in seen}
     cache["version"] = CACHE_VERSION
@@ -134,14 +140,39 @@ def scan(roots: list[str] | None = None, today: date | None = None) -> dict[str,
         os.replace(tmp, cache_file)
     except OSError:
         pass
-    out: dict[str, dict[str, dict]] = {}
+    out: dict = {}
     for entry in cache["files"].values():
+        target = out.setdefault(entry.get("project", "?"), {}) if by_project else out
         for day, models in entry.get("days", {}).items():
             for model, tot in models.items():
-                acc = out.setdefault(day, {}).setdefault(model, {k: 0 for k in TOKEN_WEIGHTS})
+                acc = target.setdefault(day, {}).setdefault(model, {k: 0 for k in TOKEN_WEIGHTS})
                 for k in TOKEN_WEIGHTS:
                     acc[k] += tot.get(k, 0)
     return out
+
+
+def project_key(path: str | Path) -> str:
+    """The transcript folder name Claude Code uses for a working directory (non-alphanumerics -> '-')."""
+    import re
+
+    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
+
+
+def by_place(places: dict[str, str], budget: dict | None = None, roots: list[str] | None = None,
+             today: date | None = None) -> dict[str, float]:
+    """Today's units per named place ({label: directory}); sessions under a directory count for it
+    (longest match wins), the rest as `other`."""
+    today = (today or date.today()).isoformat()
+    mw = (budget or {}).get("model_weights") or {}
+    keys = sorted(((project_key(Path(d).expanduser()), label) for label, d in places.items()),
+                  key=lambda kv: -len(kv[0]))
+    out = {label: 0.0 for label in places}
+    out["other"] = 0.0
+    for project, days in scan(roots, None if today is None else date.fromisoformat(today), by_project=True).items():
+        u = sum(units(t, m, mw) for m, t in days.get(today, {}).items())
+        label = next((lab for k, lab in keys if project == k or project.startswith(k + "-")), "other")
+        out[label] += u
+    return {k: round(v, 3) for k, v in out.items()}
 
 
 def units(tokens: dict, model: str, model_weights: dict | None = None) -> float:

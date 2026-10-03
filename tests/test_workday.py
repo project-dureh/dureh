@@ -187,6 +187,51 @@ class Workday(SiteCase):
         self.assertEqual(main(["--site", str(self.site_root), "site", "workday", "off", "--memo", "done"]), 0)
         self.assertFalse(workday.status(self.s)["enabled"])
 
+    def checker_spawn(self, wi):
+        brief = wf.dispatch_brief(self.s, wi, "desk", "checker")["brief"]
+        return hook(self.s, hook_event_name="PreToolUse", tool_name="Agent", cwd=str(self.site_root),
+                    tool_input={"subagent_type": "checker", "prompt": brief, "description": "x"})
+
+    def test_one_checker_run_after_the_end_for_items_staged_during_the_day(self):
+        real = datetime.now().astimezone()  # records carry the real time
+        self.at(real - timedelta(hours=2))
+        self.start_day()
+        self.assertIsNone(self.spawn())
+        wf.wi_stage(self.s, "desk", self.wi, "done")
+        self.at(real + timedelta(hours=7))
+        self.assertIsNone(self.checker_spawn(self.wi))
+        self.assertIsNotNone(workday.gate(self.s, self.wi, checking=True))  # a second check is overtime
+        self.assertIsNotNone(workday.gate(self.s, self.wi))  # so is a re-dispatch
+
+    def test_staged_after_the_end_gets_no_free_checker(self):
+        real = datetime.now().astimezone()  # records carry the real time
+        self.at(real - timedelta(hours=10))
+        self.start_day()
+        self.assertIsNone(self.spawn())
+        self.at(real)
+        wf.wi_stage(self.s, "desk", self.wi, "late")
+        self.assertTrue(denied(self.checker_spawn(self.wi)))
+
+    def test_urgent_releases_a_wi_from_plan_clock_and_budget(self):
+        workday.switch(self.s, True, "trial")
+        self.assertTrue(denied(self.spawn()))
+        workday.urgent(self.s, "desk", [self.wi], "disk filling, go")
+        self.assertIsNone(self.spawn())
+        self.assertIn("urgent " + self.wi, render_status(status(self.s)))
+        self.at(T0 + timedelta(days=2))
+        self.assertEqual(workday.status(self.s)["urgent"], [])
+
+    def test_usage_shows_this_sites_part(self):
+        self.start_day()
+        here = self.projects / claude_usage.project_key(self.site_root)
+        here.mkdir()
+        now = datetime.fromisoformat(os.environ["DUREH_FAKE_NOW"])
+        (here / "s.jsonl").write_text(transcript_line(now, "h1", inp=2_000_000))
+        self.spend(3)
+        u = workday.status(self.s)["usage"]
+        self.assertAlmostEqual(u["today_units"], 5.0)
+        self.assertAlmostEqual(u["this_site_units"], 2.0)
+
     def test_desk_instructions_mention_workday(self):
         text = (self.site_root / "CLAUDE.md").read_text()
         self.assertIn("day plan", text)

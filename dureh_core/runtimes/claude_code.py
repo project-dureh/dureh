@@ -210,7 +210,13 @@ def _claude_md(site: Site) -> str:
               f" When the hours run out (or today's Claude usage reaches the daily share) no new agent starts: write the end report with `{dureh} day end --done ... --problems ... --overtime <WI>...`"
               " and give it to the Director (done, decisions with commits, errors, usage, proposed overtime). Overtime is only for fixing errors from the day's work and normalization tests,"
               f" and only for the items the Director accepts: `{dureh} day overtime --items <WI>... --memo \"<Director's words>\"`; then `{dureh} day close`."
-              " Talk to the Director at the start and the end of the day; between them only for data at risk. `dureh day status` shows the phase and usage;"
+              " The plan lists each work item with its expected agent spawns and a rough usage estimate, and the day total against the daily share."
+              " A replacement WI that keeps a plan WI's goal and only fixes its checks, base or constraints is covered by the plan approval; record it with `day decide`."
+              " Promotion (Gate 2) of checker-verified module and project WIs in the plan is covered by the plan approval; promotion into derivatives and harness/package contributions wait for the end report."
+              " After the end time one checker run is still allowed for an item staged during the day; a re-dispatch after a failed check is overtime."
+              " Never held by the plan or the clock: stopping an agent (`dispatch stop`) or a scheduler job, merge-window handling (idle, adapter sync, verify --self), recording upstream replies."
+              f" Data at risk: tell the Director at once; on the Director's word run `{dureh} day urgent --wi <WI>... --memo \"<Director's words>\"` (releases those WIs from the plan, the clock and the budget until tomorrow)."
+              " Talk to the Director at the start and the end of the day; between them only for data at risk. `dureh day status` shows the phase and usage (account total and this site's part);"
               " the usage budget is shared by every company and upstream, so check it before each work item.",
               f"12. Before the session ends, write a short handoff to `state/memory/handoff.md` (what is open, what the Director decided, what is next).", "",
               "Small questions the Director asks may be answered directly. Research that needs many sources goes to `researcher`; long documents go to `doc-writer`.",
@@ -721,7 +727,7 @@ def pre_tool_use(site: Site, data: dict) -> dict | None:
             return _deny(f"the brief is for {brief_role}, not {target}")
         from ..workday import gate
 
-        why = gate(site, wi)
+        why = gate(site, wi, checking=target == "checker")
         if why:
             return _deny(why)
         with led.lock():

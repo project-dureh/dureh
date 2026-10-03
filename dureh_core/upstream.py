@@ -161,6 +161,17 @@ def _request_line(text: str) -> str:
     return ""
 
 
+def _open_request_files(site: Site) -> list[Path]:
+    out = []
+    for path in sorted(notes_dir(site).glob("UR-*.md")) if notes_dir(site).is_dir() else []:
+        if not UR_ID.match(path.stem):
+            continue
+        st = _field(path.read_text(encoding="utf-8"), "Status")
+        if (st.split()[0].strip(",;:").lower() if st else "open") == "open":
+            out.append(path)
+    return out
+
+
 def message(site: Site) -> str:
     """Paste-ready text the Director forwards upstream. Reads the UR files only; writes nothing."""
     dep = site.root / "deployment.json"
@@ -309,7 +320,10 @@ def export(site: Site, actor: str, ur: str, out: str | None = None) -> dict:
 
 
 # ------------------------------------------------------------- mailbox (D6)
-SEND_KINDS = ("request", "idle", "notice", "landed")
+SEND_KINDS = ("request", "reply", "idle", "notice", "landed")
+TEMPLATE_PLACEHOLDERS = ("<expected behavior or the exact diff>", "<at least two if a decision is needed>",
+                         "<WIs that wait on this request>", "<WIs that proceed meanwhile>",
+                         "<none, or what briefs must say until it lands>")
 CLOSED_WORDS = CLOSED
 
 
@@ -369,6 +383,11 @@ def send(site: Site, actor: str, kind: str = "request", body_file: str | None = 
     elif body_file:
         body = Path(body_file).read_text(encoding="utf-8")
     elif kind == "request":
+        unfilled = [r for r in _open_request_files(site)
+                    if any(ph in r.read_text(encoding="utf-8") for ph in TEMPLATE_PLACEHOLDERS)]
+        if unfilled:
+            fail("fill the template sections before sending (placeholders left in "
+                 + ", ".join(p.name for p in unfilled) + ")")
         body = message(site)
     else:
         fail(f"--kind {kind} needs --body-file")

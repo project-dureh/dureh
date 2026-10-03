@@ -13,6 +13,14 @@ from .util import DurehError, dumps, fail
 RESERVED_EVENT_PREFIXES = ("workday.", "day.")
 
 
+def _percent(value: str) -> float:
+    try:
+        return float(value.strip().rstrip("%"))
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a number; use the week's percentage from Claude Code "
+                                         "/usage, for example --weekly-percent 16") from None
+
+
 def _site(args):
     from .site import find_site
 
@@ -148,7 +156,7 @@ def cmd_dispatch_brief(a):
     from .workflow import dispatch_brief
     from .workday import gate
 
-    why = gate(_site(a), a.wi)
+    why = gate(_site(a), a.wi, checking=a.role == "checker")
     if why:
         fail(why)
     r = dispatch_brief(_site(a), a.wi, _actor(a), a.role)
@@ -346,6 +354,8 @@ def cmd_day(a):
         _print(workday.overtime(site, actor, a.items, a.memo))
     elif c == "close":
         _print(workday.close(site, actor, a.note or ""))
+    elif c == "urgent":
+        _print(workday.urgent(site, actor, a.wi, a.memo))
 
 
 def cmd_upstream(a):
@@ -592,7 +602,7 @@ def parser() -> argparse.ArgumentParser:
     x = add(st, "workday", cmd_site_workday, "Director's switch for workday mode (8-hour day, plan/report, usage budget)")
     x.add_argument("action", choices=["on", "off", "calibrate", "status"])
     x.add_argument("--memo", help="the Director's reason (on/off)")
-    x.add_argument("--weekly-percent", type=float, help="calibrate: current week's usage percent shown by Claude Code /usage")
+    x.add_argument("--weekly-percent", type=_percent, help="calibrate: current week's usage percent shown by Claude Code /usage")
 
     dy = sub.add_parser("day", help="workday mode: day plan, approval, decisions, end report, overtime"
                         ).add_subparsers(dest="day_command", required=True)
@@ -615,6 +625,9 @@ def parser() -> argparse.ArgumentParser:
     x = add(dy, "overtime", cmd_day, "record the overtime items the Director accepted")
     x.add_argument("--items", nargs="+", required=True)
     x.add_argument("--memo", required=True)
+    x = add(dy, "urgent", cmd_day, "data at risk: record the Director's release of WIs from the plan, clock and budget")
+    x.add_argument("--wi", nargs="+", required=True)
+    x.add_argument("--memo", required=True)
     x = add(dy, "close", cmd_day, "close the day (no overtime, or overtime finished)")
     x.add_argument("--note")
     for sp in dy.choices.values():
@@ -632,7 +645,7 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--json", action="store_true")
     add(up, "message", cmd_upstream, "print the paste-ready message the Director forwards upstream (writes nothing)")
     x = add(up, "send", cmd_upstream, "desk: write a message into the upstream exchange (config.json upstream.exchange)")
-    x.add_argument("--kind", default="request", choices=["request", "idle", "notice", "landed"])
+    x.add_argument("--kind", default="request", choices=["request", "reply", "idle", "notice", "landed"])
     x.add_argument("--body-file")
     x.add_argument("--actor")
     x = add(up, "inbox", cmd_upstream, "new messages from upstream; --record marks them received and keeps approvals")

@@ -33,6 +33,7 @@ from .util import DurehError, fail
 
 DEFAULT_HOURS = 8.0
 DAY_TYPES = ("day.planned", "day.approved", "day.decision", "day.ended", "day.overtime", "day.closed")
+URGENT = "day.urgent"
 
 
 def _now() -> datetime:
@@ -97,8 +98,10 @@ def budget(site: Site, events: list[dict] | None = None) -> dict:
 
 def usage(site: Site, events: list[dict] | None = None) -> dict:
     b = budget(site, events)
-    s = claude_usage.summary(b, settings(site)["transcripts"], _now().date())
+    roots = settings(site)["transcripts"]
+    s = claude_usage.summary(b, roots, _now().date())
     s.update(budget_source=b["source"], calibrated=b["calibrated"])
+    s["this_site_units"] = claude_usage.by_place({"site": str(site.root)}, b, roots, _now().date())["site"]
     return s
 
 
@@ -141,6 +144,7 @@ def status(site: Site) -> dict:
     if not enabled(site, evs):
         return {"enabled": False}
     out = {"enabled": True, "hours": settings(site)["hours"], **day(site, evs)}
+    out["urgent"] = _urgent(evs)
     try:
         out["usage"] = usage(site, evs)
     except OSError as exc:
@@ -161,9 +165,12 @@ def render(st: dict) -> str | None:
     u = st.get("usage") or {}
     if u.get("daily_allowance"):
         line += (f"; usage today {u['today_units']}/{u['daily_allowance']} units"
-                 f" ({round(100 * (u['today_fraction'] or 0))}% of the daily share), week {u['week_percent']}%")
+                 f" ({round(100 * (u['today_fraction'] or 0))}% of the daily share, this site {u.get('this_site_units', 0)}),"
+                 f" week {u['week_percent']}%")
     elif "today_units" in u:
-        line += f"; usage today {u['today_units']} units (budget not calibrated)"
+        line += f"; usage today {u['today_units']} units, this site {u.get('this_site_units', 0)} (budget not calibrated)"
+    if st.get("urgent"):
+        line += "; urgent " + ", ".join(st["urgent"])
     return line
 
 
@@ -178,13 +185,34 @@ def _wi_family(led: Ledger, wi: str) -> set[str]:
     return fam
 
 
-def gate(site: Site, wi: str | None) -> str | None:
-    """Reason to refuse starting a work unit (an agent for `wi`) now, or None."""
+def _urgent(evs: list[dict]) -> list[str]:
+    """WIs the Director released for data at risk; they hold until the day after their record."""
+    today = _now().date().isoformat()
+    return sorted({w for e in evs if e["type"] == URGENT and e["payload"].get("until", "") >= today
+                   for w in e["payload"]["items"]})
+
+
+def _first_check_of_staged(site: Site, wi: str, end: str) -> bool:
+    """A checker run for an item staged before the day's end, and the first since that staging."""
+    evs = Ledger(site).events(wi)
+    staged = [e for e in evs if e["type"] == "wi.staged"]
+    if not staged or _parse(staged[-1]["ts"]) >= _parse(end):
+        return False
+    return not [e for e in evs if e["type"] == "checker.dispatched" and e["ts"] > staged[-1]["ts"]]
+
+
+def gate(site: Site, wi: str | None, checking: bool = False) -> str | None:
+    """Reason to refuse starting a work unit (an agent for `wi`; `checking` for a checker run) now, or None."""
     evs = _events(site)
     if not enabled(site, evs):
         return None
+    if wi and _wi_family(Ledger(site), wi) & set(_urgent(evs)):
+        return None  # data at risk: released by the Director, not held by the clock or the budget
     d = day(site, evs)
     phase = d["phase"]
+    if checking and wi and d.get("end") and phase in ("past-end", "overtime", "off-duty") \
+            and _first_check_of_staged(site, wi, d["end"]):
+        return None  # one checker run for an item staged during the day (desk request, UP-0030)
     if phase in ("off-duty", "planned"):
         return (f"workday mode: no approved day ({d.get('reason')}). Report the day plan with `dureh day plan` "
                 "and record the Director's approval with `dureh day approve --memo`.")
@@ -325,6 +353,18 @@ def overtime(site: Site, actor: str, items: list[str], memo: str) -> dict:
     for w in items:
         led.get("work-item", w)
     return led.event("day.overtime", actor, None, {"items": items, "memo": memo, "by": "Director"}, [d["report"]])
+
+
+def urgent(site: Site, actor: str, items: list[str], memo: str) -> dict:
+    """Data at risk: the Director releases WIs from the day plan, the clock and the budget (today and tomorrow)."""
+    _require_on(site)
+    if not memo.strip() or not items:
+        fail("--wi and --memo (the Director's words) are required")
+    led = Ledger(site)
+    for w in items:
+        led.get("work-item", w)
+    until = (_now().date() + timedelta(days=1)).isoformat()
+    return led.event(URGENT, actor, None, {"items": items, "memo": memo, "by": "Director", "until": until})
 
 
 def close(site: Site, actor: str, note: str) -> dict:

@@ -48,6 +48,20 @@ class SiteMailbox(SiteCase):
                               f"created: t\n---\n{body}\n")
         return name
 
+    def test_send_refuses_template_placeholders(self):
+        d = up.notes_dir(self.s)
+        (d / "UR-20261002-02.md").write_text(UR.format(id="UR-20261002-02", title="t", status="open", blocked="none")
+                                             .replace("fix it", "<expected behavior or the exact diff>"))
+        with self.assertRaises(DurehError) as cm:
+            up.send(self.s, "desk", "request")
+        self.assertIn("UR-20261002-02.md", str(cm.exception))
+
+    def test_send_reply_kind(self):
+        body = self.tmp / "reply.md"
+        body.write_text("answers")
+        r = up.send(self.s, "desk", "reply", str(body))
+        self.assertEqual(r["kind"], "reply")
+
     def test_send_writes_the_message_and_a_forward_copy(self):
         r = up.send(self.s, "desk", "request")
         sent = list((self.box / "to-upstream").glob("*-request-*.md"))
