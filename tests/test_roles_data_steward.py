@@ -22,6 +22,12 @@ class DataStewardScope(unittest.TestCase):
                   and self.org.scope_allows(r, "projects/lna/derivatives/x")]
         self.assertEqual(others, [])
 
+    def test_container_recipes_are_in_scope_other_code_is_not(self):
+        # UR-20261003-03 (UNC_Lee_CAMRI-ORG): camri needs projects/<p>/code/containers/<name>.def next to the pinned SIF
+        self.assertTrue(self.org.scope_allows("data-steward", "projects/lna/code/containers/fsl.def"))
+        for rel in ("projects/lna/code/devnotes/x.md", "projects/lna/code/run.sh"):
+            self.assertFalse(self.org.scope_allows("data-steward", rel), rel)
+
     def test_never_line_names_what_stays_forbidden(self):
         never = self.org.role("data-steward").never
         for word in ("sourcedata", "raw BIDS", "pipeline execution", "code"):

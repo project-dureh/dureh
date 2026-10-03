@@ -88,7 +88,7 @@ roles:
     kind: worker
     tier: worker
     output: DataLad structure and project metadata (init, subdataset registration, links, manifest), and promotion of verified results into derivatives/.
-    never: Editing sourcedata or raw BIDS data, pipeline execution, code.
+    never: Editing sourcedata or raw BIDS data, pipeline execution, code (except landing container recipes under code/containers/ from a pinned source).
     may_dispatch: []
     write_scopes:
       - projects/*/derivatives/**
@@ -99,6 +99,7 @@ roles:
       - projects/*/.gitmodules
       - projects/*/.bidsignore
       - projects/*/sourcedata/atlases/**
+      - projects/*/code/containers/**
   pipeline-runner:
     kind: worker
     tier: worker
