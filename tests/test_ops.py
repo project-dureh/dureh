@@ -7,7 +7,7 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from helpers import HARNESS, SiteCase
+from helpers import HARNESS, SiteCase, copy_writable
 
 from dureh_core import ops
 from dureh_core import workflow as wf
@@ -116,7 +116,7 @@ class Ops(SiteCase):
 
         task = [t for t in tasks("py-writer") if t.name == "pyw-001-missing-input"][0]
         ws = self.tmp / "ws"
-        shutil.copytree(task / "fixture", ws)
+        copy_writable(task / "fixture", ws)
         from dureh_core.exams import score
         r = score(self.s, "desk", "py-writer", str(ws), None)
         self.assertEqual(r["result"], "fail", "unfixed fixture must fail the oracle")

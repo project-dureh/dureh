@@ -5,7 +5,7 @@ import subprocess
 import unittest
 from pathlib import Path
 
-from helpers import SiteCase
+from helpers import SiteCase, copy_writable
 
 from dureh_core import promote as pr
 from dureh_core.records import Ledger
@@ -74,7 +74,7 @@ class Promote(SiteCase):
         self.s = self.site()
         self.led = Ledger(self.s)
         self.proj = self.site_root / "projects" / "lna"
-        shutil.copytree(self.template, self.proj, symlinks=True)
+        copy_writable(self.template, self.proj, symlinks=True)
         self.ds = self.proj / "derivatives" / "fmriprep"
         self.ck = self.proj / "checkpoints" / "fmriprep" / "sub-01" / "func"
         self.ck.mkdir(parents=True)

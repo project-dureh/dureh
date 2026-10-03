@@ -7,7 +7,7 @@ import sys
 import unittest
 from pathlib import Path
 
-from helpers import HARNESS, SiteCase
+from helpers import HARNESS, SiteCase, copy_writable
 
 from dureh_core.util import DurehError
 
@@ -46,7 +46,7 @@ class Install(SiteCase):
         self.package = self.tmp / "package2"
         import shutil
         from helpers import FIXTURE_PACKAGE
-        shutil.copytree(FIXTURE_PACKAGE, self.package)
+        copy_writable(FIXTURE_PACKAGE, self.package)
         self.site_root.mkdir()
         (self.site_root / "keep.txt").write_text("x")
         with self.assertRaises(DurehError):

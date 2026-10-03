@@ -15,6 +15,17 @@ GIT_ENV = {"GIT_AUTHOR_NAME": "DUREH Test", "GIT_AUTHOR_EMAIL": "test@example.in
            "GIT_COMMITTER_NAME": "DUREH Test", "GIT_COMMITTER_EMAIL": "test@example.invalid"}
 
 
+def copy_writable(src, dst, **kw) -> None:
+    """copytree, then make the copy writable: release checkouts are read-only (D1) and copytree keeps modes."""
+    shutil.copytree(src, dst, **kw)
+    for root, dirs, files in os.walk(dst):
+        for name in dirs + files:
+            p = Path(root) / name
+            if not p.is_symlink():
+                p.chmod(p.stat().st_mode | 0o200)
+    Path(dst).chmod(Path(dst).stat().st_mode | 0o200)
+
+
 class SiteCase(unittest.TestCase):
     """Creates tmp/{package, site, ref}. The package is a git repo so installs record a revision."""
 
@@ -27,7 +38,7 @@ class SiteCase(unittest.TestCase):
         os.environ["TMPDIR"] = str(self.tmp / "nodelocal")
         (self.tmp / "nodelocal").mkdir()
         self.package = self.tmp / "package"
-        shutil.copytree(FIXTURE_PACKAGE, self.package)
+        copy_writable(FIXTURE_PACKAGE, self.package)
         self.ref = self.tmp / "reference-repo"
         (self.ref / "docs").mkdir(parents=True)
         (self.ref / "docs" / "old.md").write_text("old rules; do not follow\n")
