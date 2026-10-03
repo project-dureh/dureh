@@ -443,6 +443,31 @@ def _strip_heredocs(command: str) -> str:
     return "".join(out)
 
 
+_REDIRECT_OPS = _REDIRECTS | {">&", "<", "<&", "<>", "&>", "&>>", "<<<"}
+
+
+def _split_redirects(words: list[str]) -> tuple[list[str], list[str]]:
+    """(words without redirections, file targets of output redirections). `2>/dev/null` arrives as
+    `2`, `>`, `/dev/null`: an fd number right before an operator belongs to the redirection, and
+    duplications (`>&2`, `2>&1`) and /dev/* write no file (UR-20261003-05)."""
+    out, targets, i = [], [], 0
+    while i < len(words):
+        w = words[i]
+        if w.isdigit() and i + 1 < len(words) and words[i + 1] in _REDIRECT_OPS:
+            i += 1
+            continue
+        if w in _REDIRECT_OPS:
+            tgt = words[i + 1] if i + 1 < len(words) else ""
+            if w in _REDIRECTS | {"&>", "&>>", "<>"} and tgt and not tgt.startswith("&") \
+                    and not tgt.startswith("/dev/") and not (w in (">&",) and tgt.isdigit()):
+                targets.append(tgt)
+            i += 2
+            continue
+        out.append(w)
+        i += 1
+    return out, targets
+
+
 def _segments(command: str) -> list[list[str]]:
     lex = shlex.shlex(_strip_heredocs(command).replace("\n", " ; "), posix=True, punctuation_chars=";&|<>")
     lex.whitespace_split = True
@@ -706,10 +731,7 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
                 return _deny("dureh commands must target this site")
             dureh_seen = True
             first = "dureh"  # its arguments are not write targets; its redirects are checked below
-        targets = []
-        for i, w in enumerate(seg):
-            if w in _REDIRECTS and i + 1 < len(seg):
-                targets.append(seg[i + 1])
+        words, targets = _split_redirects(words)
         args = [w for w in words[1:] if not w.startswith("-")]
         if first == "tee":
             targets += args
