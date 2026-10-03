@@ -18,5 +18,16 @@ class PyWriterScope(unittest.TestCase):
             self.assertFalse(self.org.scope_allows("py-writer", rel), rel)
 
 
+class Notebooks(unittest.TestCase):
+    # UR-20261003-06 (UNC_Lee_CAMRI-ORG): one marimo notebook per pipeline in the project's code/ folder
+    def test_project_notebooks_in_scope_other_project_code_not(self):
+        from dureh_core.org import HARNESS_ROOT, Org
+
+        org = Org.load(HARNESS_ROOT)
+        self.assertTrue(org.scope_allows("py-writer", "projects/lna/code/notebooks/camri_preproc.py"))
+        for rel in ("projects/lna/code/containers/fsl.def", "projects/lna/code/run.sh", "projects/lna/derivatives/x"):
+            self.assertFalse(org.scope_allows("py-writer", rel), rel)
+
+
 if __name__ == "__main__":
     unittest.main()
