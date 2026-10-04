@@ -6,6 +6,7 @@ import hashlib
 import os
 import re
 import shutil
+import stat
 import subprocess
 import time
 from datetime import date
@@ -686,9 +687,99 @@ def _own_branch(site: Site, led: Ledger, wi: str, root: Path, branch: str) -> bo
     return bool(tip) and tip in recorded
 
 
+def _log_name(pattern: str, job: str, name: str) -> str | None:
+    """An sbatch filename pattern with %j/%x (and %%) filled in; None when another pattern is left."""
+    out, i = [], 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c != "%":
+            out.append(c)
+            i += 1
+            continue
+        nxt = pattern[i + 1:i + 2]
+        if nxt == "j":
+            out.append(job)
+        elif nxt == "x":
+            out.append(name)
+        elif nxt == "%":
+            out.append("%")
+        else:
+            return None
+        i += 2
+    return "".join(out)
+
+
+def _wi_job_logs(site: Site, led: Ledger, wi: str, rec: dict) -> tuple[list[Path], list[dict]]:
+    """Scheduler log files of this WI's own jobs (UR-20261004-01, option A).
+
+    Job ids come only from the WI's slurm run records. A record from release 19 on names its files
+    (log_out/log_err); for an older one the candidates are `dureh-<WI>-<job>.out|.err` (the job name
+    submit always set, through the `%x-%j` pattern the site's scripts used), sbatch's default
+    `slurm-<job>.out`, and the script's own #SBATCH -o/-e name when it carries the job id; they are
+    looked for in the recorded chdir, the WI target root, the site root and any directory the recorded
+    script names with -o/-e. A file is taken only when its name holds the job id, it is a regular file
+    (not a symlink) and its real directory lies inside the site tree. Returns (files, skipped)."""
+    from .ops import _scan_opt, _script_opt
+
+    site_real = os.path.realpath(site.root)
+    target = rec["payload"].get("target")
+    troot = target_root(site, target) if target not in (None, "site", "harness", "package") else None
+    found: list[Path] = []
+    skipped: list[dict] = []
+    for run in led.load("run"):
+        if run["wi"] != wi or run["type"] != "slurm" or not run["payload"].get("job_id"):
+            continue
+        p = run["payload"]
+        job = str(p["job_id"]).split(";")[0].strip()
+        jname = _scan_opt([str(w) for w in p.get("command") or []], "-J", "--job-name") or f"dureh-{wi}"
+        candidates: list[str] = []
+        if p.get("log_out") or p.get("log_err"):
+            candidates = [x for x in (p.get("log_out"), p.get("log_err")) if x]
+        else:
+            bases = [Path(b) for b in (p.get("chdir"), troot, site.root) if b]
+            names = [f"dureh-{wi}-{job}.out", f"dureh-{wi}-{job}.err", f"slurm-{job}.out"]
+            dirs = list(bases)
+            script = Path(p["script"]) if p.get("script") else None
+            if script is not None and not script.is_absolute():
+                script = next((b / script for b in bases if (b / script).is_file()), None)
+            if script is not None and script.is_file() and \
+                    os.path.realpath(script).startswith(site_real + os.sep):
+                for short, long in (("-o", "--output"), ("-e", "--error")):
+                    val = _script_opt(script, short, long)
+                    if not val:
+                        continue
+                    sub = Path(val).parent
+                    dirs += [sub] if sub.is_absolute() else [b / sub for b in bases]
+                    nm = _log_name(Path(val).name, job, jname)
+                    if nm:
+                        names.append(nm)
+            candidates = [str(d / n) for d in dirs for n in dict.fromkeys(names)]
+        for c in dict.fromkeys(candidates):
+            name = _log_name(Path(c).name, job, jname)
+            if name is None or job not in name:
+                skipped.append({"path": c, "job_id": job, "reason": "name does not resolve to one holding the job id"})
+                continue
+            if not Path(c).is_absolute():
+                skipped.append({"path": c, "job_id": job, "reason": "relative path"})
+                continue
+            parent = os.path.realpath(Path(c).parent)
+            if parent != site_real and not parent.startswith(site_real + os.sep):
+                if p.get("log_out") or p.get("log_err"):
+                    skipped.append({"path": c, "job_id": job, "reason": "outside the site tree"})
+                continue
+            f = Path(parent) / name
+            try:
+                st = os.lstat(f)
+            except OSError:
+                continue  # missing: nothing to remove
+            if stat.S_ISREG(st.st_mode) and f not in found:
+                found.append(f)
+    return found, skipped
+
+
 def purge(site: Site, actor: str, wi: str, dry_run: bool = False) -> dict:
-    """Remove a WI's worktree and scratch checkpoints. Validate the whole set first;
-    symlinks are removed as links and their targets are never followed."""
+    """Remove a WI's worktree and scratch checkpoints, and the scheduler logs of its own jobs.
+    Validate the whole set first; symlinks are removed as links and their targets are never followed."""
     if site.org.role(actor).kind != "desk":
         fail("only the desk purges")
     led = Ledger(site)
@@ -708,8 +799,12 @@ def purge(site: Site, actor: str, wi: str, dry_run: bool = False) -> dict:
     for it in items:  # validate everything before removing anything
         if not (str(it).startswith(str(site.worktrees) + os.sep) or "/checkpoints/" in str(it)):
             fail(f"refusing to purge outside WI scratch paths: {it}")
-    removed = []
+    logs, skipped_logs = _wi_job_logs(site, led, wi, rec)
+    removed, removed_logs = [], []
     if not dry_run:
+        for f in logs:
+            f.unlink()
+            removed_logs.append(str(f))
         for it in items:
             if it.is_symlink() or it.is_file():
                 it.unlink()
@@ -725,5 +820,10 @@ def purge(site: Site, actor: str, wi: str, dry_run: bool = False) -> dict:
             else:
                 shutil.rmtree(it)
             removed.append(str(it))
-        led.event("purged", actor, wi, {"removed": removed})
-    return {"wi": wi, "planned": [str(i) for i in items], "removed": removed, "dry_run": dry_run}
+        led.event("purged", actor, wi, {"removed": removed, "removed_logs": removed_logs,
+                                         **({"skipped_logs": skipped_logs} if skipped_logs else {})})
+    out = {"wi": wi, "planned": [str(i) for i in items], "planned_logs": [str(f) for f in logs],
+           "removed": removed, "removed_logs": removed_logs, "dry_run": dry_run}
+    if skipped_logs:
+        out["skipped_logs"] = skipped_logs
+    return out

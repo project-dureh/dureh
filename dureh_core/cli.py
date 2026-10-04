@@ -682,7 +682,7 @@ def parser() -> argparse.ArgumentParser:
 
     x = add(sub, "path-refs", cmd_path_refs, "find references to a path before moving or deleting it")
     x.add_argument("path")
-    x = add(sub, "purge", cmd_purge, "remove a finished WI's worktree and scratch outputs")
+    x = add(sub, "purge", cmd_purge, "remove a finished WI's worktree, scratch outputs and its own jobs' scheduler logs")
     x.add_argument("--wi", required=True)
     x.add_argument("--dry-run", action="store_true")
     x.add_argument("--actor")

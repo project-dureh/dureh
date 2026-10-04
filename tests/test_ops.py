@@ -49,6 +49,97 @@ class Ops(SiteCase):
         with self.assertRaisesRegex(DurehError, "only the desk"):
             wf.purge(self.s, "py-writer", w)
 
+    def _stopped_project_wi(self, s=None):
+        s = s or self.s
+        (self.site_root / "projects" / "lna").mkdir(parents=True, exist_ok=True)
+        w = wf.wi_new(s, "desk", "run", "g", "researcher", "projects/lna", ["a"])["id"]
+        wf.wi_approve(s, "desk", w, "ok")
+        return w
+
+    def test_purge_removes_old_job_logs_in_project_root_only(self):
+        """UR-20261004-01: a record from before release 19 (no log_out/log_err, no chdir); the
+        site's shape was projects/<P>/dureh-WI-0052-3612221.{out,err} in the project root."""
+        w = self._stopped_project_wi()
+        Ledger(self.s).append("run", "slurm", "desk", w, {
+            "run_type": "slurm", "status": "submitted", "job_id": "3612221",
+            "command": ["sbatch", "--parsable", f"--job-name=dureh-{w}", "job.sh"], "script": "job.sh"})
+        proj = self.site_root / "projects" / "lna"
+        mine = [proj / f"dureh-{w}-3612221.out", proj / f"dureh-{w}-3612221.err"]
+        keep = [proj / f"dureh-{w}-9999999.out",  # a job id this WI never recorded
+                proj / "dureh-WI-0999-3612221.out",  # another WI's name
+                proj / "notes.out"]
+        for f in mine + keep:
+            f.write_text("log\n")
+        outside = self.tmp / "outside.out"
+        outside.write_text("not the site's")
+        (self.site_root / f"dureh-{w}-3612221.out").symlink_to(outside)  # a link, never a regular file
+        Ledger(self.s).event("wi.dispatched", "desk", w, {"role": "researcher"})
+        wf.dispatch_stop(self.s, "desk", w, "test")
+        plan = wf.purge(self.s, "desk", w, dry_run=True)
+        self.assertEqual(sorted(plan["planned_logs"]), sorted(str(f) for f in mine))
+        self.assertTrue(all(f.is_file() for f in mine), "dry run removes nothing")
+        out = wf.purge(self.s, "desk", w)
+        self.assertEqual(sorted(out["removed_logs"]), sorted(str(f) for f in mine))
+        self.assertFalse(any(f.exists() for f in mine))
+        self.assertTrue(all(f.is_file() for f in keep))
+        self.assertTrue((self.site_root / f"dureh-{w}-3612221.out").is_symlink() and outside.is_file())
+        rec = [e for e in Ledger(self.s).events(w) if e["type"] == "purged"][-1]
+        self.assertEqual(sorted(rec["payload"]["removed_logs"]), sorted(str(f) for f in mine))
+
+    def test_purge_removes_old_job_logs_in_dir_named_by_script(self):
+        """The site's second shape: <site>/checkpoints/phase-d/dureh-WI-0077-3639768.{out,err}, a site-root
+        subdirectory named by the recorded script's #SBATCH -o/-e."""
+        w = self._stopped_project_wi()
+        script = self.site_root / "projects" / "lna" / "code" / "phase_d.sh"
+        script.parent.mkdir(parents=True)
+        script.write_text("#!/bin/sh\n#SBATCH -o checkpoints/phase-d/%x-%j.out\n"
+                          "#SBATCH --error=checkpoints/phase-d/%x-%j.err\necho hi\n")
+        Ledger(self.s).append("run", "slurm", "desk", w, {
+            "run_type": "slurm", "status": "submitted", "job_id": "3639768",
+            "command": ["sbatch", "--parsable", f"--job-name=dureh-{w}", str(script)], "script": str(script)})
+        d = self.site_root / "checkpoints" / "phase-d"
+        d.mkdir(parents=True)
+        mine = [d / f"dureh-{w}-3639768.out", d / f"dureh-{w}-3639768.err"]
+        keep = d / "summary.json"
+        for f in mine + [keep]:
+            f.write_text("x")
+        wf.dispatch_stop(self.s, "desk", w, "test")
+        out = wf.purge(self.s, "desk", w)
+        self.assertEqual(sorted(out["removed_logs"]), sorted(str(f) for f in mine))
+        self.assertTrue(keep.is_file() and d.is_dir())
+
+    def test_purge_removes_recorded_job_logs_inside_the_site_only(self):
+        fake = self.tmp / "fakebin"
+        fake.mkdir()
+        (fake / "sbatch").write_text("#!/bin/sh\necho 4244\n")
+        (fake / "sbatch").chmod(0o755)
+        cfg = json.loads(self.s.config_path.read_text())
+        cfg["env"] = {"path_prepend": [str(fake)]}
+        self.s.config_path.write_text(json.dumps(cfg))
+        from dureh_core.site import Site
+        s = Site(self.site_root)
+        w = self._stopped_project_wi(s)
+        Ledger(s).event("wi.dispatched", "desk", w, {"role": "researcher"})
+        script = self.tmp / "job.sh"
+        script.write_text("#!/bin/sh\necho hi\n")
+        run = ops.slurm_submit(s, "desk", w, str(script))
+        self.assertTrue(run["payload"]["log_out"].endswith("%x-%j.out"))
+        logs = self.site_root / "logs" / "slurm" / w
+        mine = [logs / f"dureh-{w}-4244.out", logs / f"dureh-{w}-4244.err"]
+        for f in mine:
+            f.write_text("x")
+        away = self.tmp / "away"
+        away.mkdir()
+        own = self.tmp / "own.sh"
+        own.write_text(f"#!/bin/sh\n#SBATCH --output={away}/%x-%j.out\necho hi\n")
+        ops.slurm_submit(s, "desk", w, str(own))
+        (away / f"dureh-{w}-4244.out").write_text("outside the site")
+        wf.dispatch_stop(s, "desk", w, "test")
+        out = wf.purge(s, "desk", w)
+        self.assertEqual(sorted(out["removed_logs"]), sorted(str(f) for f in mine))
+        self.assertTrue((away / f"dureh-{w}-4244.out").is_file(), "never outside the site tree")
+        self.assertTrue(any(x["reason"] == "outside the site tree" for x in out["skipped_logs"]))
+
     def test_push_requires_allowlist_and_bound_approval(self):
         repo = self.make_module()
         bare = self.tmp / "remote.git"
