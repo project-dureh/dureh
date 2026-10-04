@@ -40,7 +40,9 @@ WEEKDAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 DEFAULT_WEEKDAYS = (0, 1, 2, 3, 4)
 PHASES = ("development", "production")
 DEFAULT_PHASE = "development"
-DEVICES = ("hours", "weekday", "usage", "session")
+DEVICES = ("hours", "weekday", "usage", "session")  # attendance safety devices, each a Director switch
+DEVICE_EVENT, BLACK_EVENT = "workday.device", "workday.black-company"
+BLACK_NAME = "블랙기업모드"  # identifier `black-company`: every device off at once, loudly
 HOURS_EXCEEDED = "hours.exceeded"  # development phase: recorded once per day when the 8 hours pass
 
 
@@ -80,12 +82,37 @@ def _phase(raw) -> str:
     return phase
 
 
-def device_on(site: Site, name: str) -> bool:
+def devices(site: Site, events: list[dict] | None = None) -> dict:
+    """The Director's device switches, replayed from the records: {"state": {device: bool}, "black_company":
+    {since, memo} | None}. Black-company mode turns every device off and remembers the state it found;
+    switching it off restores that state."""
+    state = {d: True for d in DEVICES}
+    black = None
+    for e in (events if events is not None else _events(site)):
+        pl = e["payload"]
+        if pl.get("by") != "Director":
+            continue
+        if e["type"] == DEVICE_EVENT and pl.get("device") in DEVICES:
+            state[pl["device"]] = bool(pl.get("enabled"))
+        elif e["type"] == BLACK_EVENT:
+            if pl.get("enabled"):
+                black = {"since": e["ts"], "memo": pl.get("memo"), "record": e["id"], "previous": dict(state)}
+                state = {d: False for d in DEVICES}
+            elif black is not None:
+                state = {d: bool(black["previous"].get(d, True)) for d in DEVICES}
+                black = None
+    return {"state": state, "black_company": black}
+
+
+def device_on(site: Site, name: str, events: list[dict] | None = None) -> bool:
     """Whether an attendance device applies: `hours` (the 8-hour clock), `weekday` (workday.weekdays), `usage`
-    (the daily usage gate), `session` (session start/close checks). In the development phase the weekday
+    (the daily usage gate), `session` (session start/close checks). Off when the Director switched it off
+    (`dureh site workday set <device> off`, or black-company mode); in the development phase the weekday
     device is off and the hours device only warns (see `hours_mode`)."""
     if name not in DEVICES:
         fail(f"unknown attendance device {name!r}; devices: {', '.join(DEVICES)}")
+    if not devices(site, events)["state"][name]:
+        return False
     if name == "weekday" and settings(site)["phase"] == "development":
         return False
     return True
@@ -256,9 +283,13 @@ def _session_clock(site: Site, session: dict | None) -> dict:
 
 def status(site: Site) -> dict:
     evs = _events(site)
+    dv = devices(site, evs)
+    switches = {"devices": dv["state"], "devices_off": [d for d in DEVICES if not dv["state"][d]],
+                "black_company": dv["black_company"]}
     if not enabled(site, evs):
-        return {"enabled": False}
-    out = {"enabled": True, "hours": settings(site)["hours"], "workday_phase": settings(site)["phase"], **day(site, evs)}
+        return {"enabled": False, **switches}
+    out = {"enabled": True, "hours": settings(site)["hours"], "workday_phase": settings(site)["phase"], **switches,
+           **day(site, evs)}
     out["urgent"] = _urgent(evs)
     if out.get("hours_exceeded") and not site.observe:
         note_hours_exceeded(site, out, evs)
@@ -278,9 +309,21 @@ def note_hours_exceeded(site: Site, d: dict, evs: list[dict]) -> dict | None:
                                                              "phase": settings(site)["phase"]}, [d["plan"]])
 
 
-def render(st: dict) -> str | None:
-    if not st.get("enabled"):
+def banner(st: dict) -> str | None:
+    """First line of `dureh status` and `dureh day` while black-company mode is on; after 24 h it nags."""
+    b = st.get("black_company")
+    if not b:
         return None
+    line = f"⚠ {BLACK_NAME} (since {b['since']}, by Director)"
+    if _now() - _parse(b["since"]).astimezone(_now().tzinfo) >= timedelta(hours=24):
+        line += " — 24시간이 지났습니다; 끄세요: `dureh site workday black-company off --memo \"...\"`"
+    return line
+
+
+def render(st: dict, with_banner: bool = True) -> str | None:
+    head = banner(st) if with_banner else None
+    if not st.get("enabled"):
+        return head
     line = f"Workday: {st['phase']}"
     if st.get("workday_phase") and st["workday_phase"] != "production":
         line += f" [{st['workday_phase']} phase]"
@@ -300,9 +343,11 @@ def render(st: dict) -> str | None:
         line += f"; usage today {u['today_units']} units, this site {u.get('this_site_units', 0)} (budget not calibrated)"
     if st.get("urgent"):
         line += "; urgent " + ", ".join(st["urgent"])
+    if st.get("devices_off"):
+        line += "; devices off: " + ", ".join(st["devices_off"])
     if st.get("warning"):
         line += f"\n⚠ {st['warning']}"
-    return line
+    return f"{head}\n{line}" if head else line
 
 
 def _wi_family(led: Ledger, wi: str) -> set[str]:
@@ -376,9 +421,9 @@ def _require_on(site: Site) -> None:
         fail("workday mode is off for this site; only the Director switches it on (`dureh site workday on`)")
 
 
-def _director_only() -> None:
+def _director_only(message: str | None = None) -> None:
     if os.environ.get("DUREH_ACTOR") or os.environ.get("CLAUDECODE"):
-        fail("`dureh site workday` is the Director's switch; run it from your own terminal, not inside an agent session")
+        fail(message or "`dureh site workday` is the Director's switch; run it from your own terminal, not inside an agent session")
 
 
 def switch(site: Site, on: bool, memo: str) -> dict:
@@ -389,6 +434,34 @@ def switch(site: Site, on: bool, memo: str) -> dict:
     # records name a role as actor; the Director's switch is marked by `by` and refused inside agent sessions
     return Ledger(site).event("workday.switched", "desk", None, {"enabled": on, "memo": memo, "by": "Director",
                                                                  "via": "dureh site workday"})
+
+
+def set_device(site: Site, device: str, on: bool, memo: str) -> dict:
+    """The Director switches one attendance device (hours, weekday, usage, session) on or off."""
+    _director_only()
+    if device not in DEVICES:
+        fail(f"unknown attendance device {device!r}; devices: {', '.join(DEVICES)}")
+    if not memo.strip():
+        fail("--memo is required (the Director's reason)")
+    if devices(site)["black_company"]:
+        fail(f"{BLACK_NAME} is on: every device is off until `dureh site workday black-company off`")
+    return Ledger(site).event(DEVICE_EVENT, "desk", None, {"device": device, "enabled": on, "memo": memo,
+                                                           "by": "Director", "via": "dureh site workday set"})
+
+
+def black_company(site: Site, on: bool, memo: str) -> dict:
+    """`black-company on` turns every device off at once, remembering their state; `off` restores it."""
+    _director_only("노동법 위반은 대표만 할 수 있습니다")
+    if not memo.strip():
+        fail("--memo is required (the Director's reason)")
+    dv = devices(site)
+    if on and dv["black_company"]:
+        fail(f"{BLACK_NAME} is already on (since {dv['black_company']['since']})")
+    if not on and not dv["black_company"]:
+        fail(f"{BLACK_NAME} is not on")
+    payload = {"enabled": on, "memo": memo, "by": "Director", "via": "dureh site workday black-company"}
+    payload["previous" if on else "restored"] = dv["state"] if on else dv["black_company"]["previous"]
+    return Ledger(site).event(BLACK_EVENT, "desk", None, payload)
 
 
 def calibrate(site: Site, weekly_percent: float) -> dict:

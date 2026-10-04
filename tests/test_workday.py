@@ -508,6 +508,107 @@ class Workday(SiteCase):
         self.assertTrue(denied(out))
         self.assertIn("daily share", json.dumps(out))
 
+    # ------------------------------------------------------------ attendance devices: Director switches (2026-10-04)
+    def test_devices_are_the_directors_switches(self):
+        os.environ["CLAUDECODE"] = "1"
+        self.assertEqual(self.cli("site", "workday", "set", "hours", "off", "--memo", "x")[0], 2)
+        with self.assertRaisesRegex(DurehError, "^노동법 위반은 대표만 할 수 있습니다$"):
+            workday.black_company(self.s, True, "x")
+        os.environ.pop("CLAUDECODE")
+        self.assertEqual(workday.status(self.s)["devices"], {"hours": True, "weekday": True, "usage": True, "session": True})
+        self.assertEqual(self.cli("site", "workday", "set", "hours", "off")[0], 2, "memo required")
+        self.assertEqual(self.cli("site", "workday", "set", "coffee", "off", "--memo", "x")[0], 2)
+        self.assertEqual(self.cli("site", "workday", "set", "hours", "off", "--memo", "개발 중")[0], 0)
+        rec = [e for e in Ledger(self.s).events() if e["type"] == "workday.device"][-1]
+        self.assertEqual((rec["payload"]["device"], rec["payload"]["enabled"], rec["payload"]["by"]), ("hours", False, "Director"))
+        self.assertEqual(workday.status(self.s)["devices_off"], ["hours"])
+        self.assertEqual(self.cli("ledger", "add", "event", "--type", "workday.device", "--payload", "{}")[0], 2)
+
+    def test_hours_off_removes_the_clock(self):
+        self.start_day()
+        workday.set_device(self.s, "hours", False, "밤샘")
+        self.at(T0 + timedelta(hours=9))
+        st = workday.status(self.s)
+        self.assertEqual(st["phase"], "on-duty")
+        self.assertIsNone(workday.gate(self.s, self.wi))
+        self.assertIn("devices off: hours", render_status(status(self.s)))
+        workday.end(self.s, "desk", "done", "", [])  # no clock, no --early
+
+    def test_weekday_off_makes_a_saturday_ordinary(self):
+        self.workday_config(phase="production")
+        workday.switch(self.s, True, "trial")
+        workday.set_device(self.s, "weekday", False, "주말 근무")
+        workday.plan(self.s, "desk", "g", "p")
+        workday.approve(self.s, "desk", "ok")
+        self.assertEqual(workday.status(self.s)["phase"], "on-duty")
+        self.assertIsNone(self.spawn())
+
+    def test_usage_off_counts_but_does_not_gate(self):
+        self.start_day()
+        self.spend(7)
+        workday.calibrate(self.s, 10)
+        self.spend(3)
+        self.assertIsNotNone(workday.gate(self.s, self.wi))
+        workday.set_device(self.s, "usage", False, "오늘만")
+        self.assertIsNone(workday.gate(self.s, self.wi))
+        self.assertIn("usage today 10.0/10.0", render_status(status(self.s)))
+
+    def test_session_off_skips_start_and_close_checks(self):
+        self.start_day()
+        self.assertIsNone(self.spawn())
+        hook(self.s, hook_event_name="SubagentStart", agent_type="pm-modules", agent_id="a-pm")
+        self.at(T0 + timedelta(hours=9))
+        workday.end(self.s, "desk", "done", "", [])
+        h = self.site_root / "state" / "memory" / "handoff.md"
+        if h.exists():
+            h.unlink()
+        with self.assertRaisesRegex(DurehError, "still running"):
+            workday.close(self.s, "desk", "x")
+        workday.set_device(self.s, "session", False, "테스트")
+        rec = workday.close(self.s, "desk", "x")  # agent running, no handoff: not checked
+        self.assertFalse(rec["payload"]["checked"])
+        fake = self.fake_slurm()
+        (fake / "claude").unlink()
+        os.environ["PATH"] = str(fake)
+        self.assertEqual(sessions.start(self.s, "desk")["payload"]["job_id"], "12345")  # the runtime check only notes
+
+    def test_black_company_mode(self):
+        self.start_day()
+        workday.set_device(self.s, "hours", False, "먼저")
+        os.environ["CLAUDECODE"] = "1"
+        self.assertEqual(self.cli("site", "workday", "black-company", "on", "--memo", "x")[0], 2)
+        os.environ.pop("CLAUDECODE")
+        self.assertEqual(self.cli("site", "workday", "black-company", "off", "--memo", "x")[0], 2, "not on")
+        self.assertEqual(self.cli("site", "workday", "black-company", "on", "--memo", "마감")[0], 0)
+        rec = [e for e in Ledger(self.s).events() if e["type"] == "workday.black-company"][-1]
+        self.assertEqual(rec["payload"]["previous"], {"hours": False, "weekday": True, "usage": True, "session": True})
+        self.assertEqual(rec["payload"]["by"], "Director")
+        st = workday.status(self.s)
+        self.assertEqual(st["devices_off"], ["hours", "weekday", "usage", "session"])
+        self.assertEqual(st["black_company"]["record"], rec["id"])
+        self.assertEqual(self.cli("site", "workday", "black-company", "on", "--memo", "x")[0], 2, "already on")
+        with self.assertRaisesRegex(DurehError, "블랙기업모드 is on"):
+            workday.set_device(self.s, "usage", True, "x")
+        first = f"⚠ 블랙기업모드 (since {rec['ts']}, by Director)"
+        self.assertEqual(render_status(status(self.s)).splitlines()[0], first)
+        self.assertEqual(self.cli("day", "status")[1].splitlines()[0], first)
+        self.assertNotIn("24시간", self.cli("day", "status")[1])
+        self.spend(7)
+        workday.calibrate(self.s, 10)
+        self.spend(3)
+        self.assertIsNone(workday.gate(self.s, self.wi), "usage counted, not gated")
+        self.assertIn("usage today 10.0/10.0", render_status(status(self.s)))
+        self.at(datetime.fromisoformat(rec["ts"]) + timedelta(hours=25))
+        self.assertIn("24시간이 지났습니다", render_status(status(self.s)).splitlines()[0])
+        self.assertEqual(self.cli("site", "workday", "black-company", "off", "--memo", "복귀")[0], 0)
+        st = workday.status(self.s)
+        self.assertIsNone(st["black_company"])
+        self.assertEqual(st["devices_off"], ["hours"], "the state before black-company mode is restored")
+        self.assertNotIn("블랙기업모드", render_status(status(self.s)))
+        workday.switch(self.s, False, "off")
+        workday.black_company(self.s, True, "x")
+        self.assertTrue(self.cli("day", "status")[1].startswith("⚠ 블랙기업모드"), "shown even with workday mode off")
+
     def test_desk_instructions_mention_workday(self):
         text = (self.site_root / "CLAUDE.md").read_text()
         self.assertIn("day plan", text)
