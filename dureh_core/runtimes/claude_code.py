@@ -209,7 +209,11 @@ def _claude_md(site: Site) -> str:
               " through upstream. Gates for work unrelated to an open request, and anything urgent (data at risk), still go to the Director directly.",
               f"11. Workday mode (when status shows a `Workday:` line; only the Director switches it with `dureh site workday on|off`):"
               f" at the start of the day report a plan to the Director (goal, work items, order, expected usage) and record it with `{dureh} day plan --goal ... --file <plan>`;"
-              f" when the Director approves, record it with `{dureh} day approve --memo \"<Director's words>\"`; this starts the 8-hour clock."
+              f" when the Director approves, record it with `{dureh} day approve --memo \"<Director's words>\"`."
+              " The 8-hour clock runs from the moment DUREH started the company's session (`session.started` record, `dureh site session status`), not from the approval;"
+              " without that record it runs from the approval (or the config window). In `workday.phase` development the clock only warns after the hours; in production it blocks,"
+              " and a day outside `workday.weekdays` is overtime: agents spawn only for items in a Director overtime record (`day overtime` may then precede the end report)."
+              " The Director may switch attendance devices (hours, weekday, usage, session) off and on; status lists the devices that are off; a `⚠ 블랙기업모드` first line means all are off."
               " Until the end time work toward the plan's goal without asking again: Gate 1 for work items inside the approved plan is the plan approval"
               f" (approve them with the plan approval's words); at an important decision follow your own proposal and record it with `{dureh} day decide --title ... --choice ... --why ... [--rev <commit>]`,"
               " which commits state as a rollback point. If the Director later rolls back to such a point, fix forward from there and reflect every change made since."
