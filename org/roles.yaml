@@ -107,7 +107,7 @@ roles:
     # scratch: no WI worktree; writes go to the untracked checkpoints/ of the real project.
     # Promotion into derivatives/ (a DataLad subdataset) needs a per-WI clone and is not enabled yet.
     isolation: scratch
-    output: Scheduler jobs submitted and recorded through the slurm tool; job scripts and run manifests under checkpoints/.
+    output: Scheduler jobs submitted and recorded through the slurm tool (container images only through `container build`); job scripts and run manifests under checkpoints/.
     never: Code changes, interpretation, tracked-file edits (except the notebooks and README "data usage" entries each workflow run regenerates).
     may_dispatch: []
     write_scopes:
@@ -157,4 +157,4 @@ event_authority:
   manager: [guard.denied, finding.created, wi.staged, rework.requested, dispatch.prepared, wi.dispatched, checker.dispatched, agent.started, agent.finished, wi.stopped, bundle.ready]
   worker: [guard.denied, finding.created, wi.staged, agent.started, agent.finished]
   checker: [guard.denied, finding.created, verification.recorded, wi.verified, rework.requested, run.completed, agent.started, agent.finished]
-  pipeline-runner: [guard.denied, finding.created, wi.staged, run.completed, run.status, agent.started, agent.finished]
+  pipeline-runner: [guard.denied, finding.created, wi.staged, run.completed, run.status, container.built, agent.started, agent.finished]

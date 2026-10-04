@@ -138,7 +138,7 @@ def render_status(st: dict) -> str:
 
 # ------------------------------------------------------------------ slurm
 def slurm_submit(site: Site, actor: str, wi: str, script: str, dry_run: bool = False,
-                 extra: list[str] | None = None) -> dict:
+                 extra: list[str] | None = None, extra_payload: dict | None = None) -> dict:
     led = Ledger(site)
     rec = led.get("work-item", wi)
     if actor not in ("pipeline-runner", "desk"):
@@ -178,7 +178,7 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str, dry_run: bool = F
     cmd += list(extra or []) + [str(path)]
     payload = {"run_type": "slurm", "status": "not-run" if dry_run else "submitted", "command": cmd,
                "script_sha256": sha256_file(path), "script": str(path), "logs": str(logs) if logs else None,
-               "chdir": chdir, "log_out": log_out, "log_err": log_err}
+               "chdir": chdir, "log_out": log_out, "log_err": log_err, **(extra_payload or {})}
     if not dry_run:
         check = _day_check(site, cmd, path, extra or [], cfg)
         if check is not None:

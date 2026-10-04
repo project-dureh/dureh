@@ -64,13 +64,28 @@ def scratch_roots() -> list[Path]:
     return sorted(roots)
 
 
+def _container_cache(site: Site) -> Path | None:
+    from .containers import cache_dir
+
+    try:
+        c = cache_dir(site)
+    except Exception:  # noqa: BLE001 - a broken setting must not break every write decision
+        return None
+    if c is None:
+        return None
+    return Path(os.path.abspath(c)).resolve(strict=False)
+
+
 def classify(site: Site, raw: str | Path, cwd: Path | None = None) -> Target:
-    """Zones: reference, records, desk-state, installed-package, generated, deployment,
+    """Zones: reference, container-cache, records, desk-state, installed-package, generated, deployment,
     config, worktree, target, harness-main, site-other, scratch, outside."""
     p = Path(raw)
     if not p.is_absolute():
         p = (cwd or site.root) / p
     real = _resolve(p)
+    cache = _container_cache(site)
+    if cache is not None and (is_within(real, cache) or is_within(Path(os.path.abspath(p)), cache)):
+        return Target("container-cache", None, None)
     for ref in site.reference_paths():
         for candidate in {Path(os.path.abspath(ref)), ref.resolve(strict=False)}:
             if is_within(real, candidate) or is_within(Path(os.path.abspath(p)), candidate):
@@ -122,6 +137,8 @@ def write_decision(site: Site, role: str, raw: str | Path, cwd: Path | None = No
     t = classify(site, raw, cwd)
     if t.zone == "reference":
         return False, "reference material is read-only for every role"
+    if t.zone == "container-cache":
+        return False, "the container cache is written only by `dureh container build` jobs; no role writes it directly"
     if t.zone == "records":
         return False, "records are append-only and written only through the dureh ledger tools"
     if t.zone in ("generated", "deployment"):

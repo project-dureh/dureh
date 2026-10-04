@@ -142,7 +142,10 @@ def _agent_file(site: Site, role, project: str | None = None) -> str:
             "checker": [f"- Your job: `{dureh} verify --wi <WI>` for the item in your brief. It checks ownership, declared"
                         " outputs, and declared checks, and records the result. Report its numbers; never fix the artifact."],
             "pipeline-runner": [f"- Submit every computation with `{dureh} slurm submit --wi <WI> --script <job.sh>` and"
-                                f" follow it with `{dureh} slurm status --run <run-id>`. Never run heavy tools in the session."],
+                                f" follow it with `{dureh} slurm status --run <run-id>`. Never run heavy tools in the session.",
+                                f"- Build a container image only with `{dureh} container build --wi <WI> --recipe projects/<p>/code/containers/<name>.def"
+                                f" --module <m> --rev <rev>`; after `{dureh} slurm wait --run <run-id>`, record it with `{dureh} container status --wi <WI>`"
+                                " (never `apptainer build`, never write the container cache)."],
             "data-steward": [f"- `derivatives/` is written only by `{dureh} promote` (see harness docs/promote.md), never directly.",
                              f"- Finish with `{dureh} wi stage --wi <WI> --summary ...` after committing on the WI branch."],
             "researcher": [f"- Record each result: `{dureh} ledger add finding --wi <WI> --summary ... --evidence-level ...`"
@@ -200,7 +203,8 @@ def _claude_md(site: Site) -> str:
               f"7. Before moving or deleting a path, run `{dureh} path-refs <path>`. Delete only through `{dureh} purge`."
               f" If a dispatch or verify reports a broken worktree or a stale `.venv` (for example after the site moved), run `{dureh} worktree repair --wi <WI>`"
               f" (or `--target <target>` for a main tree's `.venv`); it rebuilds the environment with `env_rebuild` from config.json. Never edit `.git` files or rebuild environments by hand.",
-              f"8. Compute runs only as scheduler jobs through `{dureh} slurm submit`. External pushes only through `{dureh} push` with a Director decision."
+              f"8. Compute runs only as scheduler jobs through `{dureh} slurm submit`; container images only through `{dureh} container build`"
+              f" (a pipeline-runner WI; `{dureh} container status --wi <WI>` records `container.built` with the sha256 for the data-steward's manifest). External pushes only through `{dureh} push` with a Director decision."
               f" Verified checkpoints reach `derivatives/` only through `{dureh} promote`, run by a dispatched data-steward;"
               f" a code-generated report lands with `{dureh} promote --kind report ... --dataset <pipeline> --name <report>` in derivatives/<pipeline>/reports/<report>/ with provenance.json.",
               f"9. Self-test the harness and this site with `{dureh} verify --self` after any harness or package update."

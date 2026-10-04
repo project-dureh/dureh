@@ -285,6 +285,17 @@ def cmd_status(a):
     _print(st if a.json else render_status(st))
 
 
+def cmd_container(a):
+    from . import containers
+
+    site = _site(a)
+    if a.container_command == "build":
+        _print(containers.build(site, _actor(a), a.wi, a.recipe, a.module, a.rev, a.version, a.name, a.time, a.mem,
+                                a.dry_run))
+    else:
+        _print(containers.status(site, _actor(a), a.wi))
+
+
 def cmd_slurm(a):
     from . import ops
 
@@ -541,7 +552,7 @@ def cmd_artifact_write(a):
 # ------------------------------------------------------------------- parser
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="dureh", description="DUREH harness tools: wi, dispatch, verify, ledger, status, "
-                                "slurm, path-refs, purge, push, usage, upstream, promote, worktree, day (plus install, adapter, hook).")
+                                "slurm, container, path-refs, purge, push, usage, upstream, promote, worktree, day (plus install, adapter, hook).")
     p.add_argument("--site", help="installed site directory (or DUREH_SITE)")
     p.add_argument("--observe", action="store_true",
                    help="read-only: allow only status, wi show/list, ledger query, upstream list/message, path-refs, usage, "
@@ -678,6 +689,23 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--run", required=True)
     x.add_argument("--timeout", type=int, default=3600, help="seconds (default 3600)")
     x.add_argument("--interval", type=int, default=60, help="seconds between checks (default 60)")
+    x.add_argument("--actor")
+
+    co = sub.add_parser("container", help="sanctioned container builds (scheduler jobs)").add_subparsers(
+        dest="container_command", required=True)
+    x = add(co, "build", cmd_container, "build a new SIF from a tracked recipe and a pinned module revision, as a scheduler job")
+    x.add_argument("--wi", required=True)
+    x.add_argument("--recipe", required=True, help="site-relative projects/<p>/code/containers/<name>.def")
+    x.add_argument("--module", required=True, help="module id under modules/ whose `git archive <rev>` is the build context")
+    x.add_argument("--rev", required=True, help="module revision (any git revision; recorded in full)")
+    x.add_argument("--version", help="image version (default: the module's pyproject version at --rev)")
+    x.add_argument("--name", help="image name (default: the recipe stem)")
+    x.add_argument("--time", help="job --time (default: config containers.time or 02:00:00)")
+    x.add_argument("--mem", help="job --mem (default: config containers.mem or 16G)")
+    x.add_argument("--dry-run", action="store_true")
+    x.add_argument("--actor")
+    x = add(co, "status", cmd_container, "after the build job ended: check the image and record container.built once")
+    x.add_argument("--wi", required=True)
     x.add_argument("--actor")
 
     x = add(sub, "path-refs", cmd_path_refs, "find references to a path before moving or deleting it")
