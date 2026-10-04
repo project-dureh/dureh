@@ -347,8 +347,17 @@ def cmd_site_workday(a):
     from . import workday
 
     site = _site(a)
+    rest = a.rest or []
     if a.action in ("on", "off"):
         _print(workday.switch(site, a.action == "on", a.memo or ""))
+    elif a.action == "set":
+        if len(rest) != 2 or rest[1] not in ("on", "off"):
+            fail(f"usage: dureh site workday set <{'|'.join(workday.DEVICES)}> on|off --memo \"...\"")
+        _print(workday.set_device(site, rest[0], rest[1] == "on", a.memo or ""))
+    elif a.action == "black-company":
+        if rest not in (["on"], ["off"]):
+            fail("usage: dureh site workday black-company on|off --memo \"...\"")
+        _print(workday.black_company(site, rest == ["on"], a.memo or ""))
     elif a.action == "calibrate":
         if a.weekly_percent is None:
             fail("calibrate needs --weekly-percent (the current week's percentage from Claude Code /usage)")
@@ -393,7 +402,11 @@ def cmd_day(a):
     site, actor, c = _site(a), _actor(a), a.day_command
     if c == "status":
         st = workday.status(site)
-        _print(st if a.json else (workday.render(st) or "Workday: off (the Director switches it on)"))
+        if a.json:
+            _print(st)
+        else:
+            text = workday.render(st)
+            _print(text if st.get("enabled") else "\n".join(filter(None, [text, "Workday: off (the Director switches it on)"])))
     elif c == "plan":
         text = Path(a.file).read_text(encoding="utf-8") if a.file else sys.stdin.read()
         _print(workday.plan(site, actor, a.goal, text))
@@ -685,9 +698,11 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--source", required=True)
     x.add_argument("--actor")
 
-    x = add(st, "workday", cmd_site_workday, "Director's switch for workday mode (8-hour day, plan/report, usage budget)")
-    x.add_argument("action", choices=["on", "off", "calibrate", "status"])
-    x.add_argument("--memo", help="the Director's reason (on/off)")
+    x = add(st, "workday", cmd_site_workday, "Director's switches: workday mode on|off, `set <device> on|off` "
+                                              "(hours, weekday, usage, session), `black-company on|off`, calibrate, status")
+    x.add_argument("action", choices=["on", "off", "set", "black-company", "calibrate", "status"])
+    x.add_argument("rest", nargs="*", help="set: <device> on|off; black-company: on|off")
+    x.add_argument("--memo", help="the Director's reason (on/off, set, black-company)")
     x.add_argument("--weekly-percent", type=_percent, help="calibrate: current week's usage percent shown by Claude Code /usage")
 
     x = add(st, "cluster", cmd_site_cluster, "cluster profile: detect from sinfo/sacctmgr, or show config.json `cluster`")

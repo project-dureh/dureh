@@ -113,11 +113,14 @@ def render_status(st: dict) -> str:
         lines.append("Gate 1 (Director approval) pending: " + ", ".join(st["awaiting_gate1"]))
     if st["awaiting_gate2"]:
         lines.append("Gate 2 (promotion) pending: " + ", ".join(st["awaiting_gate2"]))
-    from .workday import render as render_workday
+    from .workday import banner, render as render_workday
 
-    wline = render_workday(st.get("workday") or {})
+    wd = st.get("workday") or {}
+    wline = render_workday(wd, with_banner=False)
     if wline:
         lines.append(wline)
+    if banner(wd):
+        lines.insert(0, banner(wd))  # black-company mode: the first line, always
     u = st.get("upstream") or {}
     if u.get("mode") == "collaborating":
         n = u.get("new_from_upstream") or 0
