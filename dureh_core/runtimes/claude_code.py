@@ -143,10 +143,20 @@ def _agent_file(site: Site, role, project: str | None = None) -> str:
                         " outputs, and declared checks, and records the result. Report its numbers; never fix the artifact."],
             "pipeline-runner": [f"- Submit every computation with `{dureh} slurm submit --wi <WI> --script <job.sh>` and"
                                 f" follow it with `{dureh} slurm status --run <run-id>`. Never run heavy tools in the session.",
-                                f"- Build a container image only with `{dureh} container build --wi <WI> --recipe projects/<p>/code/containers/<name>.def"
-                                f" --module <m> --rev <rev>`; after `{dureh} slurm wait --run <run-id>`, record it with `{dureh} container status --wi <WI>`"
+                                f"- Build a container image only with `{dureh} container build --wi <WI> --module <m> --rev <rev> [--name <name>]`"
+                                " (the recipe is the module's own `containers/<name or m>.def` at that rev; add"
+                                " `--recipe projects/<p>/code/containers/<name>.def` only for a project-local image);"
+                                f" after `{dureh} slurm wait --run <run-id>`, record it with `{dureh} container status --wi <WI>`"
                                 " (never `apptainer build`, never write the container cache)."],
+            "py-writer": ["- A module's container recipes are `containers/<name>.def` at the module root (canonical; the build context is"
+                          " `git archive <rev>` of the module, so `%files` paths are module-relative). Commit them on the WI branch;"
+                          " images are built later by a pipeline-runner from the promoted revision, never by you.",
+                          f"- Finish with `{dureh} wi stage --wi <WI> --summary ...` after committing on the WI branch."],
             "data-steward": [f"- `derivatives/` is written only by `{dureh} promote` (see harness docs/promote.md), never directly.",
+                             "- Pin images in camri-manifest.yaml by `sha256:<hex>` from `container.built`; project copies of module"
+                             " recipes under code/containers/ are optional (the module's containers/ is canonical).",
+                             f"- Remove an image no manifest pins with `{dureh} container retire --sif <file> --reason ... --wi <WI>`"
+                             " (`--dry-run` first lists pinning manifests); never delete from the cache yourself.",
                              f"- Finish with `{dureh} wi stage --wi <WI> --summary ...` after committing on the WI branch."],
             "researcher": [f"- Record each result: `{dureh} ledger add finding --wi <WI> --summary ... --evidence-level ...`"
                            " with --source for every source (identity, retrieval time, passage or hash)."],
@@ -204,7 +214,8 @@ def _claude_md(site: Site) -> str:
               f" If a dispatch or verify reports a broken worktree or a stale `.venv` (for example after the site moved), run `{dureh} worktree repair --wi <WI>`"
               f" (or `--target <target>` for a main tree's `.venv`); it rebuilds the environment with `env_rebuild` from config.json. Never edit `.git` files or rebuild environments by hand.",
               f"8. Compute runs only as scheduler jobs through `{dureh} slurm submit`; container images only through `{dureh} container build`"
-              f" (a pipeline-runner WI; `{dureh} container status --wi <WI>` records `container.built` with the sha256 for the data-steward's manifest). External pushes only through `{dureh} push` with a Director decision."
+              f" (a pipeline-runner WI on the module or a project, recipe = the module's `containers/<name>.def` at `--rev`; `{dureh} container status --wi <WI>` records `container.built` with the sha256 for the data-steward's manifest;"
+              f" `{dureh} container retire --sif <file> --reason ...` removes an image no project manifest pins). External pushes only through `{dureh} push` with a Director decision."
               f" Verified checkpoints reach `derivatives/` only through `{dureh} promote`, run by a dispatched data-steward;"
               f" a code-generated report lands with `{dureh} promote --kind report ... --dataset <pipeline> --name <report>` in derivatives/<pipeline>/reports/<report>/ with provenance.json.",
               f"9. Self-test the harness and this site with `{dureh} verify --self` after any harness or package update."

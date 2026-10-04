@@ -461,5 +461,26 @@ class Retire(SiteCase):
             containers.retire(self.s, "desk", self.name, "x")
 
 
+class InstructionLines(SiteCase):
+    """UR-20261004-03 item 4: the generated role files name the module form, module recipes and retire."""
+
+    def test_role_files(self):
+        from dureh_core.runtimes.claude_code import _agent_file
+
+        manifest = self.package / "startup.yaml"
+        manifest.write_text(manifest.read_text()
+                            .replace("managers: [pm-modules]", "managers: [pm-modules, pm-projects]")
+                            .replace("workers: [py-writer,", "workers: [data-steward, pipeline-runner, py-writer,"))
+        self.install()
+        s = self.site()
+        runner = _agent_file(s, s.org.role("pipeline-runner"))
+        self.assertIn("container build --wi <WI> --module <m> --rev <rev> [--name <name>]", runner)
+        self.assertIn("containers/<name or m>.def", runner)
+        self.assertIn("containers/<name>.def` at the module root", _agent_file(s, s.org.role("py-writer")))
+        steward = _agent_file(s, s.org.role("data-steward"))
+        self.assertIn("container retire --sif <file> --reason", steward)
+        self.assertIn("--dry-run", steward)
+
+
 if __name__ == "__main__":
     unittest.main()
