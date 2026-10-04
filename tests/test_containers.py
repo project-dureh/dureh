@@ -356,5 +356,110 @@ class ModuleRecipeBuild(ContainerBuild):
         self.assertEqual(out["builds"][0]["state"], "recorded")
 
 
+class Retire(SiteCase):
+    """UR-20261004-03 item 3: `container retire` deletes an image only when no project manifest pins its sha256."""
+
+    def setUp(self):
+        super().setUp()
+        manifest = self.package / "startup.yaml"
+        manifest.write_text(manifest.read_text().replace("workers: [py-writer,", "workers: [data-steward, py-writer,"))
+        self.install()
+        cfg = json.loads((self.site_root / "config.json").read_text())
+        cfg["containers"] = {"module": "", "cache": "cache/containers"}
+        (self.site_root / "config.json").write_text(json.dumps(cfg))
+        self.cache = self.site_root / "cache" / "containers"
+        self.cache.mkdir(parents=True)
+        self.proj = self.site_root / "projects" / "lna"
+        self.proj.mkdir(parents=True)
+        self.name = "camri_2.0.0a1-abc1234.sif"
+        (self.cache / self.name).write_bytes(b"image-bytes\n")
+        self.sha = containers.sha256_file(self.cache / self.name)
+        (self.cache / f"{self.name}.provenance.json").write_text(json.dumps(
+            {"target": self.name, "sha256": self.sha, "job_id": "4242", "recipe_source": "module"}))
+        self.outside = self.tmp / "outside.sif"
+        self.outside.write_bytes(b"keep me\n")
+        self.s = self.site()
+
+    def pin(self, form="sha256:{}", rel="camri-manifest.yaml"):
+        (self.proj / rel).write_text("dependencies:\n  tool_versions:\n    containers:\n"
+                                     f"      - {{name: camri, digest: \"{form.format(self.sha)}\"}}\n")
+
+    def test_pinned_is_refused_and_listed(self):
+        self.pin()
+        with self.assertRaisesRegex(DurehError, "pinned .* by: projects/lna/camri-manifest.yaml"):
+            containers.retire(self.s, "desk", self.name, "superseded")
+        self.assertTrue((self.cache / self.name).is_file())
+        dry = containers.retire(self.s, "data-steward", self.name, "superseded", dry_run=True)
+        self.assertEqual(dry["action"], "refuse")
+        self.assertEqual([p["manifest"] for p in dry["pinned_by"]], ["projects/lna/camri-manifest.yaml"])
+
+    def test_other_manifest_forms_count(self):
+        self.pin(form="{}", rel="run-manifest.json")
+        dry = containers.retire(self.s, "desk", self.name, "x", dry_run=True)
+        self.assertEqual([p["manifest"] for p in dry["pinned_by"]], ["projects/lna/run-manifest.json"])
+        self.pin(form="SHA256:{}")  # case-insensitive
+        dry = containers.retire(self.s, "desk", self.name, "x", dry_run=True)
+        self.assertEqual(len(dry["pinned_by"]), 2)
+
+    def test_unpinned_dry_run_changes_nothing(self):
+        self.pin(form="sha256:" + "0" * 64)
+        dry = containers.retire(self.s, "desk", self.name, "superseded", dry_run=True)
+        self.assertEqual(dry["action"], "retire")
+        self.assertEqual(dry["pinned_by"], [])
+        self.assertEqual(dry["manifests_scanned"], 1)
+        self.assertTrue((self.cache / self.name).is_file())
+        self.assertFalse((self.cache / "retired").exists())
+        self.assertFalse([e for e in Ledger(self.s).events() if e["type"] == "container.retired"])
+
+    def test_unpinned_is_retired(self):
+        self.pin(form="sha256:" + "0" * 64)
+        out = containers.retire(self.s, "data-steward", self.name, "superseded by 2396359")
+        self.assertEqual(out["action"], "retired")
+        self.assertFalse((self.cache / self.name).exists())
+        self.assertFalse((self.cache / f"{self.name}.provenance.json").exists())
+        kept = json.loads((self.cache / "retired" / f"{self.name}.provenance.json").read_text())
+        self.assertEqual(kept["job_id"], "4242")
+        self.assertEqual(kept["reason"], "superseded by 2396359")
+        self.assertEqual(kept["by"], "data-steward")
+        self.assertTrue(kept["retired_at"])
+        ev = [e for e in Ledger(self.s).events() if e["type"] == "container.retired"]
+        self.assertEqual(len(ev), 1)
+        self.assertEqual(ev[0]["payload"]["sha256"], self.sha)
+        self.assertEqual(self.outside.read_bytes(), b"keep me\n")
+        with self.assertRaisesRegex(DurehError, "already retired"):
+            containers.retire(self.s, "desk", self.name, "again")
+
+    def test_unknown_names_paths_and_roles_are_refused(self):
+        with self.assertRaisesRegex(DurehError, "unknown image"):
+            containers.retire(self.s, "desk", "ghost_1-abc1234.sif", "x")
+        for bad in ("../outside.sif", "sub/x.sif", "/tmp/x.sif", "camri.def", ".."):
+            with self.assertRaisesRegex(DurehError, "no paths"):
+                containers.retire(self.s, "desk", bad, "x")
+        for role in ("pipeline-runner", "py-writer", "checker"):
+            with self.assertRaisesRegex(DurehError, "only by the desk or the data-steward"):
+                containers.retire(self.s, role, self.name, "x")
+        with self.assertRaisesRegex(DurehError, "reason"):
+            containers.retire(self.s, "desk", self.name, " ")
+        self.assertTrue((self.cache / self.name).is_file())
+        self.assertEqual(self.outside.read_bytes(), b"keep me\n")
+
+    def test_bash_guard_lets_the_command_through(self):
+        for role in ("data-steward", "desk"):
+            data = dict(hook_event_name="PreToolUse", tool_name="Bash", cwd=str(self.site_root),
+                        tool_input={"command": f"{self.site_root}/bin/dureh container retire --sif {self.name}"
+                                               " --reason superseded --dry-run"})
+            if role != "desk":
+                data.update(agent_type=role, agent_id="a1")
+            out = hook(self.s, **data)
+            self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "allow", role)
+            self.assertTrue(denied(hook(self.s, **{**data, "tool_input": {"command": f"rm {self.cache}/{self.name}"}})), role)
+
+    def test_provenance_only_uses_its_sha256(self):
+        (self.cache / self.name).unlink()
+        self.pin()
+        with self.assertRaisesRegex(DurehError, "pinned"):
+            containers.retire(self.s, "desk", self.name, "x")
+
+
 if __name__ == "__main__":
     unittest.main()

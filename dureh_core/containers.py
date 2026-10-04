@@ -390,3 +390,124 @@ def status(site: Site, actor: str, wi: str) -> dict:
     if not builds:
         fail(f"{wi} has no submitted container builds")
     return {"wi": wi, "builds": builds}
+
+
+# ------------------------------------------------------------------ retire (UR-20261004-03 item 3)
+
+MANIFEST_GLOBS = ("camri-manifest.yaml", "*manifest*.yaml", "*manifest*.yml", "*manifest*.json")
+
+
+def _manifests(site: Site) -> list[Path]:
+    """The project manifests an image may be pinned in: each `projects/<p>/camri-manifest.yaml` (the one manifest
+    the harness reads, see projectgen) and any other top-level `*manifest*.{yaml,yml,json}` of a project."""
+    root = site.root / "projects"
+    found: list[Path] = []
+    if not root.is_dir():
+        return found
+    for proj in sorted(p for p in root.iterdir() if p.is_dir()):
+        for pattern in MANIFEST_GLOBS:
+            for f in sorted(proj.glob(pattern)):
+                if f.is_file() and f not in found:
+                    found.append(f)
+    return found
+
+
+def pinned_by(site: Site, digests: set[str]) -> list[dict]:
+    """Manifests whose text contains one of the hex digests (bare or as `sha256:<hex>`, any case)."""
+    out = []
+    for f in _manifests(site):
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace").lower()
+        except OSError:
+            continue
+        hits = sorted(d for d in digests if d in text)
+        if hits:
+            out.append({"manifest": f.relative_to(site.root).as_posix(), "sha256": hits})
+    return out
+
+
+def retire(site: Site, actor: str, sif_name: str, reason: str, dry_run: bool = False, wi: str | None = None) -> dict:
+    """Remove an image nobody pins: refuse while any project manifest names its sha256; otherwise keep its
+    provenance under `<cache>/retired/` (with retired_at, reason, by), delete the SIF and record
+    `container.retired`. Only files inside the cache directory are touched."""
+    from .util import utc_now, write_create_only, dumps
+
+    if actor not in ("desk", "data-steward"):
+        fail(f"container images are retired only by the desk or the data-steward, not {actor}")
+    if not (reason or "").strip():
+        fail("--reason is required")
+    if not site.org.may_append(actor, "container.retired"):
+        fail(f"role {actor!r} may not record container.retired (org/roles.yaml event_authority)")
+    led = Ledger(site)
+    if wi is not None:
+        rec = led.get("work-item", wi)
+        if actor != "desk" and rec["payload"]["role"] != actor:
+            fail(f"{wi} is not a {actor} work item")
+        if actor != "desk" and led.wi_status(wi)["status"] not in ("dispatched", "rework"):
+            fail(f"{wi} is not dispatched")
+    if "/" in sif_name or os.sep in sif_name or not NAME_RE.match(sif_name) or not sif_name.endswith(".sif"):
+        fail(f"--sif takes an image file name in the cache, such as camri_2.0.0a1-2396359.sif (no paths): {sif_name!r}")
+    cache = cache_dir(site)
+    if cache is None:
+        fail("no container cache configured: set config.json `containers.cache` (or env.vars CAMRI_CONTAINER_CACHE)")
+    if not cache.is_dir():
+        fail(f"container cache directory does not exist: {cache}")
+    sif = cache / sif_name
+    prov_path = cache / f"{sif_name}.provenance.json"
+    retired_dir = cache / "retired"
+    retired_prov = retired_dir / f"{sif_name}.provenance.json"
+    has_sif = sif.is_file() and not sif.is_symlink()
+    if sif.is_symlink() or (sif.exists() and not has_sif):
+        fail(f"{sif} is not a regular file; retire handles images built into the cache only")
+    prov = None
+    if prov_path.is_file() and not prov_path.is_symlink():
+        try:
+            prov = json.loads(prov_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            fail(f"{prov_path} is not readable JSON; fix or remove it by hand")
+    if not has_sif and prov is None:
+        if retired_prov.exists():
+            fail(f"{sif_name} is already retired ({retired_prov})")
+        fail(f"unknown image {sif_name}: neither it nor its provenance is in {cache}")
+    if retired_prov.exists() or retired_prov.is_symlink():
+        fail(f"{retired_prov} already exists; a retired provenance is never overwritten")
+    digests = set()
+    measured = sha256_file(sif) if has_sif else None
+    recorded = str((prov or {}).get("sha256") or "").lower() or None
+    for d in (measured, recorded):
+        if d and re.match(r"^[0-9a-f]{64}$", d):
+            digests.add(d)
+    if not digests:
+        fail(f"no sha256 for {sif_name}: the image is missing and its provenance has none")
+    scanned = _manifests(site)
+    pins = pinned_by(site, digests)
+    out = {"sif": str(sif), "sha256": measured or recorded, "manifests_scanned": len(scanned), "pinned_by": pins,
+           "dry_run": dry_run}
+    if measured and recorded and measured != recorded:
+        out["note"] = f"the image's sha256 {measured} differs from its provenance {recorded}; both were checked"
+    if pins:
+        if dry_run:
+            return {**out, "action": "refuse", "why": "pinned"}
+        fail(f"{sif_name} is pinned (sha256 {out['sha256']}) by: " + ", ".join(p["manifest"] for p in pins)
+             + "; unpin it in those manifests first (data-steward)")
+    if dry_run:
+        return {**out, "action": "retire", "would_write": str(retired_prov),
+                "would_delete": [str(p) for p in (sif, prov_path) if p.exists()]}
+    built = next((e for e in led.events() if e["type"] == "container.built"
+                  and e["payload"].get("target") == sif_name and e["payload"].get("cache") == str(cache)), None)
+    now = utc_now()
+    keep = {**(prov or {"target": sif_name, "cache": str(cache), "sha256": out["sha256"]}),
+            "retired_at": now, "reason": reason, "by": actor, **({"retired_sha256": measured} if measured else {})}
+    if retired_dir.is_symlink() or (retired_dir.exists() and not retired_dir.is_dir()):
+        fail(f"{retired_dir} must be a plain directory inside the cache")
+    retired_dir.mkdir(exist_ok=True)
+    write_create_only(retired_prov, dumps(keep).encode("utf-8"), 0o644)
+    if has_sif:
+        sif.unlink()
+    if prov is not None:
+        prov_path.unlink()
+    ev = led.event("container.retired", actor, wi,
+                   {"sif": sif_name, "cache": str(cache), "sha256": out["sha256"], "reason": reason, "by": actor,
+                    "retired_at": now, "provenance": str(retired_prov), "deleted_image": has_sif,
+                    "manifests_scanned": len(scanned)}, [built["id"]] if built else [])
+    return {**out, "action": "retired", "event": ev["id"], "provenance": str(retired_prov)}

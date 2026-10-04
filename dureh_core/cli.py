@@ -292,6 +292,8 @@ def cmd_container(a):
     if a.container_command == "build":
         _print(containers.build(site, _actor(a), a.wi, a.recipe, a.module, a.rev, a.version, a.name, a.time, a.mem,
                                 a.dry_run))
+    elif a.container_command == "retire":
+        _print(containers.retire(site, _actor(a), a.sif, a.reason, a.dry_run, a.wi))
     else:
         _print(containers.status(site, _actor(a), a.wi))
 
@@ -708,6 +710,13 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--actor")
     x = add(co, "status", cmd_container, "after the build job ended: check the image and record container.built once")
     x.add_argument("--wi", required=True)
+    x.add_argument("--actor")
+    x = add(co, "retire", cmd_container, "delete an image no project manifest pins (desk or data-steward); its provenance "
+            "moves to <cache>/retired/ and container.retired is recorded")
+    x.add_argument("--sif", required=True, help="image file name in the cache, e.g. camri_2.0.0a1-2396359.sif")
+    x.add_argument("--reason", required=True)
+    x.add_argument("--wi", help="the data-steward's dispatched WI to record it on (optional)")
+    x.add_argument("--dry-run", action="store_true", help="list pinning manifests and what would be removed")
     x.add_argument("--actor")
 
     x = add(sub, "path-refs", cmd_path_refs, "find references to a path before moving or deleting it")

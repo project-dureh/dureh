@@ -159,3 +159,4 @@ event_authority:
   worker: [guard.denied, finding.created, wi.staged, agent.started, agent.finished]
   checker: [guard.denied, finding.created, verification.recorded, wi.verified, rework.requested, run.completed, agent.started, agent.finished]
   pipeline-runner: [guard.denied, finding.created, wi.staged, run.completed, run.status, container.built, agent.started, agent.finished]
+  data-steward: [guard.denied, finding.created, wi.staged, container.retired, agent.started, agent.finished]
