@@ -147,7 +147,16 @@ def _events(site: Site) -> list[dict]:
 
 def session_start(e: dict) -> datetime:
     """When a `session.started` record's job was submitted (its `submitted_at`, else the record time), local."""
-    raw = (e.get("payload") or {}).get("submitted_at") or e["ts"]
+    return _local((e.get("payload") or {}).get("submitted_at") or e["ts"])
+
+
+def day_start(e: dict) -> datetime:
+    """When the day of a `session.started` record began: its `day_start` (a restart or forced second start
+    keeps the first session's start; the 8 hours do not begin again), else its own submission."""
+    return _local((e.get("payload") or {}).get("day_start") or (e.get("payload") or {}).get("submitted_at") or e["ts"])
+
+
+def _local(raw: str) -> datetime:
     dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     return (dt if dt.tzinfo else dt.replace(tzinfo=_now().tzinfo)).astimezone(_now().tzinfo)
 
@@ -169,7 +178,7 @@ def clock(site: Site, session: dict | None, fallback: datetime) -> tuple[str, st
     start) the config window `workday.start`/`workday.end` when set, else the hours from `fallback`."""
     st = settings(site)
     if session is not None:
-        start = session_start(session)
+        start = day_start(session)
         return _ts(start), _ts(start + timedelta(hours=st["hours"]))
     start = _at(fallback, st["start"]) if st["start"] else fallback
     end = _at(fallback, st["end"]) if st["end"] else start + timedelta(hours=st["hours"])

@@ -385,10 +385,19 @@ def cmd_site_session(a):
     if a.action == "plan":
         print(sessions.plan(site, a.purpose), end="")
     elif a.action == "start":
-        rec = sessions.start(site, _actor(a), a.purpose)
+        rec = sessions.start(site, _actor(a), a.purpose, force=a.force, memo=a.memo)
         p = rec["payload"]
-        print(f"Submitted session job {p['job_id']} at {p['submitted_at']} (wall time {p['wall_time']}, purpose "
-              f"{p['purpose']}); recorded {rec['id']} (session.started). The working day runs from now.")
+        line = (f"Submitted session job {p['job_id']} at {p['submitted_at']} (wall time {p['wall_time']}, purpose "
+                f"{p['purpose']}); recorded {rec['id']} (session.started).")
+        if p.get("restart"):
+            line += (f" Restart: today's job {p['previous']['job_id']} ({p['previous']['record']}) is gone from squeue;"
+                     f" the working day still runs from {p['day_start']}.")
+        elif p.get("force"):
+            line += (f" Forced second start ({p['force']['memo']}): {p['force']['why']};"
+                     f" the working day still runs from {p['day_start']}.")
+        else:
+            line += " The working day runs from now."
+        print(line)
         for n in p.get("notes") or []:
             print(f"note: {n}")
     else:
@@ -713,6 +722,9 @@ def parser() -> argparse.ArgumentParser:
                                                "start (submit it and record session.started), status (read-only)")
     x.add_argument("action", choices=["plan", "start", "status"])
     x.add_argument("--purpose", default="desk", choices=["desk"])
+    x.add_argument("--force", action="store_true", help="start: a second session today although today's job is still "
+                                                        "in squeue; needs --memo, recorded in session.started `force`")
+    x.add_argument("--memo", help="start --force: why a second session starts today")
     x.add_argument("--json", action="store_true", help="status: machine-readable")
     x.add_argument("--actor")
 

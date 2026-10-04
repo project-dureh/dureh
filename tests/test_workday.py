@@ -431,6 +431,87 @@ class Workday(SiteCase):
         self.assertIn("job 12345: not in squeue", self.cli("site", "session", "status")[1])
         self.assertEqual(self.cli("ledger", "add", "event", "--type", "session.started", "--payload", '{"job_id": "1"}')[0], 2)
 
+    def _sessions(self):
+        return [e for e in Ledger(self.s).events() if e["type"] == "session.started"]
+
+    def test_second_session_start_today_refused_while_the_job_is_queued(self):
+        fake = self.fake_slurm(squeue="RUNNING|6:00:00")
+        workday.switch(self.s, True, "trial")
+        first = sessions.start(self.s, "desk")
+        self.at(T0 + timedelta(hours=2))
+        with self.assertRaisesRegex(DurehError, rf"job 12345 \({first['id']}, submitted {T0.isoformat()}\) is still in squeue: "
+                                                r"RUNNING, time left 6:00:00.*one session a day.*--force --memo"):
+            sessions.start(self.s, "desk")
+        self.assertIn("-j 12345", (fake / "squeue-calls").read_text())
+        self.assertEqual(len((fake / "sbatch-calls").read_text().splitlines()), 1, "nothing submitted")
+        self.assertEqual(len(self._sessions()), 1)
+        rc, out = self.cli("site", "session", "start")
+        self.assertEqual(rc, 2)
+        # --force needs a memo; with one, the second start is recorded with why, and the day's clock stays
+        with self.assertRaisesRegex(DurehError, "--force needs --memo"):
+            sessions.start(self.s, "desk", force=True)
+        self.assertEqual(len(self._sessions()), 1)
+        rc, out = self.cli("site", "session", "start", "--force", "--memo", "remote control lost; Director asked")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Forced second start (remote control lost; Director asked): today's session job 12345", out)
+        self.assertIn(f"the working day still runs from {T0.isoformat()}", out)
+        rec = self._sessions()[-1]
+        p = rec["payload"]
+        self.assertEqual(p["force"]["memo"], "remote control lost; Director asked")
+        self.assertIn("still in squeue: RUNNING", p["force"]["why"])
+        self.assertEqual(p["previous"], {"record": first["id"], "job_id": "12345", "submitted_at": T0.isoformat()})
+        self.assertEqual((p["day_start"], p["submitted_at"]), (T0.isoformat(), (T0 + timedelta(hours=2)).isoformat()))
+        self.assertNotIn("restart", p)
+        st = workday.status(self.s)
+        self.assertEqual((st["session"], st["start"], st["end"]), (rec["id"], T0.isoformat(), (T0 + timedelta(hours=8)).isoformat()))
+
+    def test_second_session_start_today_is_a_restart_when_the_job_is_gone(self):
+        self.fake_slurm(squeue="")
+        workday.switch(self.s, True, "trial")
+        first = sessions.start(self.s, "desk")
+        self.at(T0 + timedelta(hours=3))
+        rc, out = self.cli("site", "session", "start")
+        self.assertEqual(rc, 0, out)
+        self.assertIn(f"Restart: today's job 12345 ({first['id']}) is gone from squeue; the working day still runs from "
+                      f"{T0.isoformat()}", out)
+        rec = self._sessions()[-1]
+        p = rec["payload"]
+        self.assertIs(p["restart"], True)
+        self.assertEqual(p["previous"]["record"], first["id"])
+        self.assertEqual((p["day_start"], p["submitted_at"]), (T0.isoformat(), (T0 + timedelta(hours=3)).isoformat()))
+        self.assertNotIn("force", p)
+        st = workday.status(self.s)
+        self.assertEqual((st["session"], st["start"], st["end"]), (rec["id"], T0.isoformat(), (T0 + timedelta(hours=8)).isoformat()))
+        # a third start the same day keeps the first start too
+        self.at(T0 + timedelta(hours=5))
+        p = sessions.start(self.s, "desk")["payload"]
+        self.assertEqual((p["previous"]["record"], p["day_start"]), (rec["id"], T0.isoformat()))
+        self.assertEqual(workday.status(self.s)["end"], (T0 + timedelta(hours=8)).isoformat())
+
+    def test_session_start_on_another_day_is_a_plain_start(self):
+        self.fake_slurm(squeue="RUNNING|20:00:00")  # yesterday's job still holding its node
+        workday.switch(self.s, True, "trial")
+        sessions.start(self.s, "desk")
+        self.at(T0 + timedelta(days=1))
+        p = sessions.start(self.s, "desk")["payload"]
+        self.assertNotIn("restart", p)
+        self.assertNotIn("previous", p)
+        self.assertNotIn("day_start", p)
+        st = workday.status(self.s)
+        self.assertEqual((st["start"], st["end"]), ((T0 + timedelta(days=1)).isoformat(), (T0 + timedelta(days=1, hours=8)).isoformat()))
+
+    def test_second_session_start_refused_when_squeue_is_unavailable(self):
+        fake = self.fake_slurm()
+        (fake / "squeue").write_text("#!/bin/sh\necho 'slurm_load_jobs error: Unable to contact slurm controller' >&2\nexit 1\n")
+        workday.switch(self.s, True, "trial")
+        sessions.start(self.s, "desk")
+        self.at(T0 + timedelta(hours=1))
+        with self.assertRaisesRegex(DurehError, "job 12345 .* may still be running: squeue unavailable .*Unable to contact"):
+            sessions.start(self.s, "desk")
+        self.assertEqual(len(self._sessions()), 1)
+        p = sessions.start(self.s, "desk", force=True, memo="controller down, Director asked")["payload"]
+        self.assertIn("squeue unavailable", p["force"]["why"])
+
     def test_approve_without_a_session_uses_the_config_window(self):
         self.workday_config(phase="production", weekdays=ALL_WEEK, start="10:00", end="18:30")
         workday.switch(self.s, True, "trial")

@@ -90,15 +90,18 @@ def plan(site: Site, purpose: str = "desk") -> str:
     return _build(site, purpose)["text"]
 
 
-def start(site: Site, actor: str, purpose: str = "desk") -> dict:
+def start(site: Site, actor: str, purpose: str = "desk", force: bool = False, memo: str | None = None) -> dict:
     """Submit the planned session job and record `session.started` (job_id, submitted_at, wall_time, purpose):
     the company's working day runs 8 hours from this moment (Director, 2026-10-04); `day close` releases
-    only a job with this record."""
+    only a job with this record. One session a day: a second start on the same local day is refused while
+    today's job is still in squeue (`force` with a `memo` overrides and records why); when that job is gone
+    the start is a restart (`restart: true`) and the day's clock keeps the first session's start."""
     if purpose not in PURPOSES:
         fail(f"unknown session purpose {purpose!r}; available: {', '.join(PURPOSES)}")
     b = _build(site, purpose)
     if b["problems"] and workday.device_on(site, "session"):
         fail("the session cannot start here: " + "; ".join(b["problems"]))
+    again = _second_start(site, workday.todays_session(Ledger(site).events()), force, memo)
     now = workday._now()
     b["logs"].mkdir(parents=True, exist_ok=True)  # Slurm opens the logs before the job runs
     script = b["logs"] / f"{b['name']}-{now.strftime('%Y%m%d-%H%M%S')}.sbatch"
@@ -112,8 +115,36 @@ def start(site: Site, actor: str, purpose: str = "desk") -> dict:
     if proc.returncode != 0 or not m:
         fail(f"sbatch failed (exit {proc.returncode}): {(proc.stderr or proc.stdout).strip()[-500:]}; nothing was recorded")
     payload = {"job_id": m.group(1), "submitted_at": workday._ts(now), "wall_time": b["wall"], "purpose": purpose,
-               "runtime": b["runtime"], "script": str(script), "command": cmd, "notes": b["notes"]}
+               "runtime": b["runtime"], "script": str(script), "command": cmd, "notes": b["notes"], **again}
     return Ledger(site).event(workday.SESSION, actor, None, payload)
+
+
+def _second_start(site: Site, prev: dict | None, force: bool, memo: str | None) -> dict:
+    """What a second `session start` on the same local day adds to its record, or why it is refused.
+    The previous job still in squeue (or squeue unavailable, so possibly still running): refused unless
+    `force`, which needs a `memo` and is recorded as `force`. The job gone: `restart: true`. Either way
+    `previous` names the earlier record and `day_start` keeps the day's clock at the first start."""
+    if prev is None:
+        return {}
+    pp = prev.get("payload") or {}
+    job = pp.get("job_id")
+    previous = {"record": prev["id"], "job_id": job, "submitted_at": pp.get("submitted_at") or prev["ts"]}
+    out = {"previous": previous, "day_start": pp.get("day_start") or previous["submitted_at"]}
+    q = _squeue(site, job) if job else {"queued": False}
+    if q.get("queued") is False:
+        return {**out, "restart": True}
+    if q.get("queued"):
+        why = f"today's session job {job} ({prev['id']}, submitted {previous['submitted_at']}) is still in squeue: " \
+              f"{q['state']}, time left {q['time_left']}"
+    else:
+        why = f"today's session job {job} ({prev['id']}, submitted {previous['submitted_at']}) may still be running: " \
+              f"squeue unavailable ({q.get('error')})"
+    if not force:
+        fail(f"{why}. A company has one session a day; `dureh site session status` shows it. To start another anyway: "
+             f"`dureh site session start --force --memo \"why\"`")
+    if not (memo or "").strip():
+        fail(f"{why}; --force needs --memo: why a second session starts today")
+    return {**out, "force": {"memo": memo.strip(), "why": why}}
 
 
 def last_started(site: Site) -> dict | None:
