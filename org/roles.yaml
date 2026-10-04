@@ -60,6 +60,7 @@ roles:
       - modules/*/tests/**
       - modules/*/pyproject.toml
       - modules/*/uv.lock
+      - projects/*/code/notebooks/**
   web-writer:
     kind: worker
     tier: worker
@@ -107,10 +108,12 @@ roles:
     # Promotion into derivatives/ (a DataLad subdataset) needs a per-WI clone and is not enabled yet.
     isolation: scratch
     output: Scheduler jobs submitted and recorded through the slurm tool; job scripts and run manifests under checkpoints/.
-    never: Code changes, interpretation, tracked-file edits.
+    never: Code changes, interpretation, tracked-file edits (except the notebooks and README "data usage" entries each workflow run regenerates).
     may_dispatch: []
     write_scopes:
       - projects/*/checkpoints/**
+      - projects/*/code/notebooks/**
+      - projects/*/README.md
   interpreter:
     kind: worker
     tier: worker
