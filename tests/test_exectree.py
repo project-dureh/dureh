@@ -101,9 +101,11 @@ class ModuleExec(SiteCase):
         self.assertTrue(args.strip().endswith(run["payload"]["wrapper"]))
         text = Path(run["payload"]["wrapper"]).read_text()
         self.assertIn("#SBATCH --time=00:10:00", text)
-        self.assertIn(f"export DUREH_MODULE_ROOT={tree}", text)
-        self.assertIn(f"export DUREH_MODULE_REV={self.rev_a}", text)
+        # Director 2026-10-04: a configured root_env replaces the DUREH_* names; no rev_env, no rev export
+        self.assertNotIn("DUREH_MODULE_ROOT=", text)
+        self.assertNotIn("DUREH_MODULE_REV=", text)
         self.assertIn(f"export CAMRI_PROJECT={tree}", text)
+        self.assertEqual(m["env"], {"root": "CAMRI_PROJECT", "rev": None})
         self.assertIn(f"export VIRTUAL_ENV={self.mod / '.venv'}", text)
         self.assertIn(f"export PYTHONPATH={tree / 'src'}", text)
         self.assertIn("trap _dureh_exec_cleanup EXIT", text)
@@ -159,7 +161,7 @@ class ModuleExec(SiteCase):
         env.pop("CAMRI_PROJECT", None)
         p = subprocess.run(["bash", run["payload"]["wrapper"]], capture_output=True, text=True, env=env)
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertIn(f"ROOT={tree} REV={self.rev_a} CP={tree} PP={tree / 'src'}", p.stdout)
+        self.assertIn(f"ROOT= REV= CP={tree} PP={tree / 'src'}", p.stdout)
         self.assertIn("READONLY", p.stdout)
         self.assertFalse(tree.exists(), "the EXIT trap removes the tree")
 
@@ -204,3 +206,65 @@ class ModuleExec(SiteCase):
         self.assertFalse(Path(f"{tree}.venv").exists())
         self.assertFalse(Path(run["payload"]["wrapper"]).exists())
         self.assertTrue(other.is_dir(), "other WIs' trees stay")
+
+    def test_each_array_shares_the_tree_until_every_task_ended(self):
+        # release 26: array tasks share one pinned tree; no task removes it, `slurm wait|status` does at the end
+        self.script.write_text("#!/bin/bash\necho \"ITEM=$DUREH_ITER IDX=$DUREH_ITER_INDEX ROOT=$CAMRI_PROJECT\"\n")
+        run = self.submit(each="sub-01,sub-02")
+        tree = Path(run["payload"]["module"]["tree"])
+        self.assertIn("--array=0-1", " ".join(run["payload"]["command"]))
+        self.assertEqual(run["payload"]["command"][-1], run["payload"]["wrapper"])
+        env = {k: v for k, v in os.environ.items() if not k.startswith("BASH_FUNC_")}
+        env["SLURM_ARRAY_TASK_ID"] = "1"
+        p = subprocess.run(["bash", run["payload"]["wrapper"]], capture_output=True, text=True, env=env)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn(f"ITEM=sub-02 IDX=1 ROOT={tree}", p.stdout)
+        self.assertTrue(tree.is_dir(), "a task never removes the shared tree")
+        (Path(f"{tree}.venv-0") / "bin").mkdir(parents=True)  # a rebuilt per-task env left by a killed task
+        (self.fake / "sacct").write_text("#!/bin/sh\necho '4242_0|RUNNING|0:0'\necho '4242_1|COMPLETED|0:0'\n")
+        (self.fake / "sacct").chmod(0o755)
+        ops.slurm_status(self.s, "pipeline-runner", run["id"])
+        self.assertTrue(tree.is_dir())
+        (self.fake / "sacct").write_text("#!/bin/sh\necho '4242_0|COMPLETED|0:0'\necho '4242_1|COMPLETED|0:0'\n")
+        ev = ops.slurm_wait(self.s, "pipeline-runner", run["id"], timeout=5, interval=1)
+        self.assertEqual(ev["payload"]["scheduler_state"], "COMPLETED")
+        self.assertFalse(tree.exists() or Path(f"{tree}.venv-0").exists() or Path(run["payload"]["wrapper"]).exists())
+
+    def test_each_rebuild_uses_a_venv_per_task(self):
+        (self.mod / "uv.lock").write_text("version = 1\n# lock B\n")
+        run = self.submit(each="a,b")
+        text = Path(run["payload"]["wrapper"]).read_text()
+        self.assertEqual(run["payload"]["module"]["env_mode"], "rebuild")
+        self.assertIn('.venv-"$SLURM_ARRAY_TASK_ID"', text)
+        self.assertIn('export VIRTUAL_ENV="$DUREH_EXEC_VENV"', text)
+
+    def test_resubmit_failed_keeps_the_module_revision(self):
+        run = self.submit(each="a,b", rev=self.rev_b)
+        (self.fake / "sacct").write_text("#!/bin/sh\necho '4242_0|COMPLETED|0:0'\necho '4242_1|FAILED|1:0'\n")
+        (self.fake / "sacct").chmod(0o755)
+        again = ops.slurm_resubmit_failed(self.s, "pipeline-runner", run["id"])
+        self.assertEqual(again["payload"]["module"]["rev"], self.rev_b)
+        self.assertEqual(again["payload"]["array"]["items"], ["b"])
+
+    def test_configured_rev_env_and_fallback_names(self):
+        self.config(root_env="CAMRI_PROJECT", rev_env="CAMRI_REV")
+        self.script.write_text("#!/bin/bash\necho \"CP=$CAMRI_PROJECT CR=$CAMRI_REV DR=$DUREH_MODULE_ROOT\"\n")
+        run = self.submit()
+        tree = Path(run["payload"]["module"]["tree"])
+        self.assertEqual(run["payload"]["module"]["env"], {"root": "CAMRI_PROJECT", "rev": "CAMRI_REV"})
+        env = {k: v for k, v in os.environ.items() if not k.startswith("BASH_FUNC_")}
+        env.pop("DUREH_MODULE_ROOT", None)
+        p = subprocess.run(["bash", run["payload"]["wrapper"]], capture_output=True, text=True, env=env)
+        self.assertIn(f"CP={tree} CR={self.rev_a} DR=", p.stdout)
+        self.config()  # no root_env: the DUREH_* fallbacks
+        run = self.submit()
+        text = Path(run["payload"]["wrapper"]).read_text()
+        self.assertEqual(run["payload"]["module"]["env"], {"root": "DUREH_MODULE_ROOT", "rev": "DUREH_MODULE_REV"})
+        self.assertIn("export DUREH_MODULE_ROOT=", text)
+        self.assertIn(f"export DUREH_MODULE_REV={self.rev_a}", text)
+        self.config(rev_env="CAMRI_REV")
+        with self.assertRaisesRegex(DurehError, "rev_env needs root_env"):
+            self.submit()
+        self.config(root_env="CAMRI_PROJECT", rev_env="bad name")
+        with self.assertRaisesRegex(DurehError, "rev_env is not a variable name"):
+            self.submit()

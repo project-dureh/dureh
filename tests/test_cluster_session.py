@@ -349,6 +349,24 @@ class ClusterSession(SiteCase):
         run = ops.slurm_submit(self.s, "desk", w, script)  # no --time anywhere
         self.assertIn("skipped", run["payload"]["start_check"])
 
+    def test_submit_check_for_an_array_uses_the_per_task_time(self):
+        # release 26: one --test-only for the whole array; the expected end is its start plus one task's --time
+        self._on_duty()
+        w, script = self._job()
+        Path(script).write_text("#!/bin/sh\n#SBATCH --time=02:00:00\necho $DUREH_ITER\n")
+        self._sbatch("2026-10-03T14:00:00")
+        run = ops.slurm_submit(self.s, "desk", w, script, each="sub-01,sub-02,sub-03,sub-04,sub-05")
+        chk = run["payload"]["start_check"]
+        self.assertEqual((chk["expected_end"], chk["time_source"], chk["per_task"]),
+                         ("2026-10-03T16:00:00-04:00", "script", True))
+        calls = (self.tmp / "sbatch-calls").read_text().splitlines()
+        self.assertEqual([("--test-only" in c, "--array=0-4" in c) for c in calls], [(True, True), (False, True)])
+        before = sorted((self.site_root / "logs" / "slurm" / w).glob("each-*"))
+        with self.assertRaisesRegex(DurehError, r"this array's first task .*--time 04:00:00 \(from the sbatch-arg, "
+                                                r"per task\).*after today's end"):
+            ops.slurm_submit(self.s, "desk", w, script, extra=["--time=04:00:00"], each="sub-01,sub-02")
+        self.assertEqual(list((self.site_root / "logs" / "slurm" / w).glob("each-*")), before, "refusal leaves nothing")
+
     def test_submit_not_checked_when_workday_off(self):
         w, script = self._job()
         self._sbatch("2026-10-03T23:00:00")

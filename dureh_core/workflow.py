@@ -687,8 +687,9 @@ def _own_branch(site: Site, led: Ledger, wi: str, root: Path, branch: str) -> bo
     return bool(tip) and tip in recorded
 
 
-def _log_name(pattern: str, job: str, name: str) -> str | None:
-    """An sbatch filename pattern with %j/%x (and %%) filled in; None when another pattern is left."""
+def _log_name(pattern: str, job: str, name: str, task: int | None = None) -> str | None:
+    """An sbatch filename pattern with %j/%x (and %%; for an array task also %A and %a) filled in; None when
+    another pattern is left."""
     out, i = [], 0
     while i < len(pattern):
         c = pattern[i]
@@ -701,6 +702,10 @@ def _log_name(pattern: str, job: str, name: str) -> str | None:
             out.append(job)
         elif nxt == "x":
             out.append(name)
+        elif nxt == "A" and task is not None:
+            out.append(job)
+        elif nxt == "a" and task is not None:
+            out.append(str(task))
         elif nxt == "%":
             out.append("%")
         else:
@@ -733,6 +738,15 @@ def _wi_job_logs(site: Site, led: Ledger, wi: str, rec: dict) -> tuple[list[Path
         job = str(p["job_id"]).split(";")[0].strip()
         jname = _scan_opt([str(w) for w in p.get("command") or []], "-J", "--job-name") or f"dureh-{wi}"
         candidates: list[str] = []
+        arr = p.get("array") or {}
+        tasks: list[int | None] = list(range(int(arr.get("count") or 0))) if arr else [None]
+        for f in (arr.get("items_file"), arr.get("wrapper")):  # --each: the item list and the generated wrapper
+            if f and os.path.realpath(Path(f).parent) == os.path.realpath(site.root / "logs" / "slurm" / wi):
+                try:
+                    if stat.S_ISREG(os.lstat(f).st_mode) and Path(f) not in found:
+                        found.append(Path(f))
+                except OSError:
+                    pass
         if p.get("log_out") or p.get("log_err"):
             candidates = [x for x in (p.get("log_out"), p.get("log_err")) if x]
         else:
@@ -754,8 +768,8 @@ def _wi_job_logs(site: Site, led: Ledger, wi: str, rec: dict) -> tuple[list[Path
                     if nm:
                         names.append(nm)
             candidates = [str(d / n) for d in dirs for n in dict.fromkeys(names)]
-        for c in dict.fromkeys(candidates):
-            name = _log_name(Path(c).name, job, jname)
+        for c, task in [(c, t) for c in dict.fromkeys(candidates) for t in tasks]:
+            name = _log_name(Path(c).name, job, jname, task)
             if name is None or job not in name:
                 skipped.append({"path": c, "job_id": job, "reason": "name does not resolve to one holding the job id"})
                 continue
@@ -771,10 +785,14 @@ def _wi_job_logs(site: Site, led: Ledger, wi: str, rec: dict) -> tuple[list[Path
             try:
                 st = os.lstat(f)
             except OSError:
-                continue  # missing: nothing to remove
+                continue  # missing: nothing to remove (an array task's %j log is not resolvable: no task job id)
             if stat.S_ISREG(st.st_mode) and f not in found:
                 found.append(f)
-    return found, skipped
+    unique = []
+    for s in skipped:
+        if s not in unique:
+            unique.append(s)
+    return found, unique
 
 
 def purge(site: Site, actor: str, wi: str, dry_run: bool = False) -> dict:

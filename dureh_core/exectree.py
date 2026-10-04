@@ -11,11 +11,14 @@ camri 1eeab74 while modules/camri moved to 8333b22 and 69f83b3).
 - Environment: `shared-venv` (the archived uv.lock is byte-identical to modules/<m>/uv.lock and
   modules/<m>/.venv exists: activate it and put the tree's package dir first on PYTHONPATH) or `rebuild`
   (the module's env_rebuild in the tree, into the writable sibling `<tree>.venv`, before the payload).
-- The job wrapper exports DUREH_MODULE_ROOT, DUREH_MODULE_REV and the module's `root_env` variable, runs the
+- The job wrapper exports the module's `root_env` variable (and `rev_env`, when config names one), or, only when
+  no root_env is configured, the fallbacks DUREH_MODULE_ROOT and DUREH_MODULE_REV (Director 2026-10-04: variables
+  a company's job scripts read carry the company's names, not DUREH's); it runs the
   original job script as a child, and removes the tree and `<tree>.venv` on exit.
 """
 from __future__ import annotations
 
+import os
 import re
 import shlex
 import shutil
@@ -119,7 +122,8 @@ def _rmtree(path: Path) -> None:
 
 
 def prepare(site: Site, wi: str, target: str | None, module: str, rev: str | None, script: Path,
-            dry_run: bool = False) -> dict:
+            dry_run: bool = False, items: list[str] | None = None, items_file: str | None = None,
+            item_env: dict | None = None) -> dict:
     """Resolve the revision, extract the read-only tree and write the job wrapper. Returns the record's
     `module` block plus the wrapper path and warnings."""
     if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]*$", module):
@@ -145,6 +149,13 @@ def prepare(site: Site, wi: str, target: str | None, module: str, rev: str | Non
     root_env = entry.get("root_env")
     if root_env is not None and not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", str(root_env)):
         fail(f"config modules[{module}].root_env is not a variable name: {root_env!r}")
+    rev_env = entry.get("rev_env")
+    if rev_env is not None and not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", str(rev_env)):
+        fail(f"config modules[{module}].rev_env is not a variable name: {rev_env!r}")
+    if rev_env and not root_env:
+        fail(f"config modules[{module}].rev_env needs root_env (without it the fallbacks DUREH_MODULE_ROOT and "
+             "DUREH_MODULE_REV are exported)")
+    env = {"root": root_env, "rev": rev_env} if root_env else {"root": "DUREH_MODULE_ROOT", "rev": "DUREH_MODULE_REV"}
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     tree = exec_root(site) / f"{wi}-{module}-{full[:7]}-{ts}"
     venv = Path(f"{tree}.venv")
@@ -152,13 +163,13 @@ def prepare(site: Site, wi: str, target: str | None, module: str, rev: str | Non
     warnings = []
     for hit in overriding_assignments(site, script, module, root_env):
         warnings.append(f"{script.name} {hit} sets the module root itself and overrides the pinned tree; "
-                        f"use ${{DUREH_MODULE_ROOT}}" + (f" or ${{{root_env}}}" if root_env else "") + " instead")
+                        f"use ${{{env['root']}}} instead")
     if not root_env:
         warnings.append(f"config modules[{module}] has no root_env; only DUREH_MODULE_ROOT points at the pinned "
                         f"tree (the site may set root_env, e.g. \"CAMRI_PROJECT\" for camri)")
     block = {"name": module, "rev": full, "rev_override": bool(rev is not None and pin_full and full != pin_full),
              "tree": str(tree), "env_mode": None, "manifest_pin": pin_full, "manifest": manifest,
-             "root_env": root_env}
+             "root_env": root_env, "rev_env": rev_env, "env": env}
     if dry_run:
         return {"module": block, "wrapper": str(wrapper), "warnings": warnings}
     exec_root(site).mkdir(parents=True, exist_ok=True)
@@ -181,7 +192,8 @@ def prepare(site: Site, wi: str, target: str | None, module: str, rev: str | Non
                      f"`env_rebuild` on the modules/{module} entry of config.json")
         subprocess.run(["chmod", "-R", "a-w", str(tree)], check=True)
         block["env_mode"] = mode
-        wrapper.write_text(_wrapper(site, script, mod, tree, venv, full, root_env, mode, rebuild))
+        wrapper.write_text(_wrapper(site, script, mod, tree, venv, full, env, mode, rebuild, items, items_file,
+                                    item_env))
         wrapper.chmod(0o755)
     except BaseException:
         cleanup(tree)
@@ -190,45 +202,58 @@ def prepare(site: Site, wi: str, target: str | None, module: str, rev: str | Non
 
 
 def cleanup(tree: Path) -> None:
-    for p in (tree, Path(f"{tree}.venv"), Path(f"{tree}.sbatch")):
+    """Remove a tree, its .venv (per array task: .venv-<i>) and its wrapper."""
+    extra = sorted(tree.parent.glob(f"{tree.name}.venv-*")) if tree.parent.is_dir() else []
+    for p in (tree, Path(f"{tree}.venv"), Path(f"{tree}.sbatch"), *extra):
         _rmtree(p)
 
 
-def _wrapper(site: Site, script: Path, mod: Path, tree: Path, venv: Path, rev: str, root_env: str | None,
-             mode: str, rebuild: str | None) -> str:
+def _wrapper(site: Site, script: Path, mod: Path, tree: Path, venv: Path, rev: str, env: dict,
+             mode: str, rebuild: str | None, items: list[str] | None = None, items_file: str | None = None,
+             item_env: dict | None = None) -> str:
     q = shlex.quote
     lines = script.read_text(encoding="utf-8", errors="replace").splitlines()
     first = lines[0] if lines and lines[0].startswith("#!") else ""
     interp = shlex.split(first[2:]) if first else ["/bin/bash"]
     directives = [ln for ln in lines if ln.strip().startswith("#SBATCH")]
     pkg = package_dir(tree)
-    out = ["#!/bin/bash", *directives,
-           f"# Generated by `dureh slurm submit --module {mod.name}`: runs {script} against the read-only tree",
-           f"# {tree} (git archive {rev}); the tree and its .venv are removed when the job exits.",
-           f"DUREH_EXEC_TREE={q(str(tree))}",
-           f"DUREH_EXEC_VENV={q(str(venv))}",
-           '_dureh_exec_cleanup() { chmod -R u+w "$DUREH_EXEC_TREE" "$DUREH_EXEC_VENV" 2>/dev/null; '
-           'rm -rf "$DUREH_EXEC_TREE" "$DUREH_EXEC_VENV"; }',
-           "trap _dureh_exec_cleanup EXIT",
+    if items is None:
+        out = ["#!/bin/bash", *directives,
+               f"# Generated by `dureh slurm submit --module {mod.name}`: runs {script} against the read-only tree",
+               f"# {tree} (git archive {rev}); the tree and its .venv are removed when the job exits.",
+               f"DUREH_EXEC_TREE={q(str(tree))}",
+               f"DUREH_EXEC_VENV={q(str(venv))}",
+               '_dureh_exec_cleanup() { chmod -R u+w "$DUREH_EXEC_TREE" "$DUREH_EXEC_VENV" 2>/dev/null; '
+               'rm -rf "$DUREH_EXEC_TREE" "$DUREH_EXEC_VENV"; }']
+    else:  # array tasks share the tree (removed by `slurm wait|status` once every task ended, or `purge`);
+        from .ops import item_lines  # each task removes only its own rebuilt .venv
+
+        out = ["#!/bin/bash", *directives,
+               f"# Generated by `dureh slurm submit --module {mod.name} --each`: runs {script} once per item against",
+               f"# the read-only tree {tree} (git archive {rev}), shared by all array tasks.",
+               *item_lines(items, items_file, item_env),
+               f"DUREH_EXEC_TREE={q(str(tree))}",
+               f"DUREH_EXEC_VENV={q(str(venv))}-\"$SLURM_ARRAY_TASK_ID\"",
+               '_dureh_exec_cleanup() { chmod -R u+w "$DUREH_EXEC_VENV" 2>/dev/null; rm -rf "$DUREH_EXEC_VENV"; }']
+    out += ["trap _dureh_exec_cleanup EXIT",
            "trap 'exit 143' TERM INT",
-           f"export DUREH_MODULE_ROOT={q(str(tree))}",
-           f"export DUREH_MODULE_REV={q(rev)}"]
-    if root_env:
-        out.append(f"export {root_env}={q(str(tree))}")
+           f"export {env['root']}={q(str(tree))}"]
+    if env.get("rev"):
+        out.append(f"export {env['rev']}={q(rev)}")
     if mode == "shared-venv":
         out += [f"# env mode shared-venv: uv.lock at {rev[:7]} is identical to modules/{mod.name}/uv.lock",
                 f"export VIRTUAL_ENV={q(str(mod / '.venv'))}",
                 f"export PYTHONPATH={q(str(pkg))}\"${{PYTHONPATH:+:$PYTHONPATH}}\""]
     else:
         out += [f"# env mode rebuild: uv.lock at {rev[:7]} differs from modules/{mod.name}/uv.lock (or no usable .venv)",
-                f"export VIRTUAL_ENV={q(str(venv))}",
+                (f"export VIRTUAL_ENV={q(str(venv))}" if items is None else 'export VIRTUAL_ENV="$DUREH_EXEC_VENV"'),
                 'export UV_PROJECT_ENVIRONMENT="$VIRTUAL_ENV"',
                 f"( cd \"$DUREH_EXEC_TREE\" && {rebuild} ) || "
                 "{ echo \"dureh: environment rebuild failed in $DUREH_EXEC_TREE\" >&2; exit 97; }"]
     out += ['export UV_PROJECT_ENVIRONMENT="$VIRTUAL_ENV"',
             "export UV_NO_SYNC=1  # never sync (and so never change) the environment from the job",
             'export PATH="$VIRTUAL_ENV/bin:$PATH"',
-            " ".join(q(w) for w in interp) + f" {q(str(script))} \"$@\"",
+            " ".join(q(w) for w in interp) + f" {q(os.path.abspath(script))} \"$@\"",  # the job runs in its --chdir
             "exit $?"]
     return "\n".join(out) + "\n"
 

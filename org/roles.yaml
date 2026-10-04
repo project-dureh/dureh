@@ -108,7 +108,7 @@ roles:
     # scratch: no WI worktree; writes go to the untracked checkpoints/ of the real project.
     # Promotion into derivatives/ (a DataLad subdataset) needs a per-WI clone and is not enabled yet.
     isolation: scratch
-    output: Scheduler jobs submitted and recorded through the slurm tool, with `--module <m>` whenever the job runs module code (a pinned read-only tree; read the module root from its root_env variable, e.g. $CAMRI_PROJECT, or $DUREH_MODULE_ROOT; never set it to modules/<m>); container images only through `container build`; job scripts and run manifests under checkpoints/.
+    output: Scheduler jobs submitted and recorded through the slurm tool. Submit one job per subject with `slurm submit --each <subjects>` (all subjects at once, no cap); during development one array per step, the next step with `--after <run>`; a chained workflow is one array over subjects; group-level steps as separate jobs `--after` the subject array; never loop submits by hand. Use `--module <m>` whenever the job runs module code (a pinned read-only tree; read the module root from its root_env variable, e.g. $CAMRI_PROJECT, or $DUREH_MODULE_ROOT; never set it to modules/<m>); container images only through `container build`; job scripts and run manifests under checkpoints/.
     never: Code changes, interpretation, tracked-file edits (except the notebooks and README "data usage" entries each workflow run regenerates).
     may_dispatch: []
     write_scopes:

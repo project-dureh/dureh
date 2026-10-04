@@ -142,7 +142,10 @@ def _agent_file(site: Site, role, project: str | None = None) -> str:
             "checker": [f"- Your job: `{dureh} verify --wi <WI>` for the item in your brief. It checks ownership, declared"
                         " outputs, and declared checks, and records the result. Report its numbers; never fix the artifact."],
             "pipeline-runner": [f"- Submit every computation with `{dureh} slurm submit --wi <WI> --script <job.sh>` and"
-                                f" follow it with `{dureh} slurm status --run <run-id>`. Never run heavy tools in the session.",
+                                f" follow it with `{dureh} slurm wait --run <run-id>`. Never run heavy tools in the session.",
+                                f"- {SUBJECT_RULE} Items are `sub-<label>` (or `sub-<label>_ses-<label>` for session-level jobs);"
+                                f" the script reads them from the environment: {_item_names_text(site)};"
+                                f" rerun only the failed subjects with `{dureh} slurm submit --wi <WI> --resubmit-failed <run> [--script <fixed.sh>]`.",
                                 f"- Build a container image only with `{dureh} container build --wi <WI> --module <m> --rev <rev> [--name <name>]`"
                                 " (the recipe is the module's own `containers/<name or m>.def` at that rev; add"
                                 " `--recipe projects/<p>/code/containers/<name>.def` only for a project-local image);"
@@ -163,6 +166,26 @@ def _agent_file(site: Site, role, project: str | None = None) -> str:
         }.get(role.name, [f"- Finish with `{dureh} wi stage --wi <WI> --summary ...` after committing on the WI branch."])
         lines += extra
     return "\n".join(lines) + "\n"
+
+
+def _item_names(site: Site) -> dict:
+    from ..ops import DEFAULT_ITEM_ENV, item_env
+
+    try:
+        return item_env(site)
+    except DurehError:
+        return dict(DEFAULT_ITEM_ENV)
+
+
+def _item_names_text(site: Site) -> str:
+    n = _item_names(site)
+    what = {"item": "item", "by": "level", "index": "index", "sub": "subject label", "ses": "session label"}
+    return ", ".join(f"`${v}` ({what[k]})" for k, v in n.items())
+
+
+SUBJECT_RULE = ("Submit one job per subject with `slurm submit --each <subjects>` (all subjects at once, no cap); during"
+                " development one array per step, the next step with `--after <run>`; a chained workflow is one array over"
+                " subjects; group-level steps as separate jobs `--after` the subject array; never loop submits by hand.")
 
 
 def _claude_md(site: Site) -> str:
@@ -213,7 +236,8 @@ def _claude_md(site: Site) -> str:
               f"7. Before moving or deleting a path, run `{dureh} path-refs <path>`. Delete only through `{dureh} purge`."
               f" If a dispatch or verify reports a broken worktree or a stale `.venv` (for example after the site moved), run `{dureh} worktree repair --wi <WI>`"
               f" (or `--target <target>` for a main tree's `.venv`); it rebuilds the environment with `env_rebuild` from config.json. Never edit `.git` files or rebuild environments by hand.",
-              f"8. Compute runs only as scheduler jobs through `{dureh} slurm submit`; container images only through `{dureh} container build`"
+              f"8. Compute runs only as scheduler jobs through `{dureh} slurm submit`. {SUBJECT_RULE}"
+              f" Brief pipeline-runners the same way (subject list or `@file`, steps, `--after` order); container images only through `{dureh} container build`"
               f" (a pipeline-runner WI on the module or a project, recipe = the module's `containers/<name>.def` at `--rev`; `{dureh} container status --wi <WI>` records `container.built` with the sha256 for the data-steward's manifest;"
               f" `{dureh} container retire --sif <file> --reason ...` removes an image no project manifest pins). External pushes only through `{dureh} push` with a Director decision."
               f" Verified checkpoints reach `derivatives/` only through `{dureh} promote`, run by a dispatched data-steward;"
