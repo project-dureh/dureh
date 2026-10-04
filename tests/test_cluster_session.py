@@ -104,13 +104,16 @@ class ClusterSession(SiteCase):
         rt = sessions.get(self.s)
         self.assertEqual(rt.name, "claude-code")
         self.assertTrue(rt.talks_to_director)
-        self.assertEqual(rt.launch_command(self.s, "desk"), ["claude", "remote-control", "--permission-mode", "auto"])
+        # measured 2026-10-04: the flag form registers from a batch job; the name defaults to the site directory
+        self.assertEqual(rt.launch_command(self.s, "desk"),
+                         ["claude", "--remote-control", "site", "--permission-mode", "auto"])
         self.config(session={"command": ["/opt/bin/claude", "--verbose"],
-                             "options": {"model": "opus"},
-                             "flags": {"model": "--model"}})
+                             "options": {"model": "opus", "remote_control": "camri-{purpose}"},
+                             "flags": {"model": "--model"}, "prompt": "지아, 출근 ({site})"})
         rt = sessions.get(self.s)
         self.assertEqual(rt.launch_command(self.s, "desk"),
-                         ["/opt/bin/claude", "--verbose", "--permission-mode", "auto", "--model", "opus"])
+                         ["/opt/bin/claude", "--verbose", "--remote-control", "camri-desk", "--permission-mode", "auto",
+                          "--model", "opus", "지아, 출근 (site)"])
         self.assertTrue(any("not on PATH" in p for p in rt.check(self.s)))
         self.config(session={"options": {"effort": "high"}})
         with self.assertRaisesRegex(DurehError, "effort have no flag"):
@@ -131,7 +134,7 @@ class ClusterSession(SiteCase):
                     cluster={"partitions": {"general": {"nodes": 1, "time_limit": "11-00:00:00", "default": True}}})
         rc, out = self.cli("site", "session", "plan")
         self.assertEqual(rc, 0)
-        self.assertTrue(out.startswith("#!/bin/bash\n"))
+        self.assertTrue(out.startswith("#!/bin/bash\n#SBATCH --job-name=cc-site\n"))
         self.assertIn("#SBATCH --time=24:00:00\n", out)  # 8 h day + 16 h overtime allowance, capped at 24 h
         self.assertIn("#SBATCH --account=acct-x\n", out)
         self.assertIn("#SBATCH --partition=general\n", out)
@@ -139,10 +142,22 @@ class ClusterSession(SiteCase):
         self.assertIn("#SBATCH --mem=16g\n", out)
         self.assertNotIn("--gres", out)
         self.assertIn(f"#SBATCH --chdir={self.site_root}\n", out)
-        self.assertIn(f"#SBATCH --output={self.site_root}/logs/sessions/%x-%j.out", out)
+        self.assertIn(f"#SBATCH --output={self.site_root}/logs/session/%x-%j.out", out)
         self.assertIn(f"export DUREH_SITE={self.site_root}", out)
-        self.assertTrue(out.rstrip().endswith("exec claude remote-control --permission-mode auto"))
-        self.assertFalse((self.site_root / "logs" / "sessions").exists(), "a plan creates nothing")
+        # measured 2026-10-04 (labs/session-test): scrub TMUX, private tmux socket, flag form, hold while it lives
+        self.assertIn("\nunset TMUX TMUX_PANE", out)
+        self.assertIn("\nSOCK=dureh-", out)
+        self.assertIn('tmux -L "$SOCK" new-session -d -s "$NAME" -x 200 -y 50 -c ', out)
+        self.assertIn("CMD='claude --remote-control site --permission-mode auto'\n", out)
+        self.assertNotIn("claude remote-control", out)
+        self.assertTrue(out.rstrip().endswith('while tmux -L "$SOCK" has-session -t "$NAME" 2>/dev/null; do sleep 20; done'))
+        self.assertFalse((self.site_root / "logs").exists(), "a plan creates nothing")
+
+    def test_session_plan_defaults_without_session_config(self):
+        out = sessions.plan(self.s)  # the company config has only `slurm`
+        self.assertIn("#SBATCH --cpus-per-task=2\n#SBATCH --mem=16G\n", out)
+        self.assertIn("#SBATCH --account=acct-x\n#SBATCH --partition=general\n", out)
+        self.assertIn("--remote-control site --permission-mode auto'", out)
 
     def test_session_plan_wall_time_from_overtime_allowance(self):
         self.config(workday={"overtime_hours": 2})

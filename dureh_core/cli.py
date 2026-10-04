@@ -10,7 +10,7 @@ from pathlib import Path
 from .util import DurehError, dumps, fail
 
 
-RESERVED_EVENT_PREFIXES = ("workday.", "day.")
+RESERVED_EVENT_PREFIXES = ("workday.", "day.", "session.", "hours.")
 
 
 def _percent(value: str) -> float:
@@ -234,7 +234,7 @@ def cmd_ledger_add(a):
         except json.JSONDecodeError as exc:
             fail(f"--payload must be valid JSON: {exc}")
         if (a.type or "").startswith(RESERVED_EVENT_PREFIXES):
-            fail(f"{a.type} events are written only by `dureh day` and `dureh site workday`")
+            fail(f"{a.type} events are written only by `dureh day`, `dureh site workday` and `dureh site session start`")
         rec = led.event(a.type or fail("--type is required for events"), actor, a.wi, payload, a.ref)
     elif a.kind == "decision":
         rec = led.append("decision", a.type or "record", actor, a.wi,
@@ -268,7 +268,7 @@ def cmd_event_add(a):
     if not a.kind.strip() or not a.wi.strip() or not _actor(a).strip():
         fail("--kind, --wi, and --actor must be nonempty")
     if a.kind.startswith(RESERVED_EVENT_PREFIXES):
-        fail(f"{a.kind} events are written only by `dureh day` and `dureh site workday`")
+        fail(f"{a.kind} events are written only by `dureh day`, `dureh site workday` and `dureh site session start`")
     _print(Ledger(_site(a)).event(a.kind, _actor(a), a.wi, payload))
 
 
@@ -372,7 +372,19 @@ def cmd_site_cluster(a):
 def cmd_site_session(a):
     from . import sessions
 
-    _print(sessions.plan(_site(a), a.purpose))
+    site = _site(a)
+    if a.action == "plan":
+        print(sessions.plan(site, a.purpose), end="")
+    elif a.action == "start":
+        rec = sessions.start(site, _actor(a), a.purpose)
+        p = rec["payload"]
+        print(f"Submitted session job {p['job_id']} at {p['submitted_at']} (wall time {p['wall_time']}, purpose "
+              f"{p['purpose']}); recorded {rec['id']} (session.started). The working day runs from now.")
+        for n in p.get("notes") or []:
+            print(f"note: {n}")
+    else:
+        st = sessions.status(site)
+        _print(st if a.json else sessions.render_status(st))
 
 
 def cmd_day(a):
@@ -682,9 +694,12 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("action", choices=["detect", "show"])
     x.add_argument("--write", action="store_true", help="detect: save into config.json `cluster` (desk/Director)")
     x.add_argument("--actor")
-    x = add(st, "session", cmd_site_session, "print the sbatch script that would start the day's session (never submits)")
-    x.add_argument("action", choices=["plan"])
+    x = add(st, "session", cmd_site_session, "the day's session job: plan (print the sbatch script, submit nothing), "
+                                               "start (submit it and record session.started), status (read-only)")
+    x.add_argument("action", choices=["plan", "start", "status"])
     x.add_argument("--purpose", default="desk", choices=["desk"])
+    x.add_argument("--json", action="store_true", help="status: machine-readable")
+    x.add_argument("--actor")
 
     dy = sub.add_parser("day", help="workday mode: day plan, approval, decisions, end report, overtime"
                         ).add_subparsers(dest="day_command", required=True)
@@ -774,7 +789,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 OBSERVE_ALLOWED = {("status", None), ("wi", "show"), ("wi", "list"), ("ledger", "query"), ("upstream", "list"), ("upstream", "message"), ("upstream", "inbox"),
-                   ("path-refs", None), ("usage", None), ("verify", None), ("day", "status")}
+                   ("path-refs", None), ("usage", None), ("verify", None), ("day", "status"), ("site", "session")}
 
 
 def _check_observe(args) -> None:
@@ -785,6 +800,7 @@ def _check_observe(args) -> None:
     sub = getattr(args, f"{args.command.replace('-', '_')}_command", None)
     name = f"{args.command} {sub}" if sub else args.command
     if (args.command, sub) not in OBSERVE_ALLOWED or (args.command == "verify" and not args.self) \
+            or ((args.command, sub) == ("site", "session") and args.action != "status") \
             or getattr(args, "record", False):
         fail(f"observe mode: `{name}` is not a read-only command; ask the desk to run it")
 

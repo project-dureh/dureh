@@ -35,6 +35,13 @@ DEFAULT_HOURS = 8.0
 DEFAULT_OVERTIME_HOURS = 16.0  # the session job's wall time covers the day plus this, capped at 24 h
 DAY_TYPES = ("day.planned", "day.approved", "day.decision", "day.ended", "day.overtime", "day.closed")
 URGENT = "day.urgent"
+SESSION = "session.started"  # written by `dureh site session start`; the day's clock runs from it (Director, 2026-10-04)
+WEEKDAY_NAMES = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+DEFAULT_WEEKDAYS = (0, 1, 2, 3, 4)
+PHASES = ("development", "production")
+DEFAULT_PHASE = "development"
+DEVICES = ("hours", "weekday", "usage", "session")
+HOURS_EXCEEDED = "hours.exceeded"  # development phase: recorded once per day when the 8 hours pass
 
 
 def _now() -> datetime:
@@ -51,18 +58,101 @@ def _parse(ts: str) -> datetime:
 
 
 def settings(site: Site) -> dict:
-    """config.json `workday` (hours, overtime_hours, daily_share, model_weights, transcripts); defaults otherwise."""
+    """config.json `workday` (hours, overtime_hours, daily_share, model_weights, transcripts, weekdays, supervised,
+    start/end fallback window); defaults otherwise."""
     cfg = site.config.get("workday") or {}
     ot = cfg.get("overtime_hours")
     return {"hours": float(cfg.get("hours") or DEFAULT_HOURS),
             "overtime_hours": float(DEFAULT_OVERTIME_HOURS if ot is None else ot),
             "daily_share": float(cfg.get("daily_share") or 1 / 7),
             "model_weights": cfg.get("model_weights") or {},
-            "transcripts": cfg.get("transcripts") or claude_usage.DEFAULT_ROOTS}
+            "transcripts": cfg.get("transcripts") or claude_usage.DEFAULT_ROOTS,
+            "weekdays": _weekdays(cfg.get("weekdays")),
+            "phase": _phase(cfg.get("phase")),
+            "start": cfg.get("start") or None, "end": cfg.get("end") or None}
+
+
+def _phase(raw) -> str:
+    """`workday.phase` (Director, 2026-10-04; provisional name): `development` (default) or `production`."""
+    phase = str(raw or DEFAULT_PHASE)
+    if phase not in PHASES:
+        fail(f"config.json workday.phase: unknown phase {phase!r} (use {' or '.join(PHASES)})")
+    return phase
+
+
+def device_on(site: Site, name: str) -> bool:
+    """Whether an attendance device applies: `hours` (the 8-hour clock), `weekday` (workday.weekdays), `usage`
+    (the daily usage gate), `session` (session start/close checks). In the development phase the weekday
+    device is off and the hours device only warns (see `hours_mode`)."""
+    if name not in DEVICES:
+        fail(f"unknown attendance device {name!r}; devices: {', '.join(DEVICES)}")
+    if name == "weekday" and settings(site)["phase"] == "development":
+        return False
+    return True
+
+
+def hours_mode(site: Site) -> str | None:
+    """`block` (production: no new agent after the end), `warn` (development: an `hours.exceeded` record and a
+    warning line, never a block), None when the hours device is off."""
+    if not device_on(site, "hours"):
+        return None
+    return "block" if settings(site)["phase"] == "production" else "warn"
+
+
+def _weekdays(raw) -> set[int]:
+    """`workday.weekdays`: names (Mon..Sun) or numbers (0 = Monday); default Monday to Friday."""
+    if raw is None:
+        return set(DEFAULT_WEEKDAYS)
+    out = set()
+    for item in raw:
+        if isinstance(item, int):
+            out.add(item % 7)
+        elif str(item)[:3].lower() in WEEKDAY_NAMES:
+            out.add(WEEKDAY_NAMES.index(str(item)[:3].lower()))
+        else:
+            fail(f"config.json workday.weekdays: unknown weekday {item!r} (use Mon..Sun)")
+    return out
 
 
 def _events(site: Site) -> list[dict]:
-    return [e for e in Ledger(site).events() if e["type"].startswith(("workday.", "day."))]
+    return [e for e in Ledger(site).events() if e["type"].startswith(("workday.", "day.", "session.", "hours."))]
+
+
+def session_start(e: dict) -> datetime:
+    """When a `session.started` record's job was submitted (its `submitted_at`, else the record time), local."""
+    raw = (e.get("payload") or {}).get("submitted_at") or e["ts"]
+    dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    return (dt if dt.tzinfo else dt.replace(tzinfo=_now().tzinfo)).astimezone(_now().tzinfo)
+
+
+def todays_session(events: list[dict]) -> dict | None:
+    """The last session dureh started today: its submission is the start of the company's working day."""
+    today = _now().date()
+    found = [e for e in events if e["type"] == SESSION and session_start(e).date() == today]
+    return found[-1] if found else None
+
+
+def _at(day: datetime, hhmm: str) -> datetime:
+    h, m = (int(x) for x in hhmm.split(":")[:2])
+    return day.replace(hour=h, minute=m, second=0, microsecond=0)
+
+
+def clock(site: Site, session: dict | None, fallback: datetime) -> tuple[str, str]:
+    """The day's start and end: `workday.hours` from the session start; without a session record (manual
+    start) the config window `workday.start`/`workday.end` when set, else the hours from `fallback`."""
+    st = settings(site)
+    if session is not None:
+        start = session_start(session)
+        return _ts(start), _ts(start + timedelta(hours=st["hours"]))
+    start = _at(fallback, st["start"]) if st["start"] else fallback
+    end = _at(fallback, st["end"]) if st["end"] else start + timedelta(hours=st["hours"])
+    return _ts(start), _ts(end)
+
+
+def working_day(site: Site, start: str) -> bool:
+    """False when the day falls outside `workday.weekdays`: the whole day is overtime (Director, 2026-10-04).
+    Only with the weekday device on (production phase, not switched off by the Director)."""
+    return not device_on(site, "weekday") or _parse(start).weekday() in settings(site)["weekdays"]
 
 
 def enabled(site: Site, events: list[dict] | None = None) -> bool:
@@ -110,11 +200,13 @@ def usage(site: Site, events: list[dict] | None = None) -> dict:
 
 def day(site: Site, events: list[dict] | None = None) -> dict:
     """The current day: phase off-duty | planned | on-duty | past-end | overtime, plus its records."""
-    evs = [e for e in (events if events is not None else _events(site)) if e["type"] in DAY_TYPES]
+    all_evs = events if events is not None else _events(site)
+    session = todays_session(all_evs)
+    evs = [e for e in all_evs if e["type"] in DAY_TYPES]
     # the day starts at the last plan; older days are history
     start = max((i for i, e in enumerate(evs) if e["type"] == "day.planned"), default=None)
     if start is None:
-        return {"phase": "off-duty", "reason": "no day plan"}
+        return {"phase": "off-duty", "reason": "no day plan", **_session_clock(site, session)}
     cur = evs[start:]
     plan = cur[0]
     approved = [e for e in cur if e["type"] == "day.approved"]
@@ -124,30 +216,52 @@ def day(site: Site, events: list[dict] | None = None) -> dict:
     decisions = [{"id": e["id"], "title": e["payload"]["title"], "commit": e["payload"].get("commit")}
                  for e in cur if e["type"] == "day.decision"]
     out = {"plan": plan["id"], "date": plan["payload"].get("date"), "goal": plan["payload"].get("goal"),
-           "decisions": decisions}
+           "decisions": decisions, **_session_clock(site, session)}
     if closed:
         return {**out, "phase": "off-duty", "reason": f"day closed {closed[-1]['ts']}"}
+    mode = hours_mode(site)
     if not approved:
+        if mode == "block" and out.get("end") and _now() >= _parse(out["end"]) and not ended:
+            return {**out, "phase": "past-end", "reason": f"the day ended at {out['end']} (never approved); "
+                                                         "write the end report"}
         return {**out, "phase": "planned", "reason": "day plan waits for the Director's approval"}
     a = approved[-1]["payload"]
     out.update(start=a["start"], end=a["end"], approval=approved[-1]["id"])
+    out["working_day"] = working_day(site, out["start"])
+    items = sorted({w for e in overtime for w in e["payload"]["items"]})
+    if not out["working_day"]:
+        name = WEEKDAY_NAMES[_parse(out["start"]).weekday()].capitalize()
+        out["reason"] = f"{name} is not a working day (workday.weekdays): overtime only"
     if ended:
         out["report"] = ended[-1]["id"]
-        items = sorted({w for e in overtime for w in e["payload"]["items"]})
         if items:
             return {**out, "phase": "overtime", "overtime": items}
         return {**out, "phase": "off-duty", "reason": "end report written, no overtime approved"}
-    if _now() >= _parse(a["end"]):
-        return {**out, "phase": "past-end", "reason": f"the day ended at {a['end']}; write the end report"}
+    if mode and _now() >= _parse(a["end"]):
+        if mode == "block":
+            return {**out, "phase": "past-end", "reason": f"the day ended at {a['end']}; write the end report"}
+        out["hours_exceeded"] = True  # development phase: a warning, not a block
+        out["warning"] = f"the 8-hour day ended at {a['end']} (workday.phase development: not blocking); write the end report"
+    if not out["working_day"]:
+        return {**out, "phase": "overtime", "overtime": items}
     return {**out, "phase": "on-duty"}
+
+
+def _session_clock(site: Site, session: dict | None) -> dict:
+    if session is None:
+        return {}
+    start, end = clock(site, session, _now())
+    return {"session": session["id"], "job_id": (session.get("payload") or {}).get("job_id"), "start": start, "end": end}
 
 
 def status(site: Site) -> dict:
     evs = _events(site)
     if not enabled(site, evs):
         return {"enabled": False}
-    out = {"enabled": True, "hours": settings(site)["hours"], **day(site, evs)}
+    out = {"enabled": True, "hours": settings(site)["hours"], "workday_phase": settings(site)["phase"], **day(site, evs)}
     out["urgent"] = _urgent(evs)
+    if out.get("hours_exceeded") and not site.observe:
+        note_hours_exceeded(site, out, evs)
     try:
         out["usage"] = usage(site, evs)
     except OSError as exc:
@@ -155,12 +269,24 @@ def status(site: Site) -> dict:
     return out
 
 
+def note_hours_exceeded(site: Site, d: dict, evs: list[dict]) -> dict | None:
+    """Development phase: record `hours.exceeded` once for this day (by plan id) when the 8 hours have passed."""
+    if any(e["type"] == HOURS_EXCEEDED and e["payload"].get("plan") == d.get("plan") for e in evs):
+        return None
+    return Ledger(site).event(HOURS_EXCEEDED, "desk", None, {"plan": d.get("plan"), "start": d.get("start"),
+                                                             "end": d.get("end"), "noticed_at": _ts(_now()),
+                                                             "phase": settings(site)["phase"]}, [d["plan"]])
+
+
 def render(st: dict) -> str | None:
     if not st.get("enabled"):
         return None
     line = f"Workday: {st['phase']}"
+    if st.get("workday_phase") and st["workday_phase"] != "production":
+        line += f" [{st['workday_phase']} phase]"
     if st.get("start"):
-        line += f" ({st['start'][11:16]}-{st['end'][11:16]})"
+        line += f" ({st['start'][11:16]}-{st['end'][11:16]}" + (f", session job {st['job_id']})" if st.get("job_id")
+                                                                   else ")")
     if st.get("overtime"):
         line += "; overtime items " + ", ".join(st["overtime"])
     if st.get("reason"):
@@ -174,6 +300,8 @@ def render(st: dict) -> str | None:
         line += f"; usage today {u['today_units']} units, this site {u.get('this_site_units', 0)} (budget not calibrated)"
     if st.get("urgent"):
         line += "; urgent " + ", ".join(st["urgent"])
+    if st.get("warning"):
+        line += f"\n⚠ {st['warning']}"
     return line
 
 
@@ -224,9 +352,16 @@ def gate(site: Site, wi: str | None, checking: bool = False) -> str | None:
                 "`dureh day end` and propose overtime items for the Director.")
     if phase == "overtime":
         if not wi or not (_wi_family(Ledger(site), wi) & set(d["overtime"])):
-            return (f"workday mode: overtime covers only {', '.join(d['overtime'])} "
+            if not d.get("working_day", True) and not d.get("report"):
+                return (f"workday mode: {d['reason']}. Worker agents spawn only for items in a Director overtime "
+                        "record: `dureh day overtime --items <WI>... --memo \"<Director's words>\"`.")
+            return (f"workday mode: overtime covers only {', '.join(d['overtime']) or 'nothing yet'} "
                     "(fixes and normalization tests the Director accepted in the end report).")
         return None  # accepted overtime is not held back by the budget
+    if d.get("hours_exceeded"):
+        note_hours_exceeded(site, d, evs)
+    if not device_on(site, "usage"):
+        return None  # usage is counted and shown, not gated
     u = usage(site, evs)
     if u.get("daily_allowance") and u["today_units"] >= u["daily_allowance"]:
         return (f"workday mode: today's Claude usage {u['today_units']} units reached the daily share "
@@ -294,10 +429,13 @@ def approve(site: Site, actor: str, memo: str) -> dict:
     d = day(site)
     if d["phase"] != "planned":
         fail(f"no day plan waits for approval (phase {d['phase']})")
-    start = _now()
-    end = start + timedelta(hours=settings(site)["hours"])
+    # the clock runs from the session dureh started today; approval covers the plan's content
+    start, end = clock(site, todays_session(_events(site)), _now())
+    if hours_mode(site) == "block" and _now() >= _parse(end):
+        fail(f"the day started at {start} and ended at {end}; a plan approved now would be past its end")
     return Ledger(site).event("day.approved", actor, None,
-                              {"start": _ts(start), "end": _ts(end), "memo": memo, "by": "Director"}, [d["plan"]])
+                              {"start": start, "end": end, "memo": memo, "by": "Director",
+                               "session": d.get("session")}, [d["plan"]])
 
 
 def heads(site: Site) -> dict[str, str | None]:
@@ -347,9 +485,9 @@ def decide(site: Site, actor: str, title: str, choice: str, why: str, revs: list
 def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], early: str = "") -> dict:
     _require_on(site)
     d = day(site)
-    if d["phase"] not in ("on-duty", "past-end"):
+    if d.get("report") or d["phase"] not in ("on-duty", "past-end", "overtime"):
         fail(f"no open day to end (phase {d['phase']})")
-    if d["phase"] == "on-duty" and not early.strip():
+    if d["phase"] in ("on-duty", "overtime") and not d.get("hours_exceeded") and hours_mode(site) and not early.strip():
         fail(f"the day runs to {d['end']}; stay on duty even when idle (propose next work, watch upstream messages)."
              " End early only on the Director's word: --early \"<Director's words>\"")
     if not done.strip():
@@ -358,7 +496,8 @@ def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], e
     for w in overtime:
         led.get("work-item", w)
     report = {"done": done, "problems": problems, "overtime_proposed": overtime,
-              "decisions": d["decisions"], "start": d["start"], "end": d["end"], "ended_at": _ts(_now()),
+              "decisions": d["decisions"], "start": d.get("start"), "end": d.get("end"), "ended_at": _ts(_now()),
+              "session": d.get("session"), "working_day": d.get("working_day", True),
               "early": early or None, "usage": usage(site), "heads": heads(site)}
     rec = led.event("day.ended", actor, None, report, [d["plan"]])
     return {**rec, "next": "give the Director this report; record accepted overtime with "
@@ -368,14 +507,18 @@ def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], e
 def overtime(site: Site, actor: str, items: list[str], memo: str) -> dict:
     _require_on(site)
     d = day(site)
-    if not d.get("report"):
+    if not d.get("report") and d.get("working_day", True):
         fail("overtime is agreed in the end report; write it with `dureh day end` first")
+    if not d.get("report") and d["phase"] != "overtime":
+        fail(f"no open day for overtime (phase {d['phase']})")
     if not memo.strip() or not items:
         fail("--items and --memo (the Director's words) are required")
     led = Ledger(site)
     for w in items:
         led.get("work-item", w)
-    return led.event("day.overtime", actor, None, {"items": items, "memo": memo, "by": "Director"}, [d["report"]])
+    # on a day outside workday.weekdays the whole day is overtime: the record may precede the end report
+    return led.event("day.overtime", actor, None, {"items": items, "memo": memo, "by": "Director"},
+                     [d.get("report") or d["plan"]])
 
 
 def urgent(site: Site, actor: str, items: list[str], memo: str) -> dict:
@@ -421,17 +564,20 @@ def close(site: Site, actor: str, note: str) -> dict:
     d = day(site)
     if d["phase"] not in ("overtime", "off-duty") or not d.get("report"):
         fail(f"close a day after its end report (phase {d['phase']})")
-    live = _live_agents(site_status(site))
-    if live:
-        fail(f"agents are still running or starting ({', '.join(live)}); close the day when everything is idle")
     handoff = _handoff_path(site)
-    if not handoff.is_file():
-        fail(f"write the handoff first: {handoff} does not exist")
-    approved = _parse(d["start"]).timestamp()
-    if handoff.stat().st_mtime < approved:
-        fail(f"the handoff {handoff} predates today's approval ({d['start']}); update it before closing")
+    checked = device_on(site, "session")
+    if checked:
+        live = _live_agents(site_status(site))
+        if live:
+            fail(f"agents are still running or starting ({', '.join(live)}); close the day when everything is idle")
+        if not handoff.is_file():
+            fail(f"write the handoff first: {handoff} does not exist")
+        started = _parse(d["start"]).timestamp()
+        if handoff.stat().st_mtime < started:
+            fail(f"the handoff {handoff} predates today's start ({d['start']}); update it before closing")
     led = Ledger(site)
-    rec = led.event("day.closed", actor, None, {"note": note, "idle": True, "handoff": str(handoff)}, [d["plan"]])
+    rec = led.event("day.closed", actor, None, {"note": note, "idle": checked or None, "checked": checked,
+                                               "handoff": str(handoff)}, [d["plan"]])
     job = os.environ.get("SLURM_JOB_ID")
     release_on = (site.config.get("session") or {}).get("release_on_close", True)
     owned = _session_started_here(led, job)

@@ -6,13 +6,18 @@ from datetime import datetime, timedelta, timezone
 
 from helpers import SiteCase, denied, hook
 
-from dureh_core import claude_usage, workday
+from pathlib import Path
+
+from dureh_core import claude_usage, sessions, workday
 from dureh_core import workflow as wf
 from dureh_core.cli import main
 from dureh_core.ops import render_status, status
+from dureh_core.records import Ledger
 from dureh_core.util import DurehError
 
-T0 = datetime(2026, 10, 3, 9, 0, tzinfo=timezone(timedelta(hours=-4)))
+T0 = datetime(2026, 10, 3, 9, 0, tzinfo=timezone(timedelta(hours=-4)))  # a Saturday
+MONDAY = datetime(2026, 10, 5, 9, 0, tzinfo=timezone(timedelta(hours=-4)))
+ALL_WEEK = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
 
 def transcript_line(ts: datetime, rid: str, model="claude-opus-5-5", inp=0, out=0, cr=0, cc=0) -> str:
@@ -78,16 +83,47 @@ class Workday(SiteCase):
         (self.projects / "p").mkdir(parents=True)
         os.environ["DUREH_USAGE_CACHE"] = str(self.tmp / "usage-cache.json")
         os.environ.pop("CLAUDECODE", None)  # the Director's terminal
-        cfg = json.loads((self.site_root / "config.json").read_text())
-        cfg["workday"] = {"transcripts": [str(self.projects)]}
-        (self.site_root / "config.json").write_text(json.dumps(cfg, indent=2))
-        self.s = self.site()
+        # production rules (blocking clock); every weekday counts here because T0 is a Saturday and some tests
+        # run at the real time. The weekday rule and the development phase have their own tests below.
+        self.config(workday={"transcripts": [str(self.projects)], "phase": "production", "weekdays": ALL_WEEK})
         self.at(T0)
         self.wi = wf.wi_new(self.s, "desk", "W", "g", "pm-modules", "modules/demo", ["ok"])["id"]
         wf.wi_approve(self.s, "desk", self.wi, "ok")
 
+    def config(self, **keys):
+        cfg = json.loads((self.site_root / "config.json").read_text())
+        cfg.update(keys)
+        (self.site_root / "config.json").write_text(json.dumps(cfg, indent=2))
+        self.s = self.site()
+        return cfg
+
+    def workday_config(self, **keys):
+        return self.config(workday={"transcripts": [str(self.projects)], **keys})
+
     def at(self, dt: datetime):
         os.environ["DUREH_FAKE_NOW"] = dt.isoformat()
+
+    def fake_slurm(self, squeue="RUNNING|7:59:00"):
+        """A site PATH with sbatch (prints a job id), squeue (one line, or nothing) and claude. Never the real ones."""
+        fake = self.tmp / "fakebin"
+        fake.mkdir(exist_ok=True)
+        (fake / "sbatch").write_text(f"#!/bin/sh\necho \"$@\" >> {fake}/sbatch-calls\necho 'Submitted batch job 12345'\n")
+        (fake / "squeue").write_text(f"#!/bin/sh\necho \"$@\" >> {fake}/squeue-calls\n"
+                                     + (f"echo '{squeue}'\n" if squeue else ""))
+        (fake / "claude").write_text("#!/bin/sh\nexit 0\n")
+        for f in ("sbatch", "squeue", "claude"):
+            (fake / f).chmod(0o755)
+        self.config(env={"path_prepend": [str(fake)]})
+        return fake
+
+    def cli(self, *args):
+        import contextlib
+        import io
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = main(["--site", str(self.site_root), *args])
+        return rc, buf.getvalue()
 
     def spend(self, units: float):
         now = datetime.fromisoformat(os.environ["DUREH_FAKE_NOW"])
@@ -335,6 +371,142 @@ class Workday(SiteCase):
         os.environ.pop("SLURM_JOB_ID", None)
         rec = workday.close(self.s, "desk", "done")
         self.assertFalse(rec["release"]["released"])
+
+    # ------------------------------------------------------------ the session starts the day (Director, 2026-10-04)
+    def test_session_start_submits_and_sets_the_clock(self):
+        fake = self.fake_slurm()
+        workday.switch(self.s, True, "trial")
+        rc, out = self.cli("site", "session", "start")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("Submitted session job 12345", out)
+        from dureh_core.records import Ledger
+        rec = [e for e in Ledger(self.s).events() if e["type"] == "session.started"][-1]
+        self.assertIn(rec["id"], out)
+        p = rec["payload"]
+        self.assertEqual((p["job_id"], p["submitted_at"], p["wall_time"], p["purpose"]),
+                         ("12345", T0.isoformat(), "24:00:00", "desk"))
+        self.assertTrue((self.site_root / "logs" / "session").is_dir())
+        self.assertIn(p["script"], (fake / "sbatch-calls").read_text())
+        self.assertEqual(Path(p["script"]).read_text(), self.cli("site", "session", "plan")[1], "plan == what was submitted")
+        # no plan yet: off-duty, but the clock is visible
+        st = workday.status(self.s)
+        self.assertEqual((st["phase"], st["start"], st["end"]), ("off-duty", T0.isoformat(), (T0 + timedelta(hours=8)).isoformat()))
+        self.at(T0 + timedelta(hours=2))
+        workday.plan(self.s, "desk", "finish W", "1. W")
+        self.assertTrue(denied(self.spawn()))  # the plan's content still needs the approval
+        workday.approve(self.s, "desk", "승인")
+        st = workday.status(self.s)
+        self.assertEqual((st["start"], st["end"], st["job_id"]), (T0.isoformat(), (T0 + timedelta(hours=8)).isoformat(), "12345"))
+        self.assertIn("Workday: on-duty (09:00-17:00, session job 12345)", render_status(status(self.s)))
+        self.assertIsNone(self.spawn())
+        self.at(T0 + timedelta(hours=8, minutes=1))  # 8 h after the session start, not after the approval
+        self.assertIn("end report", workday.gate(self.s, self.wi) or "")
+        self.assertEqual(workday.status(self.s)["phase"], "past-end")
+
+    def test_session_start_refused_when_the_runtime_cannot_start(self):
+        fake = self.fake_slurm()
+        (fake / "claude").unlink()
+        os.environ["PATH"] = str(fake)  # nothing but the fakes
+        with self.assertRaisesRegex(DurehError, "cannot start here.*not on PATH"):
+            sessions.start(self.s, "desk")
+        self.assertFalse((fake / "sbatch-calls").exists())
+        self.assertEqual([e for e in Ledger(self.s).events() if e["type"] == "session.started"], [])
+
+    def test_session_status_lines_and_observe(self):
+        self.fake_slurm()
+        rc, out = self.cli("site", "session", "status")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out.splitlines()[0], "no session job started by dureh")
+        self.assertIn("day: workday mode off (off-duty)", out)
+        workday.switch(self.s, True, "trial")
+        sessions.start(self.s, "desk")
+        rc, out = self.cli("--observe", "site", "session", "status")
+        self.assertEqual(rc, 0)
+        lines = out.splitlines()
+        self.assertRegex(lines[0], r"^session: ev-\S+ job 12345 submitted 2026-10-03T09:00:00-04:00 \(wall time 24:00:00, purpose desk\)$")
+        self.assertEqual(lines[1], "job 12345: RUNNING, time left 7:59:00")
+        self.assertEqual(lines[2], "day: off-duty, 2026-10-03T09:00:00-04:00 to 2026-10-03T17:00:00-04:00; no day plan")
+        self.assertEqual(self.cli("--observe", "site", "session", "start")[0], 2, "observe mode is read-only")
+        self.fake_slurm(squeue="")
+        self.assertIn("job 12345: not in squeue", self.cli("site", "session", "status")[1])
+        self.assertEqual(self.cli("ledger", "add", "event", "--type", "session.started", "--payload", '{"job_id": "1"}')[0], 2)
+
+    def test_approve_without_a_session_uses_the_config_window(self):
+        self.workday_config(phase="production", weekdays=ALL_WEEK, start="10:00", end="18:30")
+        workday.switch(self.s, True, "trial")
+        workday.plan(self.s, "desk", "g", "p")
+        rec = workday.approve(self.s, "desk", "ok")
+        self.assertEqual((rec["payload"]["start"][11:16], rec["payload"]["end"][11:16]), ("10:00", "18:30"))
+
+    # ------------------------------------------------------------ weekday rule (production) and development phase
+    def test_weekday_rule_makes_a_saturday_overtime(self):
+        self.workday_config(phase="production")  # default Mon-Fri; T0 is a Saturday
+        self.start_day()
+        st = workday.status(self.s)
+        self.assertEqual(st["phase"], "overtime")
+        self.assertFalse(st["working_day"])
+        out = self.spawn()
+        self.assertTrue(denied(out))
+        self.assertIn("Sat is not a working day", json.dumps(out))
+        self.assertIn("day overtime", json.dumps(out))
+        other = wf.wi_new(self.s, "desk", "X", "g", "pm-modules", "modules/demo", ["ok"])["id"]
+        wf.wi_approve(self.s, "desk", other, "ok")
+        workday.overtime(self.s, "desk", [self.wi], "토요일 W만")  # before the end report: the whole day is overtime
+        self.assertIsNone(self.spawn())
+        self.assertTrue(denied(self.spawn(other)))
+        with self.assertRaisesRegex(DurehError, "stay on duty"):
+            workday.end(self.s, "desk", "done", "", [])
+        workday.end(self.s, "desk", "done", "", [], early="그만")
+        self.assertEqual(workday.status(self.s)["phase"], "overtime")
+        self.assertIn("not a working day", render_status(status(self.s)))
+
+    def test_weekday_rule_config_names_and_monday(self):
+        self.workday_config(phase="production", weekdays=["mon", "Tuesday", 2])
+        self.assertEqual(workday.settings(self.s)["weekdays"], {0, 1, 2})
+        self.at(MONDAY)
+        self.start_day()
+        self.assertEqual(workday.status(self.s)["phase"], "on-duty")
+        self.assertIsNone(self.spawn())
+        self.workday_config(phase="production", weekdays=["Funday"])
+        with self.assertRaisesRegex(DurehError, "unknown weekday"):
+            workday.settings(self.s)
+        self.workday_config(phase="staging")
+        with self.assertRaisesRegex(DurehError, "unknown phase"):
+            workday.settings(self.s)
+
+    def test_development_phase_warns_after_eight_hours_and_has_no_weekday_rule(self):
+        self.workday_config()  # phase defaults to development
+        self.assertEqual(workday.settings(self.s)["phase"], "development")
+        self.start_day()  # a Saturday: an ordinary day
+        st = workday.status(self.s)
+        self.assertEqual(st["phase"], "on-duty")
+        self.assertIn("Workday: on-duty [development phase]", render_status(status(self.s)))
+        self.at(T0 + timedelta(hours=8, minutes=1))
+        self.assertIsNone(self.spawn(), "the hours device only warns")
+        st = workday.status(self.s)
+        self.assertEqual(st["phase"], "on-duty")
+        self.assertTrue(st["hours_exceeded"])
+        text = render_status(status(self.s))
+        self.assertIn("⚠ the 8-hour day ended at", text)
+        self.assertIn("not blocking", text)
+        workday.status(self.s)
+        self.assertIsNone(workday.gate(self.s, self.wi))
+        noted = [e for e in Ledger(self.s).events() if e["type"] == "hours.exceeded"]
+        self.assertEqual(len(noted), 1, "recorded once per day")
+        self.assertEqual(noted[0]["payload"]["phase"], "development")
+        workday.end(self.s, "desk", "done", "", [])  # after the hours: no --early needed
+        self.assertEqual(self.cli("ledger", "add", "event", "--type", "hours.exceeded", "--payload", "{}")[0], 2)
+
+    def test_development_phase_keeps_the_usage_gate(self):
+        self.workday_config()
+        self.start_day()
+        self.spend(7)
+        workday.calibrate(self.s, 10)
+        self.spend(3)
+        self.at(T0 + timedelta(hours=9))
+        out = self.spawn()
+        self.assertTrue(denied(out))
+        self.assertIn("daily share", json.dumps(out))
 
     def test_desk_instructions_mention_workday(self):
         text = (self.site_root / "CLAUDE.md").read_text()
