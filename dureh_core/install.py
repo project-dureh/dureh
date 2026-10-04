@@ -140,6 +140,10 @@ def install(startup_arg: str, site_arg: str, preset_path: str | None = None, per
     if pq:
         questions = (yamlsub.load_file(startup / pq) or {}).get("questions") or []
     persona = _answers(questions, supplied, interactive and sys.stdin.isatty())
+    # Director, 2026-10-04: the conversation language is recorded in the persona (English by default; the desk
+    # confirms it at first contact); a language the package questions or the preset supplied is kept
+    if not persona.get("language"):
+        persona["language"] = "English"
     if site_root.exists() and (not site_root.is_dir() or any(site_root.iterdir())):
         fail(f"site destination must be absent or empty: {site_root}")
     created_root = not site_root.exists()

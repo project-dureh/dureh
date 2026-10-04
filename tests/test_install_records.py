@@ -63,6 +63,42 @@ class Install(SiteCase):
             self.install()
         self.assertFalse(self.site_root.exists())
 
+    def test_generated_instructions_carry_the_english_rule(self):
+        # Director, 2026-10-04: generated documents are always in English; the desk asks the conversation language once
+        from dureh_core.runtimes.claude_code import AGENT_ENGLISH_RULE, ENGLISH_RULE, _agent_file
+
+        self.install()
+        root = self.site_root
+        persona = json.loads((root / "state" / "persona" / "persona.json").read_text())
+        self.assertEqual(persona["language"], "English")  # the fixture question's default
+        claude_md = (root / "CLAUDE.md").read_text()
+        self.assertIn(f"- {ENGLISH_RULE}", claude_md)
+        self.assertIn("- language: English. Conversation with the Director is in the Director's preferred language. At first contact ask", claude_md)
+        self.assertIn("record the answer as `language` in `state/persona/persona.json`; once recorded, keep it.", claude_md)
+        agents = sorted((root / ".claude" / "agents").glob("*.md"))
+        self.assertTrue(agents)
+        for f in agents:
+            self.assertIn(AGENT_ENGLISH_RULE, f.read_text(), f.name)
+        site = self.site()
+        kinds = {role.kind for role in site.org.roles.values()}
+        self.assertEqual(kinds, {"desk", "manager", "worker"}, "both templates are exercised")
+        for role in site.org.roles.values():
+            if role.kind != "desk":
+                self.assertIn(AGENT_ENGLISH_RULE, _agent_file(site, role, project="p1" if role.kind == "worker" else None), role.name)
+        # a persona without a recorded language (older site) renders the default and the first-contact question
+        (root / "state" / "persona" / "persona.json").write_text(json.dumps({"name": "Tester"}))
+        from dureh_core.runtimes.claude_code import generate
+        generate(self.site())
+        self.assertIn("- language: English (default, not yet confirmed). Conversation with the Director", (root / "CLAUDE.md").read_text())
+
+    def test_install_keeps_a_supplied_language(self):
+        self.install(persona={"name": "서지아", "language": "한국어"})
+        persona = json.loads((self.site_root / "state" / "persona" / "persona.json").read_text())
+        self.assertEqual((persona["name"], persona["language"]), ("서지아", "한국어"))
+        claude_md = (self.site_root / "CLAUDE.md").read_text()
+        self.assertIn("- language: 한국어. Conversation with the Director", claude_md)
+        self.assertIn("always in English; only conversation with the Director uses the Director's language.", claude_md)
+
     def test_missing_required_persona_answer_fails(self):
         with self.assertRaisesRegex(DurehError, "persona question 'name'"):
             self.install(persona={})
