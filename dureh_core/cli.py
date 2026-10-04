@@ -793,7 +793,7 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--actor")
     x = add(up, "status", cmd_upstream, "record a Status transition for an upstream request (desk)")
     x.add_argument("--ur", required=True)
-    x.add_argument("--to", required=True, choices=["sent", "accepted", "declined", "landed"])
+    x.add_argument("--to", required=True, choices=["sent", "accepted", "deferred", "declined", "landed"])
     x.add_argument("--rev", help="harness revision; required when --to landed")
     x.add_argument("--actor")
     x = add(up, "export", cmd_upstream, "bundle a UR file with its referenced findings and WIs (desk)")

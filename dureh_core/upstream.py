@@ -19,11 +19,14 @@ from .util import DurehError, dumps, fail, git_revision, utc_now, write_create_o
 UR_ID = re.compile(r"^UR-(\d{8})-(\d{2,})$")
 TYPES = ("bug", "change", "decision", "friction")
 SEVERITIES = ("blocking", "degrading", "minor")
-STATUSES = ("open", "sent", "accepted", "declined", "landed")
+STATUSES = ("open", "sent", "accepted", "deferred", "declined", "landed")
+# upstream may land a fix without a separate accepted reply (sent -> landed); `deferred` is an accepted
+# request the Director postponed: it may go back to accepted, or be declined.
 TRANSITIONS = {
     "open": {"sent"},
-    "sent": {"accepted", "declined"},
-    "accepted": {"landed"},
+    "sent": {"accepted", "declined", "landed"},
+    "accepted": {"landed", "deferred"},
+    "deferred": {"accepted", "declined"},
     "declined": set(),
     "landed": set(),
 }
@@ -181,7 +184,7 @@ def message(site: Site) -> str:
 
         rev = (json.loads(dep.read_text(encoding="utf-8")).get("harness") or {}).get("rev") or ""
     rev = (rev or git_revision(HARNESS_ROOT))[:7]
-    new, waiting = [], []
+    new, waiting, deferred = [], [], []
     for path in sorted(notes_dir(site).glob("UR-*.md")) if notes_dir(site).is_dir() else []:
         if not UR_ID.match(path.stem):
             continue
@@ -193,8 +196,8 @@ def message(site: Site) -> str:
         item = {"id": path.stem, "title": _title(text, path.stem), "type": _field(text, "Type"),
                 "severity": _field(text, "Severity").split()[0] if _field(text, "Severity") else "",
                 "status": st, "request": _request_line(text)}
-        (new if word == "open" else waiting).append(item)
-    if not new and not waiting:
+        (new if word == "open" else deferred if word == "deferred" else waiting).append(item)
+    if not new and not waiting and not deferred:
         return f"No open upstream requests at {site.root.name} (harness rev {rev}).\n\n" + "\n".join(_activity(site))
     new.sort(key=lambda r: (SEVERITY_ORDER.get(r["severity"], 9), r["id"]))
     lines = [f"Upstream requests from {site.root.name} (site {site.site_id}, harness rev {rev}).",
@@ -211,6 +214,12 @@ def message(site: Site) -> str:
     if waiting:
         lines.append("AWAITING REPLY OR LANDING")
         for r in waiting:
+            n += 1
+            lines.append(f"{n}. {r['id']} ({r['severity']}): {r['title']}; status: {r['status']}")
+        lines.append("")
+    if deferred:
+        lines.append("DEFERRED BY THE DIRECTOR (no reply awaited)")
+        for r in deferred:
             n += 1
             lines.append(f"{n}. {r['id']} ({r['severity']}): {r['title']}; status: {r['status']}")
         lines.append("")

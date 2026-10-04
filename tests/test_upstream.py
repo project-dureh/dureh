@@ -65,7 +65,7 @@ class Upstream(SiteCase):
         s1 = up.status(self.s, "desk", ur, "sent")
         self.assertEqual(s1["to"], "sent")
         with self.assertRaisesRegex(DurehError, "invalid transition"):
-            up.status(self.s, "desk", ur, "landed")
+            up.status(self.s, "desk", ur, "deferred")  # only an accepted request can be deferred
         up.status(self.s, "desk", ur, "accepted")
         with self.assertRaisesRegex(DurehError, "--rev"):
             up.status(self.s, "desk", ur, "landed")
@@ -78,6 +78,46 @@ class Upstream(SiteCase):
             up.status(self.s, "desk", ur, "sent")
         events = [e for e in self.led.events() if e["type"] == "upstream.status"]
         self.assertEqual(len(events), 3)
+
+    def test_sent_may_land_directly(self):
+        ur = up.draft(self.s, "desk", self.finding, "bug", "blocking")["ur"]
+        up.status(self.s, "desk", ur, "sent")
+        with self.assertRaisesRegex(DurehError, "--rev"):
+            up.status(self.s, "desk", ur, "landed")
+        r = up.status(self.s, "desk", ur, "landed", rev="def5678")
+        self.assertEqual((r["from"], r["to"]), ("sent", "landed"))
+        self.assertIn("landed def5678", up.list_requests(self.s)[0]["status"])
+
+    def test_deferred_goes_back_to_accepted_or_declined(self):
+        ur = up.draft(self.s, "desk", self.finding, "change", "minor")["ur"]
+        up.status(self.s, "desk", ur, "sent")
+        up.status(self.s, "desk", ur, "accepted")
+        up.status(self.s, "desk", ur, "deferred")
+        self.assertTrue(up.list_requests(self.s)[0]["status"].startswith("deferred"))
+        with self.assertRaisesRegex(DurehError, "invalid transition"):
+            up.status(self.s, "desk", ur, "landed", rev="abc1234")
+        up.status(self.s, "desk", ur, "accepted")
+        up.status(self.s, "desk", ur, "deferred")
+        up.status(self.s, "desk", ur, "declined")
+        self.assertTrue(up.list_requests(self.s)[0]["status"].startswith("declined"))
+
+    def test_cli_accepts_to_deferred(self):
+        import contextlib
+        import io
+
+        from dureh_core import cli
+
+        ur = up.draft(self.s, "desk", self.finding, "change", "minor")["ur"]
+        up.status(self.s, "desk", ur, "sent")
+        up.status(self.s, "desk", ur, "accepted")
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = cli.main(["--site", str(self.site_root), "upstream", "status", "--ur", ur,
+                             "--to", "deferred"])
+        self.assertEqual(code, 0)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            cli.main(["--site", str(self.site_root), "upstream", "list"])
+        self.assertIn(f"{ur}\tchange\tminor\tdeferred", out.getvalue())
 
     def test_status_is_desk_only(self):
         r = up.draft(self.s, "desk", self.finding, "bug", "blocking")

@@ -29,8 +29,8 @@ developers in one uniform, traceable form, so the harness improves from real use
    file, from the template below.
 3. **Forward**: the desk runs `dureh upstream message` and gives the Director its output verbatim in
    one fenced code block (and saves it as `notes/upstream/FORWARD-<YYYYMMDD>.md`). The message lists
-   new requests (`Status: open`) and those awaiting a reply or a landing; landed, declined and
-   withdrawn requests are omitted. The Director pastes it upstream. Then set `Status: sent <date>`.
+   new requests (`Status: open`), those awaiting a reply or a landing, and deferred ones in their own
+   section; landed, declined and withdrawn requests are omitted. The Director pastes it upstream. Then set `Status: sent <date>`.
    Do the same after recording a reply, so the next message reflects it.
 4. **Decision**: record the upstream answer or Director judgment with `dureh ledger add decision
    --ref <finding id> --disposition approve|revise|defer|reject|record`.
@@ -94,13 +94,18 @@ on its own side. Message format: `DUREH-Exchange/README.md`.
 
 ## Status values
 
-`open` -> `sent` -> `accepted` | `declined` -> `landed`
+`open` -> `sent` -> `accepted` | `declined` | `landed`; `accepted` -> `landed` | `deferred`;
+`deferred` -> `accepted` | `declined`
 
 - `open`: written at the site, not yet forwarded.
 - `sent`: the Director forwarded it upstream.
 - `accepted`: upstream agreed to make the change (or the Director ruled and it stands).
+- `deferred`: an accepted request the Director postponed. `upstream list` and `upstream message`
+  show it as deferred (its own section), not as awaiting a reply; it may go back to `accepted` or be
+  declined.
 - `declined`: upstream (or the Director) rejected it; the finding stays as history.
 - `landed <rev>`: the change shipped in harness revision `<rev>` and has been adopted at the site.
+  Upstream may land a fix without a separate accepted reply, so `sent` -> `landed` is allowed.
 
 ## UR template
 

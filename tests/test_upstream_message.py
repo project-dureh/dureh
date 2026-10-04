@@ -28,6 +28,7 @@ class Message(SiteCase):
             "UR-20260930-01": ur("roles.yaml has no writer", "decision", "blocking", "sent 2026-09-30; revised, D3 pending"),
             "UR-20260930-02": ur("brief size", "bug", "degrading", "landed d9a807d"),
             "UR-20260930-05": ur("false alarm", "bug", "minor", "WITHDRAWN 2026-09-30 (false positive)"),
+            "UR-20260930-06": ur("nice to have", "change", "minor", "deferred (2026-10-04)"),
         }
         for k, v in files.items():
             (d / f"{k}.md").write_text(v.replace("{id}", k))
@@ -45,6 +46,21 @@ class Message(SiteCase):
         self.assertIn(str(up.notes_dir(self.s)), text)
         self.assertIn("harness rev", text)
         self.assertTrue(text.rstrip().endswith("only in a merge window the Director opens."))
+
+    def test_deferred_has_its_own_section_not_awaiting(self):
+        text = up.message(self.s)
+        waiting = text.index("AWAITING REPLY OR LANDING")
+        deferred = text.index("DEFERRED BY THE DIRECTOR (no reply awaited)")
+        self.assertTrue(waiting < text.index("UR-20260930-01") < deferred < text.index("UR-20260930-06")
+                        < text.index("SITE ACTIVITY"))
+        self.assertIn("UR-20260930-06 (minor): nice to have; status: deferred (2026-10-04)", text)
+        for p in up.notes_dir(self.s).glob("UR-*.md"):
+            if p.stem != "UR-20260930-06":
+                p.unlink()
+        text = up.message(self.s)
+        self.assertNotIn("No open upstream requests", text)
+        self.assertNotIn("AWAITING", text)
+        self.assertIn("DEFERRED BY THE DIRECTOR", text)
 
     def test_message_reports_site_activity_for_the_merge_window(self):
         text = up.message(self.s)
