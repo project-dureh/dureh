@@ -693,13 +693,15 @@ def parser() -> argparse.ArgumentParser:
 
     co = sub.add_parser("container", help="sanctioned container builds (scheduler jobs)").add_subparsers(
         dest="container_command", required=True)
-    x = add(co, "build", cmd_container, "build a new SIF from a tracked recipe and a pinned module revision, as a scheduler job")
+    x = add(co, "build", cmd_container, "build a new SIF from a module revision and its recipe (module containers/<name>.def or --recipe), as a scheduler job")
     x.add_argument("--wi", required=True)
-    x.add_argument("--recipe", required=True, help="site-relative projects/<p>/code/containers/<name>.def")
+    x.add_argument("--recipe", help="project-local recipe projects/<p>/code/containers/<name>.def; omit to use the "
+                   "module's own containers/<name>.def at --rev (canonical)")
     x.add_argument("--module", required=True, help="module id under modules/ whose `git archive <rev>` is the build context")
     x.add_argument("--rev", required=True, help="module revision (any git revision; recorded in full)")
     x.add_argument("--version", help="image version (default: the module's pyproject version at --rev)")
-    x.add_argument("--name", help="image name (default: the recipe stem)")
+    x.add_argument("--name", help="image name; without --recipe it also selects the module's containers/<name>.def "
+                   "(default: the recipe stem, else the module id)")
     x.add_argument("--time", help="job --time (default: config containers.time or 02:00:00)")
     x.add_argument("--mem", help="job --mem (default: config containers.mem or 16G)")
     x.add_argument("--dry-run", action="store_true")

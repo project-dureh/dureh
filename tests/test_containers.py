@@ -64,9 +64,9 @@ class ContainerBuild(SiteCase):
         self.bundle = self.wi("Bundle", "pm-projects")
         self.w = self.wi("Build camri", "pipeline-runner")
 
-    def wi(self, title, role):
+    def wi(self, title, role, target="projects/lna"):
         parent = None if role == "pm-projects" else self.bundle
-        w = wf.wi_new(self.s, "desk", title, "g", role, "projects/lna", ["ok"], parent=parent)["id"]
+        w = wf.wi_new(self.s, "desk", title, "g", role, target, ["ok"], parent=parent)["id"]
         wf.wi_approve(self.s, "desk", w, "ok")
         self.led.event("wi.dispatched", "desk", w, {"role": role, "brief": "0" * 16, "by": "desk"})
         return w
@@ -263,6 +263,97 @@ class ContainerBuild(SiteCase):
             for raw in ("apptainer build --fakeroot x.sif camri.def", "singularity build x.sif camri.def",
                         f"cp img.sif {self.cache}/camri.sif", "echo x > cache/containers/a.sif"):
                 self.assertTrue(denied(bash(raw, role)), (role, raw))
+
+
+class ModuleRecipeBuild(ContainerBuild):
+    """UR-20261004-03 item 2: without --recipe the recipe is the module's own containers/<name>.def inside
+    `git archive <rev>`; the WI may target that module or a project."""
+
+    def setUp(self):
+        super().setUp()
+        (self.mod / "containers").mkdir()
+        (self.mod / "containers" / "camri.def").write_text(
+            "Bootstrap: docker\nFrom: python:3.11-slim\n%files\n    src /opt/camri/src\n")
+        (self.mod / "containers" / "fsl.def").write_text("Bootstrap: docker\nFrom: ubuntu:22.04\n")
+        _git(self.mod, "add", "-A")
+        _git(self.mod, "commit", "-q", "-m", "recipes")
+        self.old = self.rev
+        self.rev = _git(self.mod, "rev-parse", "HEAD")
+
+    def mbuild(self, actor="pipeline-runner", **kw):
+        args = dict(wi=self.w, recipe=None, module="camri", rev=self.rev[:7])
+        args.update(kw)
+        return containers.build(self.s, actor, **args)
+
+    def test_module_recipe_on_a_project_wi(self):
+        import hashlib
+
+        run = self.mbuild()
+        c = run["payload"]["container"]
+        self.assertEqual(c["recipe_source"], "module")
+        self.assertEqual(c["recipe_path"], "modules/camri/containers/camri.def")
+        self.assertEqual(c["recipe"], "modules/camri/containers/camri.def")
+        self.assertEqual(c["recipe_rev"], self.rev)
+        self.assertEqual(c["rev"], self.rev)
+        self.assertEqual(c["recipe_blob"], _git(self.mod, "rev-parse", f"{self.rev}:containers/camri.def"))
+        self.assertEqual(c["recipe_sha256"], hashlib.sha256((self.mod / "containers" / "camri.def").read_bytes()).hexdigest())
+        self.assertEqual(c["wi_target"], "projects/lna")
+        self.assertEqual(c["project"], "projects/lna")
+        self.assertEqual(c["target"], self.target())
+        script = Path(run["payload"]["script"])
+        self.assertTrue(str(script).startswith(str(self.proj / "checkpoints" / f"{self.w}-container-")))
+        text = script.read_text()
+        self.assertIn("apptainer build --fakeroot \"$PARTIAL\" containers/camri.def", text)
+        self.assertNotIn("cp ", text)
+
+    def test_module_recipe_on_a_module_wi(self):
+        w = self.wi("Build in module", "pipeline-runner", target="modules/camri")
+        run = self.mbuild(wi=w, name="fsl")
+        c = run["payload"]["container"]
+        self.assertEqual(c["wi_target"], "modules/camri")
+        self.assertIsNone(c["project"])
+        self.assertEqual(c["target"], f"fsl_2.0.0a1-{self.rev[:7]}.sif")
+        self.assertEqual(c["recipe_path"], "modules/camri/containers/fsl.def")
+        script = Path(run["payload"]["script"])
+        self.assertTrue(str(script).startswith(str(self.site_root / "logs" / "containers" / f"{w}-container-fsl_")))
+        self.assertEqual(_git(self.mod, "status", "--porcelain"), "", "the module tree stays clean")
+
+    def test_module_recipe_refusals(self):
+        with self.assertRaisesRegex(DurehError, "modules/camri/containers/ghost.def is not in modules/camri at"):
+            self.mbuild(name="ghost")
+        with self.assertRaisesRegex(DurehError, "containers/camri.def is not in modules/camri at"):
+            self.mbuild(rev=self.old)  # the recipe was committed after that rev
+        (self.mod / "containers" / "new.def").write_text("Bootstrap: docker\nFrom: x\n")  # untracked
+        with self.assertRaisesRegex(DurehError, "is not in modules/camri"):
+            self.mbuild(name="new")
+        other = self.make_module("other")
+        _git(other, "commit", "-q", "--allow-empty", "-m", "x")
+        w = self.wi("Wrong module", "pipeline-runner", target="modules/other")
+        with self.assertRaisesRegex(DurehError, "needs a WI for modules/camri or for a project"):
+            self.mbuild(wi=w)
+        with self.assertRaisesRegex(DurehError, "only by pipeline-runner"):
+            self.mbuild(actor="py-writer")
+        self.assertFalse((self.fake / "sbatch.args").exists(), "nothing was submitted")
+
+    def test_module_job_script_builds_from_the_archive(self):
+        run = self.mbuild()
+        script = Path(run["payload"]["script"])
+        fakes = self.tmp / "jobbin"
+        fakes.mkdir()
+        (fakes / "apptainer").write_text(
+            "#!/bin/sh\nif [ \"$1\" = --version ]; then echo 'apptainer version 1.5.0'; exit 0; fi\n"
+            "for a; do out=$prev; prev=$a; done\n"
+            "test -f src/demo.py && test \"$prev\" = containers/camri.def && test -f containers/camri.def || exit 9\n"
+            "echo image-bytes > \"$out\"\n")
+        (fakes / "apptainer").chmod(0o755)
+        proc = subprocess.run(["bash", str(script)], capture_output=True, text=True, env=_job_env(fakes), cwd=self.tmp)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        prov = json.loads((self.cache / f"{self.target()}.provenance.json").read_text())
+        self.assertEqual(prov["recipe_source"], "module")
+        self.assertEqual(prov["recipe_rev"], self.rev)
+        self.assertEqual(prov["recipe_path"], "modules/camri/containers/camri.def")
+        out = containers.status(self.s, "pipeline-runner", self.w)
+        self.assertEqual(out["builds"][0]["state"], "recorded")
 
 
 if __name__ == "__main__":

@@ -1,10 +1,11 @@
 """Sanctioned container builds (UR-20261004-02).
 
-`dureh container build` turns a tracked recipe `projects/<p>/code/containers/<name>.def` and a pinned module
-revision (`git archive <rev>` of `modules/<m>`) into a new SIF in the site's container cache. The build runs only
-as a scheduler job, submitted through `slurm submit` (records, logs, start check, WI binding); the session never
-runs apptainer. The job writes `<cache>/.<target>.partial-<job>`, its sha256 and a provenance file, then moves the
-partial to `<name>_<version>-<rev7>.sif` with `mv -n`: an existing image is never overwritten.
+`dureh container build` turns a recipe and a pinned module revision (`git archive <rev>` of `modules/<m>`) into
+a new SIF in the site's container cache. The recipe is the module's own `containers/<name>.def` inside that archive
+(canonical, UR-20261004-03) or a tracked project-local `projects/<p>/code/containers/<name>.def` (`--recipe`).
+The build runs only as a scheduler job, submitted through `slurm submit` (records, logs, start check, WI binding);
+the session never runs apptainer. The job writes `<cache>/.<target>.partial-<job>`, its sha256 and a provenance
+file, then moves the partial to `<name>_<version>-<rev7>.sif` with `mv -n`: an existing image is never overwritten.
 `dureh container status` reads the provenance once the job finished and appends one `container.built` record.
 
 The cache directory is written by these jobs only: no role may write it through the hook (paths.classify zone
@@ -121,51 +122,91 @@ def _tracked_recipe(proj: Path, inner: str, refs: list[str]) -> dict | None:
     return None
 
 
-def build(site: Site, actor: str, wi: str, recipe: str, module: str, rev: str, version: str | None = None,
+def _module_recipe(mod: Path, module: str, rev: str, name: str) -> dict:
+    """`containers/<name>.def` as it is inside `git archive <rev>` of the module (export-ignore and all):
+    its bytes and blob. Refused when that rev has no such file."""
+    import tarfile
+    import io
+
+    inner = f"containers/{name}.def"
+    where = f"modules/{module}/{inner}"
+    proc = subprocess.run(["git", "archive", "--format=tar", rev, "--", inner], cwd=mod, capture_output=True)
+    data = None
+    if proc.returncode == 0:
+        try:
+            with tarfile.open(fileobj=io.BytesIO(proc.stdout)) as tar:
+                member = next((m for m in tar.getmembers() if m.name == inner), None)
+                if member is not None and member.isfile():
+                    data = tar.extractfile(member).read()
+        except tarfile.TarError:
+            data = None
+    if data is None:
+        fail(f"{where} is not in modules/{module} at {rev[:7]} (`git archive {rev[:7]}`); commit the recipe in the "
+             f"module first (py-writer, module WI), or pass --recipe projects/<p>/code/containers/<x>.def")
+    blob = git(["rev-parse", "--verify", "--quiet", f"{rev}:{inner}"], mod, check=False) or None
+    return {"path": where, "inner": inner, "blob": blob, "data": data}
+
+
+def build(site: Site, actor: str, wi: str, recipe: str | None, module: str, rev: str, version: str | None = None,
           name: str | None = None, time: str | None = None, mem: str | None = None, dry_run: bool = False) -> dict:
+    """Without `recipe` the recipe is the module's own `containers/<name or module>.def` at `rev` (UR-20261004-03):
+    the WI may target that module or any project. With `recipe`, a project-local recipe (UR-20261004-02): the WI
+    must target the recipe's project."""
     from .ops import slurm_submit
     from .workflow import _base_of
 
     led = Ledger(site)
     rec = _check_submitter(led, actor, wi)
-    rel = os.path.normpath(recipe).replace(os.sep, "/")
-    if Path(recipe).is_absolute():
-        try:
-            rel = Path(os.path.abspath(recipe)).relative_to(site.root).as_posix()
-        except ValueError:
-            fail(f"recipe must be inside the site: {recipe}")
-    m = RECIPE_RE.match(rel)
-    if not m or ".." in rel.split("/"):
-        fail(f"recipe must be a site-relative projects/<project>/code/containers/<name>.def, not {recipe}")
-    project, stem = m.group(1), m.group(2)
     target = rec["payload"].get("target")
-    if target != f"projects/{project}":
-        fail(f"{wi} targets {target}; a container build needs a WI for projects/{project}, the recipe's project")
-    proj = site.root / "projects" / project
-    recipe_path = site.root / rel
-    if not recipe_path.is_file():
-        fail(f"recipe is missing: {rel}")
-    if not (proj / ".git").exists():
-        fail(f"projects/{project} is not a git repository; the recipe must be tracked")
-    inner = f"code/containers/{stem}.def"
-    tracked = _tracked_recipe(proj, inner, [_base_of(site, wi) or "", "HEAD"])
-    if tracked is None:
-        fail(f"{rel} is not tracked with this content at the WI base or HEAD of projects/{project}; commit it first")
     if not re.match(r"^[A-Za-z0-9_.-]+$", module):
         fail(f"invalid module id: {module!r}")
+    project = stem = tracked = None
+    if recipe is not None:
+        rel = os.path.normpath(recipe).replace(os.sep, "/")
+        if Path(recipe).is_absolute():
+            try:
+                rel = Path(os.path.abspath(recipe)).relative_to(site.root).as_posix()
+            except ValueError:
+                fail(f"recipe must be inside the site: {recipe}")
+        m = RECIPE_RE.match(rel)
+        if not m or ".." in rel.split("/"):
+            fail(f"recipe must be a site-relative projects/<project>/code/containers/<name>.def, not {recipe}"
+                 " (omit --recipe to build the module's own containers/<name>.def at --rev)")
+        project, stem = m.group(1), m.group(2)
+        if target != f"projects/{project}":
+            fail(f"{wi} targets {target}; a container build needs a WI for projects/{project}, the recipe's project")
+        proj = site.root / "projects" / project
+        recipe_path = site.root / rel
+        if not recipe_path.is_file():
+            fail(f"recipe is missing: {rel}")
+        if not (proj / ".git").exists():
+            fail(f"projects/{project} is not a git repository; the recipe must be tracked")
+        inner = f"code/containers/{stem}.def"
+        tracked = _tracked_recipe(proj, inner, [_base_of(site, wi) or "", "HEAD"])
+        if tracked is None:
+            fail(f"{rel} is not tracked with this content at the WI base or HEAD of projects/{project}; commit it first")
+    else:
+        if target != f"modules/{module}" and not re.match(r"^projects/[^/]+$", target or ""):
+            fail(f"{wi} targets {target}; a module-recipe build needs a WI for modules/{module} or for a project")
+        if target.startswith("projects/"):
+            project = target.split("/", 1)[1]
     mod = site.root / "modules" / module
     if not mod.is_dir() or not (mod / ".git").exists():
         fail(f"module is missing or not a git repository: modules/{module}")
     full = git(["rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"], mod, check=False)
     if not re.match(r"^[0-9a-f]{40}$", full or ""):
         fail(f"revision {rev!r} does not resolve to a commit in modules/{module}")
+    name = name or stem or module
+    if not NAME_RE.match(name):
+        fail(f"invalid name {name!r}: letters, digits and . _ + - only")
+    if recipe is None:
+        mrec = _module_recipe(mod, module, full, name)
+        stem = name
     version = version or _module_version(mod, full)
     if not version:
         fail(f"no version in modules/{module}/pyproject.toml at {full[:7]}; pass --version")
-    name = name or stem
-    for label, value in (("name", name), ("version", version)):
-        if not NAME_RE.match(value):
-            fail(f"invalid {label} {value!r}: letters, digits and . _ + - only")
+    if not NAME_RE.match(version):
+        fail(f"invalid version {version!r}: letters, digits and . _ + - only")
     cache = cache_dir(site)
     if cache is None:
         fail("no container cache configured: set config.json `containers.cache` (or env.vars CAMRI_CONTAINER_CACHE)")
@@ -183,29 +224,44 @@ def build(site: Site, actor: str, wi: str, recipe: str, module: str, rev: str, v
             if state.split(" ")[0] in ("PENDING", "RUNNING", "CONFIGURING", "COMPLETING", "REQUEUED", "SUSPENDED"):
                 fail(f"{sif} is already being built by job {run['payload']['job_id']} ({run['id']}, {state})")
 
-    work = proj / "checkpoints" / f"{wi}-container-{sif[:-4]}"
+    # project WIs keep the job directory in the project's untracked checkpoints/; a module WI's goes under the
+    # site's logs/ (never into the module's git tree)
+    if project is not None:
+        work = site.root / "projects" / project / "checkpoints" / f"{wi}-container-{sif[:-4]}"
+    else:
+        work = site.root / "logs" / "containers" / f"{wi}-container-{sif[:-4]}"
     work.mkdir(parents=True, exist_ok=True)
+    data = tracked["data"] if tracked else mrec["data"]
     recipe_copy = work / f"{stem}.def"
-    recipe_copy.write_bytes(tracked["data"])
+    recipe_copy.write_bytes(data)
     cfg = _cfg(site)
     build_args = [str(a) for a in (cfg.get("build_args") if cfg.get("build_args") is not None else DEFAULT_BUILD_ARGS)]
     import hashlib
 
-    static = {"recipe": rel, "recipe_blob": tracked["blob"], "recipe_commit": tracked["ref"],
-              "recipe_annex_key": tracked["annex_key"], "recipe_sha256": hashlib.sha256(tracked["data"]).hexdigest(), "project": f"projects/{project}",
+    if tracked:
+        rsrc = {"recipe_source": "project", "recipe": rel, "recipe_path": rel, "recipe_rev": tracked["ref"],
+                "recipe_blob": tracked["blob"], "recipe_commit": tracked["ref"], "recipe_annex_key": tracked["annex_key"]}
+        build_from = recipe_copy.name  # copied into the context root
+    else:
+        rsrc = {"recipe_source": "module", "recipe": mrec["path"], "recipe_path": mrec["path"], "recipe_rev": full,
+                "recipe_blob": mrec["blob"], "recipe_commit": full, "recipe_annex_key": None}
+        build_from = mrec["inner"]  # the archived file itself, so its %files paths resolve against the module root
+    static = {**rsrc, "recipe_sha256": hashlib.sha256(data).hexdigest(),
+              "project": f"projects/{project}" if project else None, "wi_target": target,
               "module": module, "rev": full, "version": version, "name": name, "target": sif, "cache": str(cache),
               "wi": wi, "build_args": build_args}
     script = work / "build.sh"
-    script.write_text(_job_script(site, work, recipe_copy, mod, full, cache, sif, static, build_args,
-                                  time or cfg.get("time") or DEFAULT_TIME, mem or cfg.get("mem") or DEFAULT_MEM,
-                                  int(cfg.get("cpus") or DEFAULT_CPUS)), encoding="utf-8")
+    script.write_text(_job_script(site, work, recipe_copy if tracked else None, build_from, mod, full, cache, sif,
+                                  static, build_args, time or cfg.get("time") or DEFAULT_TIME,
+                                  mem or cfg.get("mem") or DEFAULT_MEM, int(cfg.get("cpus") or DEFAULT_CPUS)),
+                      encoding="utf-8")
     script.chmod(0o755)
     extra = {"container": {**static, "script_dir": str(work)}}
     return slurm_submit(site, actor, wi, str(script), dry_run, None, extra_payload=extra)
 
 
-def _job_script(site: Site, work: Path, recipe_copy: Path, mod: Path, rev: str, cache: Path, sif: str,
-                static: dict, build_args: list[str], time: str, mem: str, cpus: int) -> str:
+def _job_script(site: Site, work: Path, recipe_copy: Path | None, build_from: str, mod: Path, rev: str, cache: Path,
+                sif: str, static: dict, build_args: list[str], time: str, mem: str, cpus: int) -> str:
     q = shlex.quote
     static_json = json.dumps(static, sort_keys=True)[:-1]  # closed by the job after its own fields
     module_load = _cfg(site).get("module", "apptainer")
@@ -242,10 +298,15 @@ def _job_script(site: Site, work: Path, recipe_copy: Path, mod: Path, rev: str, 
         "export APPTAINER_CACHEDIR=\"${APPTAINER_CACHEDIR:-$WORK/apptainer-cache}\"",
         "mkdir -p \"$APPTAINER_CACHEDIR\"",
         f"git -C {q(str(mod))} archive {q(rev)} | tar -x -C \"$CTX\"",
-        f"cp {q(str(recipe_copy))} \"$CTX\"/{q(recipe_copy.name)}",
+    ]
+    if recipe_copy is not None:
+        lines.append(f"cp {q(str(recipe_copy))} \"$CTX\"/{q(recipe_copy.name)}")
+    else:
+        lines.append(f"test -f \"$CTX\"/{q(build_from)} || {{ echo 'recipe {build_from} missing from the archive' >&2; exit 6; }}")
+    lines += [
         "cd \"$CTX\"",
         "AVER=$(apptainer --version | tr -d '\"\\\\')",
-        f"apptainer build {' '.join(q(a) for a in build_args)} \"$PARTIAL\" {q(recipe_copy.name)}",
+        f"apptainer build {' '.join(q(a) for a in build_args)} \"$PARTIAL\" {q(build_from)}",
         "SHA=$(sha256sum \"$PARTIAL\" | cut -d' ' -f1)",
         "SIZE=$(stat -c %s \"$PARTIAL\")",
         f"STATIC={q(static_json)}",
