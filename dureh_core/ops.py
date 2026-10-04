@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from .org import HARNESS_ROOT
@@ -138,7 +139,8 @@ def render_status(st: dict) -> str:
 
 # ------------------------------------------------------------------ slurm
 def slurm_submit(site: Site, actor: str, wi: str, script: str, dry_run: bool = False,
-                 extra: list[str] | None = None, extra_payload: dict | None = None) -> dict:
+                 extra: list[str] | None = None, extra_payload: dict | None = None,
+                 module: str | None = None, rev: str | None = None) -> dict:
     led = Ledger(site)
     rec = led.get("work-item", wi)
     if actor not in ("pipeline-runner", "desk"):
@@ -150,6 +152,8 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str, dry_run: bool = F
     path = Path(script)
     if not path.is_file():
         fail(f"required job script is missing: {script}")
+    if rev is not None and module is None:
+        fail("--rev needs --module")
     cfg = site.config.get("slurm") or {}
     cmd = ["sbatch", "--parsable", f"--job-name=dureh-{wi}"]
     for key, flag in (("account", "--account"), ("partition", "--partition")):
@@ -175,12 +179,28 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str, dry_run: bool = F
         out = _sbatch_opt(path, extra or [], "-o", "--output") or "slurm-%j.out"
         log_out = os.path.join(chdir, out)
         log_err = os.path.join(chdir, _sbatch_opt(path, extra or [], "-e", "--error") or out)
-    cmd += list(extra or []) + [str(path)]
+    mod = None
+    if module is not None:  # UR-20261004-04: the job runs against a pinned, read-only tree of modules/<m>
+        from . import exectree
+
+        mod = exectree.prepare(site, wi, rec["payload"].get("target"), module, rev, path, dry_run)
+        for w in mod["warnings"]:
+            print(f"warning: {w}", file=sys.stderr)
+    cmd += list(extra or []) + [mod["wrapper"] if mod else str(path)]
     payload = {"run_type": "slurm", "status": "not-run" if dry_run else "submitted", "command": cmd,
                "script_sha256": sha256_file(path), "script": str(path), "logs": str(logs) if logs else None,
                "chdir": chdir, "log_out": log_out, "log_err": log_err, **(extra_payload or {})}
+    if mod:
+        payload.update(module=mod["module"], wrapper=mod["wrapper"])
+        if mod["warnings"]:
+            payload["warnings"] = mod["warnings"]
     if not dry_run:
-        check = _day_check(site, cmd, path, extra or [], cfg)
+        try:
+            check = _day_check(site, cmd, path, extra or [], cfg)
+        except DurehError:
+            if mod:
+                exectree.cleanup(Path(mod["module"]["tree"]))
+            raise
         if check is not None:
             payload["start_check"] = check
         if logs:
@@ -188,6 +208,8 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str, dry_run: bool = F
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=site.env())
         if proc.returncode != 0:
             payload.update(status="failed", stderr=proc.stderr[-2000:])
+            if mod:
+                exectree.cleanup(Path(mod["module"]["tree"]))
         else:
             payload["job_id"] = proc.stdout.strip().split(";")[0]
     run = led.append("run", "slurm", actor, wi, payload)

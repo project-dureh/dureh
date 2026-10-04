@@ -778,7 +778,8 @@ def _wi_job_logs(site: Site, led: Ledger, wi: str, rec: dict) -> tuple[list[Path
 
 
 def purge(site: Site, actor: str, wi: str, dry_run: bool = False) -> dict:
-    """Remove a WI's worktree and scratch checkpoints, and the scheduler logs of its own jobs.
+    """Remove a WI's worktree, scratch checkpoints and leftover module exec trees (scratch/exec/<WI>-*), and the
+    scheduler logs of its own jobs.
     Validate the whole set first; symlinks are removed as links and their targets are never followed."""
     if site.org.role(actor).kind != "desk":
         fail("only the desk purges")
@@ -796,7 +797,15 @@ def purge(site: Site, actor: str, wi: str, dry_run: bool = False) -> dict:
         ck = site.root / tgt / "checkpoints"
         if ck.is_dir():
             items += [c for c in ck.iterdir() if fnmatch.fnmatch(c.name, f"{wi}*")]
+    from .exectree import exec_root, purge_targets, _rmtree
+
+    exec_trees = purge_targets(site, wi)  # leftover pinned module trees of its jobs (UR-20261004-04)
+    items += exec_trees
     for it in items:  # validate everything before removing anything
+        if it in exec_trees:
+            if it.parent != exec_root(site):
+                fail(f"refusing to purge outside the exec scratch directory: {it}")
+            continue
         if not (str(it).startswith(str(site.worktrees) + os.sep) or "/checkpoints/" in str(it)):
             fail(f"refusing to purge outside WI scratch paths: {it}")
     logs, skipped_logs = _wi_job_logs(site, led, wi, rec)
@@ -806,7 +815,9 @@ def purge(site: Site, actor: str, wi: str, dry_run: bool = False) -> dict:
             f.unlink()
             removed_logs.append(str(f))
         for it in items:
-            if it.is_symlink() or it.is_file():
+            if it in exec_trees:
+                _rmtree(it)  # read-only trees: chmod u+w first
+            elif it.is_symlink() or it.is_file():
                 it.unlink()
             elif it == wt:
                 root = target_root(site, tgt)

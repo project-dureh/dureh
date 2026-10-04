@@ -303,7 +303,7 @@ def cmd_slurm(a):
 
     site = _site(a)
     if a.slurm_command == "submit":
-        _print(ops.slurm_submit(site, _actor(a), a.wi, a.script, a.dry_run, a.sbatch_arg))
+        _print(ops.slurm_submit(site, _actor(a), a.wi, a.script, a.dry_run, a.sbatch_arg, module=a.module, rev=a.rev))
     elif a.slurm_command == "status":
         _print(ops.slurm_status(site, _actor(a), a.run))
     elif a.slurm_command == "wait":
@@ -681,6 +681,10 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--wi", required=True)
     x.add_argument("--script", required=True)
     x.add_argument("--sbatch-arg", action="append")
+    x.add_argument("--module", help="run against a read-only `git archive` tree of modules/<m> at a pinned revision "
+                                    "(exports DUREH_MODULE_ROOT, DUREH_MODULE_REV and the module's root_env)")
+    x.add_argument("--rev", help="with --module: revision to run (default: the WI project's manifest pin "
+                                 "provenance.tool_versions.<m>); a different revision is recorded as rev_override")
     x.add_argument("--dry-run", action="store_true")
     x.add_argument("--actor")
     for name in ("status", "cancel"):
