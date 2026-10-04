@@ -434,13 +434,50 @@ class Workday(SiteCase):
     def _sessions(self):
         return [e for e in Ledger(self.s).events() if e["type"] == "session.started"]
 
+    def test_session_start_records_the_first_prompt(self):
+        fake = self.fake_slurm(squeue="RUNNING|6:00:00")
+        workday.switch(self.s, True, "trial")
+        rc, out = self.cli("site", "session", "start")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("purpose desk, no first prompt)", out)
+        self.assertIn("The working day runs from now.", out)
+        first = self._sessions()[-1]
+        self.assertIsNone(first["payload"]["prompt"])
+        self.assertNotIn("출근", Path(first["payload"]["script"]).read_text())
+        # an overtime session later the same day: a second session, not a restart, with its prompt recorded
+        self.at(T0 + timedelta(hours=9))
+        rc, out = self.cli("site", "session", "start", "--purpose", "overtime")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("purpose overtime, first prompt 'Tester, 추가근무 출근')", out)
+        self.assertIn(f"Second session today after the desk session (job 12345, {first['id']}); the working day still "
+                      f"runs from {T0.isoformat()}", out)
+        p = self._sessions()[-1]["payload"]
+        self.assertEqual((p["purpose"], p["prompt"], p["previous"]["record"], p["day_start"]),
+                         ("overtime", "Tester, 추가근무 출근", first["id"], T0.isoformat()))
+        self.assertNotIn("restart", p)
+        self.assertNotIn("force", p)
+        self.assertIn("'Tester, 추가근무 출근'", Path(p["script"]).read_text())
+        self.assertNotIn("-j 12345", (fake / "squeue-calls").read_text() if (fake / "squeue-calls").exists() else "",
+                         "a different purpose needs no squeue check")
+        # a second overtime session while the first still runs is refused like the day's; --prompt is recorded
+        self.at(T0 + timedelta(hours=10))
+        with self.assertRaisesRegex(DurehError, "today's overtime session job 12345 .* still in squeue"):
+            sessions.start(self.s, "desk", "overtime")
+        rc, out = self.cli("site", "session", "start", "--purpose", "overtime", "--force", "--memo", "node lost",
+                           "--prompt", "지아, 추가근무: 보고서만")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self._sessions()[-1]["payload"]["prompt"], "지아, 추가근무: 보고서만")
+        rc, out = self.cli("site", "session", "start", "--purpose", "overtime", "--force", "--memo", "x", "--no-prompt")
+        self.assertEqual(rc, 0, out)
+        self.assertIsNone(self._sessions()[-1]["payload"]["prompt"])
+
     def test_second_session_start_today_refused_while_the_job_is_queued(self):
         fake = self.fake_slurm(squeue="RUNNING|6:00:00")
         workday.switch(self.s, True, "trial")
         first = sessions.start(self.s, "desk")
         self.at(T0 + timedelta(hours=2))
         with self.assertRaisesRegex(DurehError, rf"job 12345 \({first['id']}, submitted {T0.isoformat()}\) is still in squeue: "
-                                                r"RUNNING, time left 6:00:00.*one session a day.*--force --memo"):
+                                                r"RUNNING, time left 6:00:00.*one desk session a day.*--purpose desk --force --memo"):
             sessions.start(self.s, "desk")
         self.assertIn("-j 12345", (fake / "squeue-calls").read_text())
         self.assertEqual(len((fake / "sbatch-calls").read_text().splitlines()), 1, "nothing submitted")
@@ -453,13 +490,13 @@ class Workday(SiteCase):
         self.assertEqual(len(self._sessions()), 1)
         rc, out = self.cli("site", "session", "start", "--force", "--memo", "remote control lost; Director asked")
         self.assertEqual(rc, 0, out)
-        self.assertIn("Forced second start (remote control lost; Director asked): today's session job 12345", out)
+        self.assertIn("Forced second start (remote control lost; Director asked): today's desk session job 12345", out)
         self.assertIn(f"the working day still runs from {T0.isoformat()}", out)
         rec = self._sessions()[-1]
         p = rec["payload"]
         self.assertEqual(p["force"]["memo"], "remote control lost; Director asked")
         self.assertIn("still in squeue: RUNNING", p["force"]["why"])
-        self.assertEqual(p["previous"], {"record": first["id"], "job_id": "12345", "submitted_at": T0.isoformat()})
+        self.assertEqual(p["previous"], {"record": first["id"], "job_id": "12345", "submitted_at": T0.isoformat(), "purpose": "desk"})
         self.assertEqual((p["day_start"], p["submitted_at"]), (T0.isoformat(), (T0 + timedelta(hours=2)).isoformat()))
         self.assertNotIn("restart", p)
         st = workday.status(self.s)

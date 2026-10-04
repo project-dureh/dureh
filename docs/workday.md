@@ -16,7 +16,13 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    command. One session a day: a second `session start` on the same local day is refused while today's job
    is still in squeue (the message names the job id; `--force --memo "why"` overrides and the record carries
    `force`). When that job is gone the start is a restart (`restart: true`, `previous`); either way the
-   record's `day_start` keeps the first session's start, so the 8 hours do not begin again.
+   record's `day_start` keeps the first session's start, so the 8 hours do not begin again. An overtime
+   session (`session start --purpose overtime`, for items in a Director overtime record) is a second session
+   of its own purpose, not a restart. First prompt (Director, 2026-10-04): the day's session gets none (the
+   DUREH team sends the start message to the booted remote-control session); an overtime session gets
+   `"<desk name>, 추가근무 출근"` with the name from the persona registry `state/persona/persona.json`
+   (`"데스크, 추가근무 출근"` without one). Config `session.prompts.<purpose>` (a template with `{name}`, or
+   `false`), `start --prompt TEXT` and `--no-prompt` override; the record carries the `prompt` used (or null).
 1. **Start.** The desk reports a plan to the Director (goal, work items, order, expected usage) and
    records it: `dureh day plan --goal ... --file plan.md`.
 2. **Approval.** When the Director approves, the desk records the Director's words:
@@ -117,6 +123,8 @@ bin/dureh site workday calibrate --weekly-percent 23
 bin/dureh site workday status
 bin/dureh site session plan | start | status               # the day's session job (status is read-only)
 bin/dureh site session start --force --memo "..."          # a second session today while the first job still runs
+bin/dureh site session start --purpose overtime            # a new session for approved overtime (first prompt "<desk name>, 추가근무 출근")
+bin/dureh site session start --prompt "..." | --no-prompt  # replace or drop the first prompt this time
 ```
 
 `dureh status` and the session start show a `Workday:` line while the mode is on (phase, start-end and the

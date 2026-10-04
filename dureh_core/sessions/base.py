@@ -10,15 +10,20 @@ import os
 
 from ..site import Site
 
-PURPOSES = ("desk",)
+PURPOSES = ("desk", "overtime")  # the day's session; a new session for approved overtime (Director, 2026-10-04)
 
 
 class SessionRuntime:
     name = ""
     talks_to_director = False  # the Director can talk to a running session (remote control)
 
-    def launch_command(self, site: Site, purpose: str = "desk") -> list[str]:
+    def launch_command(self, site: Site, purpose: str = "desk", prompt: str | None = None) -> list[str]:
+        """The argv that starts the session; `prompt`, when given, is its first message (passed last)."""
         raise NotImplementedError
+
+    def first_prompt(self, site: Site, purpose: str = "desk") -> str | None:
+        """The first message the session gets by default (None: the runtime has none)."""
+        return None
 
     def env(self, site: Site) -> dict:
         """Variables the session needs beyond the caller's environment (site, harness, config env). DUREH_SITE and

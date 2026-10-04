@@ -3,6 +3,8 @@ import contextlib
 import io
 import json
 import os
+import shlex
+import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
@@ -108,13 +110,21 @@ class ClusterSession(SiteCase):
         # measured 2026-10-04: the flag form registers from a batch job; the name defaults to the site directory
         self.assertEqual(rt.launch_command(self.s, "desk"),
                          ["claude", "--remote-control", "site", "--permission-mode", "auto"])
+        # Director, 2026-10-04: the day's session gets no first prompt (the team sends the start message to the
+        # booted remote-control session); an overtime session gets "<desk name>, 추가근무 출근" from the persona
+        self.assertIsNone(rt.first_prompt(self.s, "desk"))
+        self.assertEqual(rt.first_prompt(self.s, "overtime"), "Tester, 추가근무 출근")
+        self.assertEqual(rt.launch_command(self.s, "overtime", rt.first_prompt(self.s, "overtime")),
+                         ["claude", "--remote-control", "site", "--permission-mode", "auto", "Tester, 추가근무 출근"])
         self.config(session={"command": ["/opt/bin/claude", "--verbose"],
                              "options": {"model": "opus", "remote_control": "camri-{purpose}"},
-                             "flags": {"model": "--model"}, "prompt": "지아, 출근 ({site})"})
+                             "flags": {"model": "--model"}, "prompts": {"desk": "{name}, 출근 ({site})", "overtime": False}})
         rt = sessions.get(self.s)
-        self.assertEqual(rt.launch_command(self.s, "desk"),
+        self.assertEqual(rt.first_prompt(self.s, "desk"), "Tester, 출근 (site)")
+        self.assertIsNone(rt.first_prompt(self.s, "overtime"))
+        self.assertEqual(rt.launch_command(self.s, "desk", rt.first_prompt(self.s, "desk")),
                          ["/opt/bin/claude", "--verbose", "--remote-control", "camri-desk", "--permission-mode", "auto",
-                          "--model", "opus", "지아, 출근 (site)"])
+                          "--model", "opus", "Tester, 출근 (site)"])
         self.assertTrue(any("not on PATH" in p for p in rt.check(self.s)))
         self.config(session={"options": {"effort": "high"}})
         with self.assertRaisesRegex(DurehError, "effort have no flag"):
@@ -150,6 +160,7 @@ class ClusterSession(SiteCase):
         self.assertIn("\nSOCK=dureh-", out)
         self.assertIn('tmux -L "$SOCK" new-session -d -s "$NAME" -x 200 -y 50 -c ', out)
         self.assertIn("CMD='claude --remote-control site --permission-mode auto'\n", out)
+        self.assertIn("# first prompt: none\n", out)
         self.assertNotIn("claude remote-control", out)
         self.assertTrue(out.rstrip().endswith('while tmux -L "$SOCK" has-session -t "$NAME" 2>/dev/null; do sleep 20; done'))
         self.assertFalse((self.site_root / "logs").exists(), "a plan creates nothing")
@@ -159,6 +170,58 @@ class ClusterSession(SiteCase):
         self.assertIn("#SBATCH --cpus-per-task=2\n#SBATCH --mem=16G\n", out)
         self.assertIn("#SBATCH --account=acct-x\n#SBATCH --partition=general\n", out)
         self.assertIn("--remote-control site --permission-mode auto'", out)
+
+    # ------------------------------------------------------------ first prompt (desk persona registry)
+    def persona(self, data):
+        p = self.site_root / "state" / "persona" / "persona.json"
+        if data is None:
+            p.unlink()
+        else:
+            p.write_text(json.dumps(data, ensure_ascii=False))
+
+    def cmd_argv(self, script: str) -> list:
+        """What the generated script's CMD line gives bash: the prompt must survive the quoting."""
+        line = next(l for l in script.splitlines() if l.startswith("CMD="))
+        got = subprocess.run(["bash", "-c", line + '; printf "%s" "$CMD"'], capture_output=True, text=True, check=True).stdout
+        return shlex.split(got)
+
+    def test_overtime_session_first_prompt_from_the_persona_name(self):
+        self.persona({"name": "서지아", "recorded_at": "x"})
+        out = sessions.plan(self.s, "overtime")
+        self.assertIn("#SBATCH --job-name=cc-site-overtime\n", out)
+        self.assertEqual(self.cmd_argv(out), ["claude", "--remote-control", "site", "--permission-mode", "auto", "서지아, 추가근무 출근"])
+        self.assertIn("# first prompt: '서지아, 추가근무 출근'\n", out)
+        self.assertEqual(self.cmd_argv(sessions.plan(self.s, "desk"))[-1], "auto", "the day's session: no prompt")
+        self.persona({"name": "O'Brien \"Z\" $USER"})  # quoting survives shell metacharacters
+        self.assertEqual(self.cmd_argv(sessions.plan(self.s, "overtime"))[-1], "O'Brien \"Z\" $USER, 추가근무 출근")
+        rc, out = self.cli("site", "session", "plan", "--purpose", "overtime")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.cmd_argv(out)[-1], "O'Brien \"Z\" $USER, 추가근무 출근")
+
+    def test_overtime_first_prompt_without_a_persona_name(self):
+        for data in ({"lab": "CAMRI"}, {"name": "  "}, None):
+            self.persona(data)
+            self.assertEqual(self.cmd_argv(sessions.plan(self.s, "overtime"))[-1], "데스크, 추가근무 출근", data)
+        (self.site_root / "state" / "persona" / "persona.json").write_text("{not json")
+        self.assertEqual(self.cmd_argv(sessions.plan(self.s, "overtime"))[-1], "데스크, 추가근무 출근")
+
+    def test_first_prompt_config_and_overrides(self):
+        self.config(session={"prompts": {"overtime": False, "desk": "{name}, 출근"}})
+        self.assertEqual(self.cmd_argv(sessions.plan(self.s, "overtime")), ["claude", "--remote-control", "site", "--permission-mode", "auto"])
+        self.assertIn("# first prompt: none\n", sessions.plan(self.s, "overtime"))
+        self.assertEqual(self.cmd_argv(sessions.plan(self.s, "desk"))[-1], "Tester, 출근")
+        self.config(session={"prompts": {"overtime": ""}})  # empty: none too
+        self.assertEqual(self.cmd_argv(sessions.plan(self.s, "overtime"))[-1], "auto")
+        self.config(session={})
+        rc, out = self.cli("site", "session", "plan", "--purpose", "overtime", "--no-prompt")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.cmd_argv(out)[-1], "auto")
+        rc, out = self.cli("site", "session", "plan", "--prompt", "지아, 오늘은 보고서부터")
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.cmd_argv(out)[-1], "지아, 오늘은 보고서부터")
+        self.assertIn("# first prompt: '지아, 오늘은 보고서부터'\n", out)
+        with self.assertRaisesRegex(DurehError, "unknown session purpose 'night'.*desk, overtime"):
+            sessions.plan(self.s, "night")
 
     def test_session_plan_wall_time_from_overtime_allowance(self):
         self.config(workday={"overtime_hours": 2})
