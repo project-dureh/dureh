@@ -149,9 +149,12 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str, dry_run: bool = F
         fail(f"required job script is missing: {script}")
     cfg = site.config.get("slurm") or {}
     cmd = ["sbatch", "--parsable", f"--job-name=dureh-{wi}"]
-    for key, flag in (("account", "--account"), ("partition", "--partition"), ("time", "--time")):
+    for key, flag in (("account", "--account"), ("partition", "--partition")):
         if cfg.get(key):
             cmd.append(f"{flag}={cfg[key]}")
+    wall, wall_source = _requested_time(path, extra or [], cfg)
+    if wall_source == "config":
+        cmd.append(f"--time={wall}")  # config slurm.time is the fallback: a script or argument --time wins (UR-20261003-09)
     # relative #SBATCH -o/-e resolve against the job's directory: the WI target, not the agent's shell cwd
     chdir = _sbatch_opt(path, extra or [], "-D", "--chdir")
     if chdir is None:
@@ -227,10 +230,15 @@ def _sbatch_opt(script: Path, extra: list[str], short: str, long: str) -> str | 
     return value if value is not None else _script_opt(script, short, long)
 
 
-def _requested_time(script: Path, extra: list[str], cfg: dict) -> str | None:
-    """The job's --time: the last sbatch argument, else config slurm.time, else an #SBATCH directive."""
-    return _scan_opt(extra, "-t", "--time") or (str(cfg["time"]) if cfg.get("time") else None) \
-        or _script_opt(script, "-t", "--time")
+def _requested_time(script: Path, extra: list[str], cfg: dict) -> tuple[str | None, str | None]:
+    """The job's effective --time and where it comes from: the last sbatch argument (`sbatch-arg`), else the
+    script's #SBATCH directive (`script`), else config slurm.time (`config`); (None, None) when nowhere."""
+    for value, source in ((_scan_opt(extra, "-t", "--time"), "sbatch-arg"),
+                          (_script_opt(script, "-t", "--time"), "script"),
+                          (str(cfg["time"]) if cfg.get("time") else None, "config")):
+        if value:
+            return value, source
+    return None, None
 
 
 def _day_check(site: Site, cmd: list[str], script: Path, extra: list[str], cfg: dict):
@@ -247,7 +255,8 @@ def _day_check(site: Site, cmd: list[str], script: Path, extra: list[str], cfg: 
     d = workday.day(site)
     if d["phase"] != "on-duty":
         return None
-    wall = cluster.parse_time(_requested_time(script, extra, cfg))
+    requested, source = _requested_time(script, extra, cfg)
+    wall = cluster.parse_time(requested)
     if wall is None:
         return "skipped: no --time requested"
     try:
@@ -265,11 +274,11 @@ def _day_check(site: Site, cmd: list[str], script: Path, extra: list[str], cfg: 
     ends = start + wall
     if ends > day_end:
         fail(f"workday mode: this job is expected to start at {start.isoformat(timespec='seconds')} and, with "
-             f"--time {_requested_time(script, extra, cfg)}, end at {ends.isoformat(timespec='seconds')}, after "
+             f"--time {requested} (from the {source}), end at {ends.isoformat(timespec='seconds')}, after "
              f"today's end {d['end']}. Nothing was submitted; ask for a shorter --time, or submit it in the next "
              "approved day.")
     return {"expected_start": start.isoformat(timespec="seconds"), "expected_end": ends.isoformat(timespec="seconds"),
-            "day_end": d["end"]}
+            "day_end": d["end"], "time": requested, "time_source": source}
 
 
 def _sets_output(script: Path, extra: list[str]) -> bool:

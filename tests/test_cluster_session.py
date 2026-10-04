@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 from helpers import SiteCase
@@ -201,8 +202,31 @@ class ClusterSession(SiteCase):
         run = ops.slurm_submit(self.s, "desk", w, script)
         self.assertEqual(run["payload"]["job_id"], "4242")
         self.assertEqual(run["payload"]["start_check"]["expected_end"], "2026-10-03T16:30:00-04:00")
+        self.assertEqual((run["payload"]["start_check"]["time"], run["payload"]["start_check"]["time_source"]),
+                         ("02:30:00", "config"))
         run = ops.slurm_submit(self.s, "desk", w, script, extra=["-t", "1:00:00"])
         self.assertEqual(run["payload"]["start_check"]["expected_end"], "2026-10-03T15:00:00-04:00")
+        self.assertEqual(run["payload"]["start_check"]["time_source"], "sbatch-arg")
+
+    def test_submit_check_uses_the_scripts_time_over_config(self):
+        # UR-20261003-09: the check estimated the end from config slurm.time and ignored the script's directive
+        self._on_duty()
+        w, script = self._job()
+        self._sbatch("2026-10-03T14:00:00")
+        self.config(slurm={"account": "acct-x", "partition": "general", "time": "01:00:00"})
+        Path(script).write_text("#!/bin/sh\n#SBATCH --time=04:00:00\necho hi\n")
+        with self.assertRaisesRegex(DurehError, r"--time 04:00:00 \(from the script\).*after today's end"):
+            ops.slurm_submit(self.s, "desk", w, script)
+        self.assertNotIn("--time=01:00:00", (self.tmp / "sbatch-calls").read_text(), "config time is only a fallback")
+        Path(script).write_text("#!/bin/sh\n#SBATCH -t 02:00:00\necho hi\n")
+        run = ops.slurm_submit(self.s, "desk", w, script)
+        self.assertEqual(run["payload"]["start_check"]["expected_end"], "2026-10-03T16:00:00-04:00")
+        self.assertEqual((run["payload"]["start_check"]["time"], run["payload"]["start_check"]["time_source"]),
+                         ("02:00:00", "script"))
+        self.assertNotIn("--time=", " ".join(run["payload"]["command"]))
+        run = ops.slurm_submit(self.s, "desk", w, script, extra=["--time=00:30:00"])
+        self.assertEqual(run["payload"]["start_check"]["time_source"], "sbatch-arg")
+        self.assertEqual(run["payload"]["start_check"]["expected_end"], "2026-10-03T14:30:00-04:00")
 
     def test_submit_check_unavailable_or_skipped(self):
         self._on_duty()
