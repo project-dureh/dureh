@@ -34,6 +34,7 @@ class SiteCase(unittest.TestCase):
         os.environ.update(GIT_ENV)
         os.environ.pop("DUREH_ACTOR", None)
         os.environ.pop("DUREH_SITE", None)
+        os.environ.pop("SLURM_JOB_ID", None)  # never the real session job: 2026-10-03 a close() test cancelled it
         self.tmp = Path(tempfile.mkdtemp(prefix="dureh-test-")).resolve()
         os.environ["TMPDIR"] = str(self.tmp / "nodelocal")
         (self.tmp / "nodelocal").mkdir()

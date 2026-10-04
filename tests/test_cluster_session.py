@@ -103,9 +103,9 @@ class ClusterSession(SiteCase):
         rt = sessions.get(self.s)
         self.assertEqual(rt.name, "claude-code")
         self.assertTrue(rt.talks_to_director)
-        self.assertEqual(rt.launch_command(self.s, "desk"), ["claude", "--permission-mode", "auto", "--remote"])
+        self.assertEqual(rt.launch_command(self.s, "desk"), ["claude", "remote-control", "--permission-mode", "auto"])
         self.config(session={"command": ["/opt/bin/claude", "--verbose"],
-                             "options": {"remote": False, "model": "opus"},
+                             "options": {"model": "opus"},
                              "flags": {"model": "--model"}})
         rt = sessions.get(self.s)
         self.assertEqual(rt.launch_command(self.s, "desk"),
@@ -140,7 +140,7 @@ class ClusterSession(SiteCase):
         self.assertIn(f"#SBATCH --chdir={self.site_root}\n", out)
         self.assertIn(f"#SBATCH --output={self.site_root}/logs/sessions/%x-%j.out", out)
         self.assertIn(f"export DUREH_SITE={self.site_root}", out)
-        self.assertTrue(out.rstrip().endswith("exec claude --permission-mode auto --remote"))
+        self.assertTrue(out.rstrip().endswith("exec claude remote-control --permission-mode auto"))
         self.assertFalse((self.site_root / "logs" / "sessions").exists(), "a plan creates nothing")
 
     def test_session_plan_wall_time_from_overtime_allowance(self):

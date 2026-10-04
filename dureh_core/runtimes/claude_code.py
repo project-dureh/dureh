@@ -227,6 +227,8 @@ def _claude_md(site: Site) -> str:
               " When everything is idle, propose the next work: if it fits the goals the Director set (the plan's goal, the package's purpose, the Director's standing priorities),"
               f" proceed on your own recommendation, record it with `{dureh} day decide`, and report it at the end; otherwise list it for the end report."
               " Where the Director would decide, choose something easy to change, call it provisional in the record, and keep going."
+              f" When everything is idle and nothing more can proceed today (after the end report and any accepted overtime), write the handoff and run `{dureh} day close`:"
+              " it checks that nothing runs and the handoff is fresh, then ends the session job and releases its node when the session runs as a scheduler job."
               " `day plan` and `day end` record the heads of every module and project and of state, so any day's start or end is a rollback point."
               " Talk to the Director at the start and the end of the day; between them only for data at risk. `dureh day status` shows the phase and usage (account total and this site's part);"
               " the usage budget is shared by every company and upstream, so check it before each work item.",

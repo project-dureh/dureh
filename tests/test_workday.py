@@ -137,6 +137,7 @@ class Workday(SiteCase):
         out = self.spawn(other)
         self.assertTrue(denied(out))
         self.assertIn("overtime covers only", json.dumps(out))
+        self.write_handoff()
         workday.close(self.s, "desk", "fixed")
         self.assertEqual(workday.status(self.s)["phase"], "off-duty")
 
@@ -247,11 +248,100 @@ class Workday(SiteCase):
         self.assertIn("modules/demo", rec["payload"]["heads"])
         self.assertRegex(rec["payload"]["heads"]["modules/demo"] or "", r"^[0-9a-f]{40}$")
 
+    def write_handoff(self):
+        h = self.site_root / "state" / "memory" / "handoff.md"
+        h.parent.mkdir(parents=True, exist_ok=True)
+        h.write_text("open: nothing\n")
+        future = datetime.fromisoformat(os.environ["DUREH_FAKE_NOW"]).timestamp() + 60
+        os.utime(h, (future, future))  # written after today's approval
+        return h
+
+    def end_day(self):
+        self.start_day()
+        self.at(T0 + timedelta(hours=9))
+        workday.end(self.s, "desk", "done", "", [])
+
+    def test_close_needs_a_fresh_handoff(self):
+        self.end_day()
+        h = self.site_root / "state" / "memory" / "handoff.md"
+        if h.exists():
+            h.unlink()  # the install may seed one; this test wants none
+        with self.assertRaisesRegex(DurehError, "write the handoff"):
+            workday.close(self.s, "desk", "x")
+        h = self.write_handoff()
+        old = T0.timestamp() - 3600
+        os.utime(h, (old, old))
+        with self.assertRaisesRegex(DurehError, "predates"):
+            workday.close(self.s, "desk", "x")
+
+    def test_close_refused_while_an_agent_runs(self):
+        self.start_day()
+        self.assertIsNone(self.spawn())
+        hook(self.s, hook_event_name="SubagentStart", agent_type="pm-modules", agent_id="a-pm")
+        self.at(T0 + timedelta(hours=9))
+        workday.end(self.s, "desk", "done", "", [])
+        self.write_handoff()
+        with self.assertRaisesRegex(DurehError, "still running"):
+            workday.close(self.s, "desk", "x")
+
+    def test_close_releases_the_session_job(self):
+        self.end_day()
+        self.write_handoff()
+        fake = self.tmp / "fakebin"
+        fake.mkdir()
+        (fake / "scancel").write_text(f"#!/bin/sh\necho \"$@\" > {fake}/args\n")
+        (fake / "scancel").chmod(0o755)
+        cfg = json.loads((self.site_root / "config.json").read_text())
+        cfg["env"] = {"path_prepend": [str(fake)]}
+        (self.site_root / "config.json").write_text(json.dumps(cfg))
+        self.s = self.site()
+        from dureh_core.records import Ledger
+        Ledger(self.s).event("session.started", "desk", None, {"job_id": "777"})
+        os.environ["SLURM_JOB_ID"] = "777"
+        try:
+            rec = workday.close(self.s, "desk", "done")
+        finally:
+            os.environ.pop("SLURM_JOB_ID")
+        self.assertTrue(rec["release"]["released"])
+        self.assertEqual((fake / "args").read_text().strip(), "777")
+        self.assertEqual(workday.status(self.s)["phase"], "off-duty")
+
+    def test_close_never_cancels_a_job_dureh_did_not_start(self):
+        # Director, 2026-10-03: dureh may release only company session jobs it started; tests never
+        # name the real session (helpers.SiteCase drops SLURM_JOB_ID; ids here are made up).
+        self.end_day()
+        self.write_handoff()
+        fake = self.tmp / "fakebin"
+        fake.mkdir()
+        (fake / "scancel").write_text(f"#!/bin/sh\necho \"$@\" > {fake}/args\n")
+        (fake / "scancel").chmod(0o755)
+        cfg = json.loads((self.site_root / "config.json").read_text())
+        cfg["env"] = {"path_prepend": [str(fake)]}
+        (self.site_root / "config.json").write_text(json.dumps(cfg))
+        self.s = self.site()
+        os.environ["SLURM_JOB_ID"] = "424242"
+        try:
+            rec = workday.close(self.s, "desk", "done")
+        finally:
+            os.environ.pop("SLURM_JOB_ID")
+        self.assertFalse(rec["release"]["released"])
+        self.assertIn("session.started", rec["release"]["reason"])
+        self.assertFalse((fake / "args").exists())
+        self.assertEqual(workday.status(self.s)["phase"], "off-duty")
+
+    def test_close_outside_a_job_releases_nothing(self):
+        self.end_day()
+        self.write_handoff()
+        os.environ.pop("SLURM_JOB_ID", None)
+        rec = workday.close(self.s, "desk", "done")
+        self.assertFalse(rec["release"]["released"])
+
     def test_desk_instructions_mention_workday(self):
         text = (self.site_root / "CLAUDE.md").read_text()
         self.assertIn("day plan", text)
         self.assertIn("day overtime", text)
         self.assertIn("stay on duty", text)
+        self.assertIn("day close", text)
         self.assertIn("adapter sync --harness <release checkout>", text)
 
 

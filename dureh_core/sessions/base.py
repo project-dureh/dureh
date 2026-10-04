@@ -27,3 +27,12 @@ class SessionRuntime:
     def check(self, site: Site) -> list[str]:
         """Problems that would stop a session from starting here (availability, authentication)."""
         return []
+
+    def release(self, site: Site, job_id: str) -> dict:
+        """End the session job that runs this session, releasing its node (Director, 2026-10-03).
+        Default: the scheduler's cancel for this job id; a runtime may override it."""
+        import subprocess
+
+        proc = subprocess.run(["scancel", str(job_id)], capture_output=True, text=True, timeout=60, env=site.env())
+        return {"job_id": str(job_id), "command": ["scancel", str(job_id)], "exit": proc.returncode,
+                "stderr": (proc.stderr or "").strip()[-300:]}

@@ -390,9 +390,60 @@ def urgent(site: Site, actor: str, items: list[str], memo: str) -> dict:
     return led.event(URGENT, actor, None, {"items": items, "memo": memo, "by": "Director", "until": until})
 
 
+def _handoff_path(site: Site) -> Path:
+    rel = (site.config.get("session") or {}).get("handoff") or "state/memory/handoff.md"
+    p = Path(site.expand(rel))
+    return p if p.is_absolute() else site.root / p
+
+
+def _session_started_here(led: Ledger, job: str | None) -> bool:
+    """True when this site's ledger says dureh started session job `job` (`session.started` with that job_id).
+    Director, 2026-10-03: dureh releases only company session jobs it started; a session (or a test) that merely
+    runs inside some Slurm job, the DUREH team's own above all, must never cancel it."""
+    if not job:
+        return False
+    for e in led.events():
+        if e.get("type") != "session.started":
+            continue
+        data = e.get("payload") or e.get("data") or {}
+        if str(data.get("job_id")) == str(job):
+            return True
+    return False
+
+
 def close(site: Site, actor: str, note: str) -> dict:
+    """Close the day: everything idle, the handoff written after today's approval, then leave.
+    Inside a session job (SLURM_JOB_ID) the runtime releases the node (Director, 2026-10-03)."""
+    from .ops import status as site_status
+    from .upstream import _live_agents
+
     _require_on(site)
     d = day(site)
     if d["phase"] not in ("overtime", "off-duty") or not d.get("report"):
         fail(f"close a day after its end report (phase {d['phase']})")
-    return Ledger(site).event("day.closed", actor, None, {"note": note}, [d["plan"]])
+    live = _live_agents(site_status(site))
+    if live:
+        fail(f"agents are still running or starting ({', '.join(live)}); close the day when everything is idle")
+    handoff = _handoff_path(site)
+    if not handoff.is_file():
+        fail(f"write the handoff first: {handoff} does not exist")
+    approved = _parse(d["start"]).timestamp()
+    if handoff.stat().st_mtime < approved:
+        fail(f"the handoff {handoff} predates today's approval ({d['start']}); update it before closing")
+    led = Ledger(site)
+    rec = led.event("day.closed", actor, None, {"note": note, "idle": True, "handoff": str(handoff)}, [d["plan"]])
+    job = os.environ.get("SLURM_JOB_ID")
+    release_on = (site.config.get("session") or {}).get("release_on_close", True)
+    owned = _session_started_here(led, job)
+    if not job or not release_on or not owned:
+        reason = ("not running in a session job" if not job else
+                  "release_on_close is off" if not release_on else
+                  f"job {job} has no session.started record; dureh cancels only jobs it started")
+        out = {"released": False, "reason": reason, "job_id": job}
+        led.event("session.released", actor, None, out, [rec["id"]])
+        return {**rec, "release": out}
+    from . import sessions
+
+    out = {"released": True, **sessions.get(site).release(site, job)}
+    led.event("session.released", actor, None, out, [rec["id"]])
+    return {**rec, "release": out}

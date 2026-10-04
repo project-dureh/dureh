@@ -9,9 +9,10 @@ from ..site import Site
 from ..util import fail
 from .base import PURPOSES, SessionRuntime
 
-DEFAULTS = {"runtime": "claude-code", "command": ["claude"],
-            "options": {"permission_mode": "auto", "remote": True},
-            "flags": {"permission_mode": "--permission-mode", "remote": "--remote"}}
+# Director (2026-10-03): a session the Director can talk to is `claude remote-control`, in auto mode.
+DEFAULTS = {"runtime": "claude-code", "command": ["claude", "remote-control"],
+            "options": {"permission_mode": "auto"},
+            "flags": {"permission_mode": "--permission-mode"}}
 
 
 def settings(site: Site) -> dict:
