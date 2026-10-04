@@ -11,6 +11,7 @@ from helpers import SiteCase
 from dureh_core import cluster, ops, sessions, workday
 from dureh_core import workflow as wf
 from dureh_core.cli import main
+from dureh_core.org import HARNESS_ROOT
 from dureh_core.records import Ledger
 from dureh_core.util import DurehError
 
@@ -169,6 +170,38 @@ class ClusterSession(SiteCase):
         self.config(workday={"overtime_hours": 2},
                     cluster={"partitions": {"general": {"time_limit": "04:00:00"}}})
         self.assertIn("time limit 04:00:00 is shorter", sessions.plan(self.s))
+
+    def test_session_script_exports_the_pinned_harness(self):
+        # 2026-10-04: the first live script exported the upstream clone (the tree running `session start`) while
+        # the site ran releases/dureh-r2026.10.03-14; DUREH_ROOT must be config.json harness.root
+        pinned = self.tmp / "releases" / "dureh-r2026.10.03-14"
+        pinned.mkdir(parents=True)
+        self.config(harness={"root": str(pinned)})
+        self.assertEqual(self.s.pinned_harness_root, pinned)
+        self.assertEqual(self.s.harness_root, HARNESS_ROOT)  # the running tree is still what D1 compares against
+        for running in (None, str(HARNESS_ROOT), str(pinned)):  # whatever DUREH_ROOT the caller's shell carries
+            if running is None:
+                os.environ.pop("DUREH_ROOT", None)
+            else:
+                os.environ["DUREH_ROOT"] = running
+            out = sessions.plan(self.s)
+            self.assertIn(f"\nexport DUREH_ROOT={pinned}\n", out, f"caller DUREH_ROOT={running}")
+            self.assertIn(f"\nexport DUREH_SITE={self.site_root}\n", out)
+            self.assertNotIn(f"export DUREH_ROOT={HARNESS_ROOT}\n", out)
+            self.assertIn(f"# harness: {pinned} (config.json harness.root; exported as DUREH_ROOT)\n", out)
+        rc, out = self.cli("site", "session", "plan")
+        self.assertIn(f"\nexport DUREH_ROOT={pinned}\n", out)
+
+    def test_session_script_exports_the_running_harness_when_none_is_pinned(self):
+        cfg = json.loads((self.site_root / "config.json").read_text())
+        self.assertEqual(cfg["harness"]["root"], str(HARNESS_ROOT))  # install pins the installing tree
+        self.assertIn(f"\nexport DUREH_ROOT={HARNESS_ROOT}\n", sessions.plan(self.s))
+        del cfg["harness"]
+        (self.site_root / "config.json").write_text(json.dumps(cfg, indent=2))
+        self.s = self.site()
+        self.assertEqual(self.s.pinned_harness_root, HARNESS_ROOT)
+        os.environ["DUREH_ROOT"] = str(HARNESS_ROOT)  # already in the caller's environment: still exported
+        self.assertIn(f"\nexport DUREH_ROOT={HARNESS_ROOT}\n", sessions.plan(self.s))
 
     # ------------------------------------------------------------ submit check against the day
     def _on_duty(self):

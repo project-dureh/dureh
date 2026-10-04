@@ -51,7 +51,8 @@ def _build(site: Site, purpose: str) -> dict:
     head += [f"#SBATCH --time={cluster.hms(wall)}", f"#SBATCH --chdir={site.root}",
              f"#SBATCH --output={logs}/%x-%j.out", f"#SBATCH --error={logs}/%x-%j.err",
              f"# dureh site session: {rt.name} session, purpose {purpose}, workday {hours:g} h, wall time "
-             f"{cluster.hms(wall)} (day + overtime allowance, within 24 h); the 8-hour day is kept by `dureh day`"]
+             f"{cluster.hms(wall)} (day + overtime allowance, within 24 h); the 8-hour day is kept by `dureh day`",
+             f"# harness: {site.pinned_harness_root} (config.json harness.root; exported as DUREH_ROOT)"]
     problems = list(rt.check(site))
     notes = list(problems)
     part = prof["partitions"].get(partition) if partition else None

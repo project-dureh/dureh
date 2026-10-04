@@ -11,7 +11,9 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    script without submitting; `dureh site session status` shows the last started job, its squeue state and the
    day, read-only). It records `session.started` (job_id, submitted_at, wall_time, purpose); the clock runs
    from that submission, whatever the hour. Without such a record (a manual start) the fallback is the
-   config window `workday.start`/`workday.end` when set, else the approval time plus the hours.
+   config window `workday.start`/`workday.end` when set, else the approval time plus the hours. The script
+   exports the site's pinned harness (config.json `harness.root`) as `DUREH_ROOT`, whichever tree runs the
+   command.
 1. **Start.** The desk reports a plan to the Director (goal, work items, order, expected usage) and
    records it: `dureh day plan --goal ... --file plan.md`.
 2. **Approval.** When the Director approves, the desk records the Director's words:

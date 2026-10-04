@@ -21,8 +21,13 @@ class SessionRuntime:
         raise NotImplementedError
 
     def env(self, site: Site) -> dict:
-        """Variables the session needs beyond the caller's environment (site, harness, config env)."""
-        return {k: v for k, v in site.env().items() if os.environ.get(k) != v}
+        """Variables the session needs beyond the caller's environment (site, harness, config env). DUREH_SITE and
+        DUREH_ROOT are always exported, and DUREH_ROOT is the site's pinned harness (config.json `harness.root`),
+        not whichever tree runs `session start`: the first live script (2026-10-04) exported the upstream clone
+        while the site ran a release checkout."""
+        env = site.env()
+        env["DUREH_ROOT"] = str(site.pinned_harness_root)
+        return {k: v for k, v in env.items() if k in ("DUREH_SITE", "DUREH_ROOT") or os.environ.get(k) != v}
 
     def check(self, site: Site) -> list[str]:
         """Problems that would stop a session from starting here (availability, authentication)."""

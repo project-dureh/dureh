@@ -53,7 +53,18 @@ class Site:
 
     @property
     def harness_root(self) -> Path:
+        """The harness tree this command runs from."""
         return HARNESS_ROOT
+
+    @property
+    def pinned_harness_root(self) -> Path:
+        """The harness the site is installed on: config.json `harness.root` when set (D1, `adapter sync`), else
+        the running tree. What a session job must export as DUREH_ROOT, whichever tree runs `session start`."""
+        named = (self.config.get("harness") or {}).get("root")
+        if not named:
+            return HARNESS_ROOT
+        p = Path(self.expand(named))  # as written: a release checkout path stays the path the site was synced to
+        return p if p.is_absolute() else self.root / p
 
     @property
     def site_id(self) -> str:
