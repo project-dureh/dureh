@@ -133,6 +133,7 @@ def _agent_file(site: Site, role, project: str | None = None) -> str:
             f"- Write only: {', '.join(scopes) if scopes else 'no files (records through dureh tools only)'}."
             " Inside a WI worktree, paths are relative to the work item target.",
             "- Reference paths are read-only. Heavy computation runs only through the scheduler, never in the session.",
+            TESTS_RULE,
             "- A missing expected input is a failure: report the exact missing path instead of producing an empty result.",
             f"- Use `{dureh}` for records; the hook sets your identity. Do not pass --actor.",
             "- Use only the context in your brief. If you need more, stop and say what is missing.",
@@ -140,7 +141,10 @@ def _agent_file(site: Site, role, project: str | None = None) -> str:
         ]
         extra = {
             "checker": [f"- Your job: `{dureh} verify --wi <WI>` for the item in your brief. It checks ownership, declared"
-                        " outputs, and declared checks, and records the result. Report its numbers; never fix the artifact."],
+                        " outputs, and declared checks, and records the result. Report its numbers; never fix the artifact.",
+                        "- The declared checks run as one scheduler job (the command submits it, waits for it and records the"
+                        " job id and state); never run them, a test suite or `pytest` yourself in the session, and never pass"
+                        " `--local` unless your brief says so."],
             "pipeline-runner": [f"- Submit every computation with `{dureh} slurm submit --wi <WI> --script <job.sh>` and"
                                 f" follow it with `{dureh} slurm wait --run <run-id>`. Never run heavy tools in the session.",
                                 f"- {SUBJECT_RULE} Items are `sub-<label>` (or `sub-<label>_ses-<label>` for session-level jobs);"
@@ -183,6 +187,10 @@ def _item_names_text(site: Site) -> str:
     return ", ".join(f"`${v}` ({what[k]})" for k, v in n.items())
 
 
+TESTS_RULE = ("- Test suites are scheduler work too: never run `pytest`, `python -m unittest discover` or a module's test"
+              " suite in the session (one session hit its memory limit this way). The WI's declared checks run as one"
+              " scheduler job when the checker runs `dureh verify --wi <WI>`; other computation goes through"
+              " `dureh slurm submit`. Commit, stage, and let the check job report.")
 SUBJECT_RULE = ("Submit one job per subject with `slurm submit --each <subjects>` (all subjects at once, no cap); during"
                 " development one array per step, the next step with `--after <run>`; a chained workflow is one array over"
                 " subjects; group-level steps as separate jobs `--after` the subject array; never loop submits by hand.")
@@ -222,6 +230,9 @@ def _claude_md(site: Site) -> str:
               " A bundle is a manager-owned item; its children set `--parent`."
               " `--check` commands run with the WI worktree (the target repository's root) as the working directory, or the target root when the role has no worktree;"
               " `$DUREH_TARGET_ROOT` is the target's main tree and `$DUREH_SITE` the site. `--output` paths are relative to that same working directory."
+              f" The checker's `{dureh} verify --wi <WI>` runs the declared checks as ONE scheduler job (config `checks.runner`: `slurm` by default where `sbatch` exists,"
+              " `checks.time`, `checks.sbatch_args`; logs under `logs/slurm/<WI>/verify-*`) and waits for it; `--local` is the escape hatch for a machine without a scheduler."
+              " Nobody runs a module's test suite (`pytest`, `unittest discover`) in the session: tests are checks or `slurm submit` jobs."
               " Place each output inside the owning role's write scope (see `.claude/agents/<role>.md`).",
               f"2. Gate 1: show the plan to the Director. Only after the Director approves, run `{dureh} wi approve --wi <WI> --memo \"<Director's words>\"`.",
               f"3. Dispatch: `{dureh} dispatch brief --wi <WI>`, then use the Agent tool with `subagent_type` = the named role and the printed brief as the whole prompt."

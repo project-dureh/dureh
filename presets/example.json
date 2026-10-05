@@ -18,6 +18,7 @@
   },
   "waiver_days": 31,
   "slurm": {"account": null, "partition": "general", "time": "01:00:00"},
+  "checks": {"runner": "slurm", "time": "01:00:00", "sbatch_args": []},
   "push": {"allowed_remotes": []},
   "state": {"backend": "git", "ria": null},
   "env": {"path_prepend": []}

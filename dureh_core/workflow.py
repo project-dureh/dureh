@@ -523,7 +523,121 @@ def env_repair(site: Site, actor: str, target: str) -> dict:
     return r
 
 
-def verify_wi(site: Site, actor: str, wi: str, timeout: int = 1800) -> dict:
+CHECK_RUNNERS = ("slurm", "local")
+CHECKS_TIME_DEFAULT = "01:00:00"
+
+
+def checks_runner(site: Site) -> str:
+    """Where `verify --wi` runs the declared checks: config `checks.runner` (slurm|local). Without it: slurm
+    when the site has a scheduler (a `cluster` profile or `slurm` settings) and `sbatch` is on the site's
+    PATH, else local (tests and installs without a cluster keep working)."""
+    cfg = site.config.get("checks") or {}
+    runner = cfg.get("runner")
+    if runner in CHECK_RUNNERS:
+        return runner
+    if runner:
+        fail(f"config checks.runner must be one of {', '.join(CHECK_RUNNERS)}, not {runner!r}")
+    scheduler = bool(site.config.get("cluster")) or any((site.config.get("slurm") or {}).values())
+    return "slurm" if scheduler and shutil.which("sbatch", path=site.env().get("PATH")) else "local"
+
+
+def _checks_env(site: Site, wi: str, cwd: Path, troot: Path) -> dict:
+    return {**site.env(), "PYTHONDONTWRITEBYTECODE": "1", "DUREH_WORK_ROOT": str(cwd),
+            "DUREH_TARGET_ROOT": str(troot), "DUREH_WI": wi}
+
+
+def _run_checks_local(site: Site, wi: str, cwd: Path, troot: Path, checks: list[str], timeout: int) -> list[dict]:
+    results = []
+    env = _checks_env(site, wi, cwd, troot)
+    for cmd in checks:
+        t0 = time.monotonic()
+        try:
+            proc = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env)
+            rc, out = proc.returncode, (proc.stdout + proc.stderr)[-2000:]
+        except subprocess.TimeoutExpired:
+            rc, out = "timeout", ""
+        results.append({"command": cmd, "exit": rc, "seconds": round(time.monotonic() - t0, 2), "tail": out})
+    return results
+
+
+def _checks_script(wi: str, cwd: Path, troot: Path, site_root: Path, prefix: Path, checks: list[str]) -> str:
+    """One job script: cd into the work root, export the same variables as the in-session run, then run each
+    declared check through `sh -c` (as `subprocess.run(shell=True)` does), keeping its exit code, wall time
+    and combined output in files next to the job log (`<prefix>.check<i>.{exit,ms,out}`)."""
+    import shlex
+
+    lines = ["#!/bin/bash", f"# DUREH verify {wi}: declared checks as one scheduler job (generated)",
+             f"cd {shlex.quote(str(cwd))} || exit 96",
+             f"export PYTHONDONTWRITEBYTECODE=1 DUREH_SITE={shlex.quote(str(site_root))} DUREH_WORK_ROOT={shlex.quote(str(cwd))}"
+             f" DUREH_TARGET_ROOT={shlex.quote(str(troot))} DUREH_WI={shlex.quote(wi)}",
+             "unset DUREH_ACTOR DUREH_AGENT_ID", "status=0"]
+    for i, cmd in enumerate(checks, 1):
+        out = shlex.quote(f"{prefix}.check{i}")
+        lines += [f"echo '+ check {i}:' {shlex.quote(cmd)}", "t0=$(date +%s%N)",
+                  f"sh -c {shlex.quote(cmd)} > {out}.out 2>&1", "rc=$?", "t1=$(date +%s%N)",
+                  f'echo "$rc" > {out}.exit', f"echo $(( (t1 - t0) / 1000000 )) > {out}.ms",
+                  'echo "  exit $rc"', '[ "$rc" -eq 0 ] || status=1']
+    lines.append("exit $status")
+    return "\n".join(lines) + "\n"
+
+
+def _run_checks_slurm(site: Site, wi: str, cwd: Path, troot: Path, checks: list[str]) -> tuple[list[dict], dict]:
+    """Submit the declared checks as one Slurm job (cwd = the work root, the site's environment), wait for it
+    like `slurm wait`, and read the per-check results back. Returns (results, job)."""
+    from . import cluster, ops
+    from .util import utc_compact
+
+    cfg = site.config.get("checks") or {}
+    slurm = site.config.get("slurm") or {}
+    logs = site.root / "logs" / "slurm" / wi
+    logs.mkdir(parents=True, exist_ok=True)
+    prefix = logs / f"verify-{utc_compact()}"
+    script = Path(f"{prefix}.sh")
+    script.write_text(_checks_script(wi, cwd, troot, site.root, prefix, checks), encoding="utf-8")
+    script.chmod(0o755)
+    wall = str(cfg.get("time") or slurm.get("time") or CHECKS_TIME_DEFAULT)
+    cmd = ["sbatch", "--parsable", f"--job-name=dureh-verify-{wi}", f"--time={wall}", f"--chdir={cwd}",
+           "--export=ALL", f"--output={prefix}.out", f"--error={prefix}.err"]
+    for key, flag in (("account", "--account"), ("partition", "--partition")):
+        if slurm.get(key):
+            cmd.append(f"{flag}={slurm[key]}")
+    cmd += [str(a) for a in (cfg.get("sbatch_args") or [])] + [str(script)]
+    env = _checks_env(site, wi, cwd, troot)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
+    except (OSError, subprocess.SubprocessError) as exc:
+        fail(f"{wi}: cannot submit the checks as a scheduler job ({exc}); nothing was recorded. Set config"
+             " checks.runner to local or run `dureh verify --wi ... --local` on a machine without a scheduler")
+    if proc.returncode != 0:
+        fail(f"{wi}: sbatch failed for the checks job: {proc.stderr.strip()[-2000:]}; nothing was recorded. Set config"
+             " checks.runner to local or run `dureh verify --wi ... --local` on a machine without a scheduler")
+    job_id = proc.stdout.strip().split(";")[0]
+    limit = cluster.parse_time(wall)
+    wait = int(cfg.get("wait") or ((limit.total_seconds() if limit else 3600) + 900))
+    interval = int(cfg.get("interval") or 15)
+    t0 = time.monotonic()
+    state, raw, final = ops.wait_job(site, job_id, wait, interval)
+    if not final:
+        subprocess.run(["scancel", job_id], capture_output=True, text=True, timeout=60, env=site.env())
+        state = f"{state} (not finished after {wait} s; cancelled)"
+    results = []
+    for i, check in enumerate(checks, 1):
+        base = Path(f"{prefix}.check{i}")
+        exit_file, ms_file, out_file = Path(f"{base}.exit"), Path(f"{base}.ms"), Path(f"{base}.out")
+        if exit_file.is_file() and exit_file.read_text().strip().lstrip("-").isdigit():
+            rc = int(exit_file.read_text().strip())
+            ms = ms_file.read_text().strip() if ms_file.is_file() else ""
+            seconds = round(int(ms) / 1000, 2) if ms.isdigit() else None
+            tail = out_file.read_text(encoding="utf-8", errors="replace")[-2000:] if out_file.is_file() else ""
+        else:
+            rc, seconds, tail = "not-run", None, f"no result from job {job_id} ({state})"
+        results.append({"command": check, "exit": rc, "seconds": seconds, "tail": tail})
+    job = {"job_id": job_id, "state": state, "raw": raw, "script": str(script), "log_out": f"{prefix}.out",
+           "log_err": f"{prefix}.err", "command": cmd, "time": wall, "waited_seconds": round(time.monotonic() - t0, 2)}
+    return results, job
+
+
+def verify_wi(site: Site, actor: str, wi: str, timeout: int = 1800, local: bool = False) -> dict:
     led = Ledger(site)
     org = site.org
     if actor not in ("checker", "desk"):
@@ -547,29 +661,32 @@ def verify_wi(site: Site, actor: str, wi: str, timeout: int = 1800) -> dict:
         fail(f"{wi}: stale virtualenv in {cwd}/.venv (its scripts name {stale}, which does not exist); checks would run"
              f" another environment. Repair first: `dureh worktree repair --wi {wi}`. Nothing was recorded.")
     missing = [o for o in p.get("outputs", []) if not (Path(cwd) / o).exists()]  # the work root only
-    for cmd in p.get("checks") or []:
-        t0 = time.monotonic()
-        try:
-            env = {**site.env(), "PYTHONDONTWRITEBYTECODE": "1", "DUREH_WORK_ROOT": str(cwd),
-                   "DUREH_TARGET_ROOT": str(troot), "DUREH_WI": wi}
-            proc = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env)
-            rc, out = proc.returncode, (proc.stdout + proc.stderr)[-2000:]
-        except subprocess.TimeoutExpired:
-            rc, out = "timeout", ""
-        results.append({"command": cmd, "exit": rc, "seconds": round(time.monotonic() - t0, 2), "tail": out})
+    checks = list(p.get("checks") or [])
+    runner = "local" if local else checks_runner(site)  # release 27: checks are a scheduler job, not session work
+    job = None
+    if checks and runner == "slurm":
+        results, job = _run_checks_slurm(site, wi, cwd, troot, checks)
+    elif checks:
+        results = _run_checks_local(site, wi, cwd, troot, checks, timeout)
     hashes = {}
     for x in paths:
         f = Path(cwd) / x
         if f.is_file() and not f.is_symlink():
             hashes[x] = sha256_file(f)
     passed = not violations and not missing and all(r["exit"] == 0 for r in results)
-    if not p.get("checks"):
+    if not checks:
         note = "no declared checks; only ownership and declared outputs were verified"
     else:
         note = f"{sum(r['exit'] == 0 for r in results)}/{len(results)} declared checks passed"
+        if job:
+            note += f" (scheduler job {job['job_id']}: {job['state']})"
     payload = {"result": "pass" if passed else "fail", "head": head, "changed": paths, "violations": violations,
                "missing_outputs": missing, "checks": results, "artifact_sha256": hashes,
-               "seconds": round(time.monotonic() - start, 2), "note": note}
+               "seconds": round(time.monotonic() - start, 2), "note": note, "runner": runner}
+    if local:
+        payload["runner_override"] = True
+    if job:
+        payload["job"] = job
     run = led.append("run", "verify", actor, wi, {"run_type": "verify", "status": payload["result"], **payload})
     led.event("verification.recorded", actor, wi, {"result": payload["result"], "run": run["id"], "head": head}, [run["id"]])
     if passed:

@@ -25,7 +25,7 @@ Installation requires an absent or empty destination and a startup package with 
 | status | SubagentStart/Stop record `agent.started`, `agent.finished`, and an agent run with transcript token usage. |
 | session | SessionStart injects persona, handoff, status, and checks; SessionEnd records the session and saves state. |
 
-Hooks and the path checks are workflow controls. They are not an operating-system sandbox: a program started from an allowed command can still write where the user account can write. Verification at promotion (`dureh verify --wi`) re-checks every changed, untracked, and ignored path in the WI worktree against the owner role.
+Hooks and the path checks are workflow controls. They are not an operating-system sandbox: a program started from an allowed command can still write where the user account can write. Verification at promotion (`dureh verify --wi`) re-checks every changed, untracked, and ignored path in the WI worktree against the owner role and runs the declared checks as one scheduler job (config `checks.runner`, docs/slurm.md; `--local` for a machine without a scheduler).
 
 ## Tools
 

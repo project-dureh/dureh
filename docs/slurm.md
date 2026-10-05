@@ -13,6 +13,42 @@ Without `--module`, `submit` works as before: the job script is submitted as it 
 target, logs under `logs/slurm/<WI>/` unless the script chooses its own, config `slurm.time` as the fallback
 `--time`, the workday start check) and a `run` record is written.
 
+## Declared checks as one scheduler job: `dureh verify --wi` (release 27)
+
+Director's rule (2026-10-04): checks and module test suites are scheduler work, never session work. Evidence:
+the company's session job reached MaxRSS 16.8 GB of 16 GB from about 20 module test runs inside the session.
+
+```
+dureh verify --wi <WI> [--local]
+```
+
+- **Runner.** Config `checks.runner`: `slurm` or `local`. Without it: `slurm` when the site has a scheduler
+  (a `cluster` profile or any `slurm` setting) and `sbatch` is on the site's PATH, else `local` (tests and
+  installs without a cluster keep working). `--local` runs the checks in the calling process whatever the
+  config says (escape hatch; recorded as `runner_override: true`).
+- **Job.** ONE job per verification: `sbatch --parsable --job-name=dureh-verify-<WI> --time=<checks.time, else
+  slurm.time, else 01:00:00> --chdir=<work root> --export=ALL [--account/--partition from slurm]
+  [checks.sbatch_args...] logs/slurm/<WI>/verify-<utc ts>.sh`. The work root is the WI worktree (the target root
+  when the role has none), the environment the site's (`site.env()`, `PYTHONDONTWRITEBYTECODE=1`,
+  `DUREH_WORK_ROOT`, `DUREH_TARGET_ROOT`, `DUREH_WI`, `DUREH_SITE`), as the in-session run had. The generated
+  script runs each declared check through `sh -c` and writes `verify-<ts>.check<i>.{exit,ms,out}` next to the job
+  log `verify-<ts>.out|.err`. No workday start check: the checker gate already governs checking.
+- **Wait.** The command polls `sacct` like `slurm wait` (`checks.interval` seconds, default 15) until the job is
+  terminal or `checks.wait` seconds passed (default: the time limit plus 15 minutes); then it cancels the job
+  (`scancel`) and records the state as not finished.
+- **Record.** The verify `run` record and the printed result carry `runner` and `job: {job_id, state, raw,
+  script, log_out, log_err, command, time, waited_seconds}`; each check has `exit` (an integer, or `not-run`
+  when the job ended without running it, for example OUT_OF_MEMORY or TIMEOUT), `seconds` and `tail`. The note
+  reads `n/m declared checks passed (scheduler job <id>: <state>)`.
+- **Refusals.** A failed `sbatch` (or no `sbatch` at all under `checks.runner: slurm`) records nothing and says so;
+  fix the config or use `--local` on a machine without a scheduler. Without declared checks nothing is submitted.
+- **Migration.** A site with `slurm.account`/`partition` and `sbatch` on its PATH needs no config change; add
+  `"checks": {"runner": "slurm", "time": "00:30:00", "sbatch_args": ["--mem=8G"]}` to pin memory or time.
+
+Agents: the generated role files say that test suites (`pytest`, `unittest discover`) never run in the session;
+the checker's `verify --wi` runs the declared checks as this job and other computation goes through
+`slurm submit`.
+
 ## One job per subject: `--each`, `--after`, `--resubmit-failed` (release 26)
 
 Director's rule (2026-10-04): the unit of submission is one job per subject, all subjects submitted at once, and

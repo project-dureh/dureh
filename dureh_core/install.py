@@ -112,6 +112,7 @@ def _config(site: Path, manifest: dict, startup: Path, preset: dict) -> dict:
         "models": models,
         "index": preset.get("index") or {},
         "slurm": preset.get("slurm") or {"account": None, "partition": None, "time": None},
+        "checks": preset.get("checks") or {},
         "push": preset.get("push") or {"allowed_remotes": []},
         "state": preset.get("state") or {"backend": "git", "ria": None},
         "console": preset.get("console") or {"revision": None},

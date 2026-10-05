@@ -212,9 +212,11 @@ def cmd_verify(a):
         fail("verify needs --self, --wi, or --exam")
     from .workflow import verify_wi
 
-    r = verify_wi(_site(a), _actor(a), a.wi)
-    _print({k: r[k] for k in ("result", "note", "changed", "violations", "missing_outputs", "seconds")} |
-           {"checks": [{"command": c["command"], "exit": c["exit"], "seconds": c["seconds"]} for c in r["checks"]]})
+    r = verify_wi(_site(a), _actor(a), a.wi, local=a.local)
+    out = {k: r[k] for k in ("result", "note", "changed", "violations", "missing_outputs", "seconds", "runner")}
+    if r.get("job"):
+        out["job"] = {k: r["job"][k] for k in ("job_id", "state", "log_out", "waited_seconds")}
+    _print(out | {"checks": [{"command": c["command"], "exit": c["exit"], "seconds": c["seconds"]} for c in r["checks"]]})
     if r["result"] != "pass":
         raise SystemExit(1)
 
@@ -644,10 +646,13 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--reason", required=True)
     x.add_argument("--actor")
 
-    x = add(sub, "verify", cmd_verify, "self-test, per-WI verification, or exam scoring")
+    x = add(sub, "verify", cmd_verify, "self-test, per-WI verification (declared checks as one scheduler job), or exam scoring")
     x.add_argument("--self", action="store_true")
     x.add_argument("--skip-unit", action="store_true")
     x.add_argument("--wi")
+    x.add_argument("--local", action="store_true",
+                   help="with --wi: run the declared checks in this process instead of a scheduler job "
+                        "(escape hatch; the default is config checks.runner: slurm where sbatch exists, else local)")
     x.add_argument("--exam", help="role whose exam to score")
     x.add_argument("--task")
     x.add_argument("--answers")

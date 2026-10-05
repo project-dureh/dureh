@@ -556,6 +556,28 @@ def _record_array(site: Site, led: Ledger, actor: str, run: dict, st: dict, wait
     return ev
 
 
+def job_state(site: Site, job: str) -> tuple[str, str]:
+    """(state, raw line) of one job from `sacct -n -P -X -j <job> --format=State,ExitCode,Elapsed`;
+    ("UNKNOWN", "") when accounting has nothing yet."""
+    proc = subprocess.run(["sacct", "-n", "-P", "-X", "-j", job, "--format=State,ExitCode,Elapsed"],
+                          capture_output=True, text=True, timeout=60, env=site.env())
+    line = (proc.stdout.strip().splitlines() or [""])[0]
+    return (line.split("|")[0] if line else "UNKNOWN"), line
+
+
+def wait_job(site: Site, job: str, timeout: int, interval: int) -> tuple[str, str, bool]:
+    """Poll one job until a terminal state or the timeout: (state, raw line, final)."""
+    import time
+
+    deadline = time.monotonic() + max(0, timeout)
+    while True:
+        state, line = job_state(site, job)
+        if state.split()[0] in TERMINAL_STATES or time.monotonic() >= deadline:
+            break
+        time.sleep(max(1, min(interval, deadline - time.monotonic())))
+    return state, line, state.split()[0] in TERMINAL_STATES
+
+
 def slurm_status(site: Site, actor: str, run_id: str) -> dict:
     led = Ledger(site)
     run = _get_run(led, run_id)
@@ -564,10 +586,7 @@ def slurm_status(site: Site, actor: str, run_id: str) -> dict:
         fail(f"{run_id} has no scheduler job id")
     if run["payload"].get("array"):
         return _record_array(site, led, actor, run, _array_status(site, run), waited=False)
-    proc = subprocess.run(["sacct", "-n", "-P", "-X", "-j", job, "--format=State,ExitCode,Elapsed"],
-                          capture_output=True, text=True, timeout=60, env=site.env())
-    line = (proc.stdout.strip().splitlines() or [""])[0]
-    state = line.split("|")[0] if line else "UNKNOWN"
+    state, line = job_state(site, job)
     ev = led.event("run.status", actor if actor in ("pipeline-runner", "desk") else "desk", run["wi"],
                    {"run": run_id, "job_id": job, "scheduler_state": state, "raw": line}, [run_id])
     return ev
@@ -596,15 +615,7 @@ def slurm_wait(site: Site, actor: str, run_id: str, timeout: int = 3600, interva
         if not st["final"]:
             ev["note"] = f"still {st['scheduler_state']} ({st['counts']}) after {timeout} s; wait again or check later"
         return ev
-    while True:
-        proc = subprocess.run(["sacct", "-n", "-P", "-X", "-j", job, "--format=State,ExitCode,Elapsed"],
-                              capture_output=True, text=True, timeout=60, env=site.env())
-        line = (proc.stdout.strip().splitlines() or [""])[0]
-        state = line.split("|")[0] if line else "UNKNOWN"
-        if state.split()[0] in TERMINAL_STATES or time.monotonic() >= deadline:
-            break
-        time.sleep(max(1, min(interval, deadline - time.monotonic())))
-    final = state.split()[0] in TERMINAL_STATES
+    state, line, final = wait_job(site, job, int(max(0, deadline - time.monotonic())), interval)
     ev = led.event("run.status", actor if actor in ("pipeline-runner", "desk") else "desk", run["wi"],
                    {"run": run_id, "job_id": job, "scheduler_state": state, "raw": line,
                     "waited": True, "final": final}, [run_id])
