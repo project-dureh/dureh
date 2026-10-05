@@ -75,7 +75,11 @@ commit this site recorded for that WI.
 ## Mailbox (DUREH-Exchange)
 
 When the Director sets `config.json` `"upstream": {"exchange": "<dir>"}` (environment variables allowed,
-for example `"$HOME/DUREH-Exchange"`), messages travel through `<dir>/<site>/` instead of copy and paste:
+for example `"$HOME/DUREH-Exchange"`), messages travel through `<dir>/<mailbox>/` instead of copy and paste.
+The mailbox name is `upstream.mailbox` when set, else the site folder name; it is also the `site:` header of
+each message and the label in `usage-budget.json`. Pin it before renaming the site folder so the mailbox
+stays where it is.
+
 
 - `dureh upstream send` writes the `upstream message` text to `to-upstream/` and keeps a `FORWARD-*` copy
   in `notes/upstream/`; `--kind idle` reports the site idle for a merge window and is refused while an

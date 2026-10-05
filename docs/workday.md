@@ -9,7 +9,9 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
 
 0. **Session.** `dureh site session start` submits the session job (`dureh site session plan` prints the same
    script without submitting; `dureh site session status` shows the last started job, its squeue state and the
-   day, read-only). It records `session.started` (job_id, submitted_at, wall_time, purpose); the clock runs
+   day, read-only). The job is named `cc-<name>` (`cc-<name>-<purpose>` for other purposes), its tmux pane log
+   `logs/session/cc-<name>[-purpose]-<job id>.pane.log` and the default Remote Control name `{site}` is `<name>`:
+   config `session.name`, else the site folder name (pin it before renaming the folder). It records `session.started` (job_id, submitted_at, wall_time, purpose); the clock runs
    from that submission, whatever the hour. Without such a record (a manual start) the fallback is the
    config window `workday.start`/`workday.end` when set, else the approval time plus the hours. The script
    exports the site's pinned harness (config.json `harness.root`) as `DUREH_ROOT`, whichever tree runs the

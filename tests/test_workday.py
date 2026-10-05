@@ -202,6 +202,18 @@ class Workday(SiteCase):
         data = json.loads((ex / "usage-budget.json").read_text())
         self.assertAlmostEqual(data["weekly_units"], 10.0)
         self.assertEqual(workday.budget(self.s)["source"], str(ex / "usage-budget.json"))
+        self.assertEqual(data["site"], self.site_root.name)  # default label: the folder name
+
+    def test_shared_budget_label_is_the_pinned_mailbox(self):
+        ex = self.tmp / "exchange"
+        ex.mkdir()
+        cfg = json.loads((self.site_root / "config.json").read_text())
+        cfg["upstream"] = {"exchange": str(ex), "mailbox": "OLD_MAILBOX"}
+        (self.site_root / "config.json").write_text(json.dumps(cfg, indent=2))
+        self.s = self.site()
+        self.spend(2)
+        workday.calibrate(self.s, 20)
+        self.assertEqual(json.loads((ex / "usage-budget.json").read_text())["site"], "OLD_MAILBOX")
 
     def test_decision_records_and_commits(self):
         self.start_day()

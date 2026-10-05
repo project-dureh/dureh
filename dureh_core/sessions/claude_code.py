@@ -12,8 +12,8 @@ from .base import PURPOSES, SessionRuntime
 
 # Director (2026-10-03): a session the Director can talk to is Claude Code's remote control, in auto mode.
 # Measured 2026-10-04 (labs/session-test): the flag form `claude --remote-control <name>` registers from a batch
-# job; the `claude remote-control` subcommand did not. String options are templates: {site} is the site
-# directory name (the default remote-control name), {purpose} the purpose, {name} the desk's name.
+# job; the `claude remote-control` subcommand did not. String options are templates: {site} is the session
+# name (config `session.name`, default the site directory name; the default remote-control name), {purpose} the purpose, {name} the desk's name.
 # First prompt (Director, 2026-10-04), passed last: none for the day's session (`desk`; the DUREH team sends the
 # start message to the booted remote-control session itself); an `overtime` session gets "<name>, 추가근무 출근"
 # with the desk's name from state/persona/persona.json (the registry adapter sync renders into CLAUDE.md),
@@ -54,7 +54,7 @@ class ClaudeCode(SessionRuntime):
         return [k for k, v in st["options"].items() if v not in (False, None) and not st["flags"].get(k)]
 
     def _fields(self, site: Site, purpose: str) -> dict:
-        return {"site": site.root.name, "purpose": purpose, "name": desk_name(site) or DEFAULT_NAME}
+        return {"site": site.session_name, "purpose": purpose, "name": desk_name(site) or DEFAULT_NAME}
 
     def first_prompt(self, site: Site, purpose: str = "desk") -> str | None:
         """The session's default first prompt for this purpose: config `session.prompts.<purpose>` (a template

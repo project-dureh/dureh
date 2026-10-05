@@ -71,6 +71,19 @@ class Site:
         return self.config.get("site", {}).get("id") or "unknown-site"
 
     @property
+    def mailbox_name(self) -> str:
+        """The site's mailbox name at the upstream exchange (`<exchange>/<mailbox>`, the `site:` header of its
+        messages, the usage-budget label): config `upstream.mailbox`, else the site folder name. Pinning it lets
+        the folder be renamed without moving the mailbox."""
+        return str((self.config.get("upstream") or {}).get("mailbox") or self.root.name)
+
+    @property
+    def session_name(self) -> str:
+        """The name of the site's sessions (job `cc-<name>[-purpose]`, pane log, Remote Control `{site}`): config
+        `session.name`, else the site folder name."""
+        return str((self.config.get("session") or {}).get("name") or self.root.name)
+
+    @property
     def observe(self) -> bool:
         return os.environ.get("DUREH_OBSERVE") == "1"
 

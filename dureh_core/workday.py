@@ -486,7 +486,7 @@ def calibrate(site: Site, weekly_percent: float) -> dict:
     f = _exchange_budget_file(site)
     if f:
         tmp = f.with_suffix(".tmp")
-        tmp.write_text(json.dumps({**cal, "by": "Director", "site": site.root.name}, indent=2) + "\n")
+        tmp.write_text(json.dumps({**cal, "by": "Director", "site": site.mailbox_name}, indent=2) + "\n")
         os.replace(tmp, f)
         cal["shared"] = str(f)
     return {**cal, "record": rec["id"]}

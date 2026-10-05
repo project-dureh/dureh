@@ -46,7 +46,7 @@ def _build(site: Site, purpose: str, prompt: str | None = None, no_prompt: bool 
         or next((n for n, p in prof["partitions"].items() if p.get("default")), None)
     account = ss.get("account") or slurm.get("account") or prof.get("account")
     logs = site.root / "logs" / "session"
-    name = f"cc-{site.root.name}" + ("" if purpose == "desk" else f"-{purpose}")
+    name = f"cc-{site.session_name}" + ("" if purpose == "desk" else f"-{purpose}")
     head = ["#!/bin/bash", f"#SBATCH --job-name={name}"]
     for flag, value in (("--account", account), ("--partition", partition), ("--qos", ss.get("qos")),
                         ("--cpus-per-task", ss.get("cpus") or DEFAULT_CPUS), ("--mem", ss.get("mem") or DEFAULT_MEM),

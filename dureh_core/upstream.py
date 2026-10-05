@@ -198,9 +198,9 @@ def message(site: Site) -> str:
                 "status": st, "request": _request_line(text)}
         (new if word == "open" else deferred if word == "deferred" else waiting).append(item)
     if not new and not waiting and not deferred:
-        return f"No open upstream requests at {site.root.name} (harness rev {rev}).\n\n" + "\n".join(_activity(site))
+        return f"No open upstream requests at {site.mailbox_name} (harness rev {rev}).\n\n" + "\n".join(_activity(site))
     new.sort(key=lambda r: (SEVERITY_ORDER.get(r["severity"], 9), r["id"]))
-    lines = [f"Upstream requests from {site.root.name} (site {site.site_id}, harness rev {rev}).",
+    lines = [f"Upstream requests from {site.mailbox_name} (site {site.site_id}, harness rev {rev}).",
              f"Details, evidence and exact diffs: {notes_dir(site)}/<UR>.md", ""]
     n = 0
     if new:
@@ -343,7 +343,7 @@ def exchange_dir(site: Site) -> Path:
     root = Path(site.expand(raw))
     if not root.is_dir():
         fail(f"the upstream exchange {root} does not exist (config.json upstream.exchange)")
-    return root / site.root.name
+    return root / site.mailbox_name
 
 
 def _header(text: str) -> dict:
@@ -405,7 +405,7 @@ def send(site: Site, actor: str, kind: str = "request", body_file: str | None = 
     import secrets
 
     mid = secrets.token_hex(3)
-    text = ("---\n" f"id: {mid}\nsite: {site.root.name}\nfrom: site\nkind: {kind}\nrefs: [{', '.join(refs)}]\n"
+    text = ("---\n" f"id: {mid}\nsite: {site.mailbox_name}\nfrom: site\nkind: {kind}\nrefs: [{', '.join(refs)}]\n"
             f"created: {now.strftime('%Y-%m-%dT%H:%M:%SZ')}\n---\n" + body.rstrip() + "\n")
     box.mkdir(parents=True, exist_ok=True)
     target = box / f"{now.strftime('%Y%m%dT%H%M%SZ')}-{kind}-{mid}.md"
@@ -470,7 +470,7 @@ def collaboration(site: Site) -> dict:
     raw = (site.config.get("upstream") or {}).get("exchange")
     if not raw:
         return out
-    base = Path(site.expand(raw)) / site.root.name
+    base = Path(site.expand(raw)) / site.mailbox_name
     out["exchange"] = str(base)
     incoming = _messages(base / "from-upstream")
     seen = _received(site)
