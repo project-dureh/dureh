@@ -623,7 +623,7 @@ def _run_checks_slurm(site: Site, wi: str, cwd: Path, troot: Path, checks: list[
 
     cfg = site.config.get("checks") or {}
     slurm = site.config.get("slurm") or {}
-    logs = site.root / "logs" / "slurm" / wi
+    logs = ops.wi_log_dir(site, wi)
     logs.mkdir(parents=True, exist_ok=True)
     prefix = logs / f"verify-{utc_compact()}"
     script = Path(f"{prefix}.sh")
@@ -631,11 +631,12 @@ def _run_checks_slurm(site: Site, wi: str, cwd: Path, troot: Path, checks: list[
     script.chmod(0o755)
     wall = str(cfg.get("time") or slurm.get("time") or CHECKS_TIME_DEFAULT)
     cmd = ["sbatch", "--parsable", f"--job-name=dureh-verify-{wi}", f"--time={wall}", f"--chdir={cwd}",
-           "--export=ALL", f"--output={prefix}.out", f"--error={prefix}.err"]
+           "--export=ALL"]
     for key, flag in (("account", "--account"), ("partition", "--partition")):
         if slurm.get(key):
             cmd.append(f"{flag}={slurm[key]}")
-    cmd += [str(a) for a in (cfg.get("sbatch_args") or [])] + [str(script)]
+    # the log options come last so a checks.sbatch_args -o/-e never moves them out of the log dir
+    cmd += [str(a) for a in (cfg.get("sbatch_args") or [])] + [f"--output={prefix}.out", f"--error={prefix}.err", str(script)]
     env = _checks_env(site, wi, cwd, troot)
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
@@ -877,7 +878,11 @@ def _wi_job_logs(site: Site, led: Ledger, wi: str, rec: dict) -> tuple[list[Path
     (not a symlink) and its real directory lies inside the site tree. Returns (files, skipped)."""
     from .ops import _scan_opt, _script_opt
 
+    from .ops import wi_log_dir
+
     site_real = os.path.realpath(site.root)
+    # the configured slurm.log_dir and the release-31 default (items files of older --each runs)
+    log_dirs = {os.path.realpath(wi_log_dir(site, wi)), os.path.realpath(site.root / "logs" / "slurm" / wi)}
     target = rec["payload"].get("target")
     troot = target_root(site, target) if target not in (None, "site", "harness", "package") else None
     found: list[Path] = []
@@ -892,7 +897,7 @@ def _wi_job_logs(site: Site, led: Ledger, wi: str, rec: dict) -> tuple[list[Path
         arr = p.get("array") or {}
         tasks: list[int | None] = list(range(int(arr.get("count") or 0))) if arr else [None]
         for f in (arr.get("items_file"), arr.get("wrapper")):  # --each: the item list and the generated wrapper
-            if f and os.path.realpath(Path(f).parent) == os.path.realpath(site.root / "logs" / "slurm" / wi):
+            if f and os.path.realpath(Path(f).parent) in log_dirs:
                 try:
                     if stat.S_ISREG(os.lstat(f).st_mode) and Path(f) not in found:
                         found.append(Path(f))

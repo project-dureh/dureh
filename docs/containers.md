@@ -44,7 +44,7 @@ dureh container retire --sif <file name> --reason R [--dry-run] [--wi <WI>]
 - Cache: config `containers.cache`, else `env.vars.CAMRI_CONTAINER_CACHE`. The hook refuses every role's
   writes there; only the build job (and `container retire`) changes it.
 - Job: the harness writes `build.sh` in the job directory and submits it with `slurm submit` (run record, logs
-  under `logs/slurm/<WI>/`, workday start check). The job uses node-local `$TMPDIR` as `APPTAINER_TMPDIR`, keeps
+  under `<slurm.log_dir>/<WI>/`, default `logs/slurm`, workday start check). The job uses node-local `$TMPDIR` as `APPTAINER_TMPDIR`, keeps
   the site module's `APPTAINER_CACHEDIR` (or `containers.apptainer_cachedir`), runs
   `apptainer build <containers.build_args, default --fakeroot> <cache>/.<target>.partial-<job> <recipe>`, hashes it,
   writes `<target>.provenance.json`, then `mv -n` to the target. If the target appeared meanwhile the partial is

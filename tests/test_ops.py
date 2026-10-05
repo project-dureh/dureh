@@ -131,8 +131,11 @@ class Ops(SiteCase):
         away = self.tmp / "away"
         away.mkdir()
         own = self.tmp / "own.sh"
-        own.write_text(f"#!/bin/sh\n#SBATCH --output={away}/%x-%j.out\necho hi\n")
-        ops.slurm_submit(s, "desk", w, str(own))
+        # a record from before release 32 whose script named a log outside the site
+        Ledger(s).append("run", "slurm", "desk", w, {
+            "run_type": "slurm", "status": "submitted", "job_id": "4244", "script": str(own),
+            "command": ["sbatch", "--parsable", f"--job-name=dureh-{w}", str(own)],
+            "log_out": f"{away}/%x-%j.out", "log_err": f"{away}/%x-%j.out"})
         (away / f"dureh-{w}-4244.out").write_text("outside the site")
         wf.dispatch_stop(s, "desk", w, "test")
         out = wf.purge(s, "desk", w)
@@ -197,8 +200,12 @@ class Ops(SiteCase):
         self.assertTrue((self.site_root / "logs" / "slurm" / w).is_dir())
         own = self.tmp / "own.sh"
         own.write_text("#!/bin/sh\n#SBATCH --output=/tmp/x.out\necho hi\n")
-        self.assertIsNone(ops.slurm_submit(s, "desk", w, str(own), dry_run=True)["payload"]["logs"])
-        self.assertIsNone(ops.slurm_submit(s, "desk", w, str(script), dry_run=True, extra=["-o", "y.out"])["payload"]["logs"])
+        logs = f"{self.site_root}/logs/slurm/{w}"
+        p = ops.slurm_submit(s, "desk", w, str(own), dry_run=True)["payload"]
+        self.assertEqual((p["logs"], p["log_out"]), (logs, f"{logs}/x.out"))
+        p = ops.slurm_submit(s, "desk", w, str(script), dry_run=True, extra=["-o", "y.out"])["payload"]
+        self.assertEqual(p["log_out"], f"{logs}/y.out")
+        self.assertEqual(p["command"][-2:], [f"--output={logs}/y.out", str(script)])
 
     def test_slurm_wait_records_only_the_final_state(self):
         fake = self.tmp / "fakebin"

@@ -387,14 +387,18 @@ class ClusterSession(SiteCase):
         p = run["payload"]
         self.assertEqual(p["chdir"], str(mod))
         self.assertIn(f"--chdir={mod}", (self.tmp / "sbatch-calls").read_text())
-        self.assertEqual(p["log_out"], f"{mod}/checkpoints/phase-d/%x-%j.out")
+        logs = f"{self.site_root}/logs/slurm/{w}"
+        # release 32: the script's relative -o keeps only its name, inside the site's log dir
+        self.assertEqual(p["log_out"], f"{logs}/%x-%j.out")
         self.assertEqual(p["log_err"], p["log_out"])  # stderr follows -o when no -e is given
+        self.assertIn(f"--output={logs}/%x-%j.out", (self.tmp / "sbatch-calls").read_text())
+        self.assertNotIn("--error=", (self.tmp / "sbatch-calls").read_text())
         own = self.tmp / "own.sh"
         own.write_text(f"#!/bin/sh\n#SBATCH --chdir={self.tmp}\n#SBATCH --output=o.out\n#SBATCH -e e.err\necho hi\n")
         p = ops.slurm_submit(self.s, "desk", w, str(own))["payload"]
         self.assertEqual(p["chdir"], str(self.tmp))
         self.assertNotIn("--chdir", (self.tmp / "sbatch-calls").read_text().splitlines()[-1].replace(str(own), ""))
-        self.assertEqual((p["log_out"], p["log_err"]), (f"{self.tmp}/o.out", f"{self.tmp}/e.err"))
+        self.assertEqual((p["log_out"], p["log_err"]), (f"{logs}/o.out", f"{logs}/e.err"))
 
     def test_submit_site_target_runs_in_site_root_with_our_logs(self):
         w, script = self._job()

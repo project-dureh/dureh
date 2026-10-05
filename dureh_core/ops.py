@@ -565,28 +565,21 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
         cmd.append(f"--array=0-{len(items) - 1}" + (f"%{max_parallel}" if max_parallel else ""))
     if deps:
         cmd.append("--dependency=afterok:" + ":".join(d["job_id"] for d in deps))
-    # relative #SBATCH -o/-e resolve against the job's directory: the WI target, not the agent's shell cwd
+    # the job runs in the WI target, not the agent's shell cwd (its scheduler logs never do: see job_log_paths)
     chdir = _sbatch_opt(path, extra, "-D", "--chdir")
     if chdir is None:
         chdir = str(_job_root(site, rec["payload"].get("target")))
         cmd.append(f"--chdir={chdir}")
     else:
         chdir = os.path.join(os.getcwd(), site.expand(chdir))
-    logs = None
-    site_logs = site.root / "logs" / "slurm" / wi
-    pat = "%x-%A_%a" if items is not None else "%x-%j"
+    site_logs = wi_log_dir(site, wi)
+    logs = site_logs
     warnings = []
-    if not _sets_output(path, extra):
-        # sbatch writes slurm-<job>.out into the submitting directory (a project tree) unless told otherwise
-        logs = site_logs
-        cmd += [f"--output={logs}/{pat}.out", f"--error={logs}/{pat}.err"]
-        log_out, log_err = f"{logs}/{pat}.out", f"{logs}/{pat}.err"
-    else:
-        out = _sbatch_opt(path, extra, "-o", "--output") or "slurm-%j.out"
-        log_out = os.path.join(chdir, out)
-        log_err = os.path.join(chdir, _sbatch_opt(path, extra, "-e", "--error") or out)
-        if items is not None and not any(("%a" in x or "%j" in x) for x in (log_out, log_err)):
-            warnings.append(f"the script's own log names ({log_out}) hold neither %a nor %j: array tasks share one file")
+    is_array = items is not None or _sbatch_opt(path, extra, "-a", "--array") is not None
+    log_out, log_err, log_warn = job_log_paths(site, site_logs, path, extra, is_array)
+    warnings += log_warn
+    # command-line options win over #SBATCH directives: the scheduler logs always land in <log_dir>/<WI>/
+    log_args = [f"--output={log_out}"] + ([f"--error={log_err}"] if log_err != log_out else [])
     array = None
     if items is not None:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -607,9 +600,9 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
     if array is not None and not mod:
         job_file = str(site_logs / (Path(array["items_file"]).stem + ".sbatch"))
         array["wrapper"] = job_file
-    cmd += extra + [job_file]
+    cmd += extra + log_args + [job_file]
     payload = {"run_type": "slurm", "status": "not-run" if dry_run else "submitted", "command": cmd,
-               "script_sha256": sha256_file(path), "script": str(path), "logs": str(logs) if logs else None,
+               "script_sha256": sha256_file(path), "script": str(path), "logs": str(logs),
                "chdir": chdir, "log_out": log_out, "log_err": log_err, "sbatch_args": extra, **(extra_payload or {})}
     if array is not None:
         payload["array"] = array
@@ -648,8 +641,7 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
             raise
         if check is not None:
             payload["start_check"] = check
-        if logs:
-            logs.mkdir(parents=True, exist_ok=True)
+        logs.mkdir(parents=True, exist_ok=True)
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=site.env())
         if proc.returncode != 0:
             payload.update(status="failed", stderr=proc.stderr[-2000:])
@@ -771,6 +763,22 @@ def wait_job(site: Site, job: str, timeout: int, interval: int) -> tuple[str, st
     return state, line, state.split()[0] in TERMINAL_STATES
 
 
+def _log_hint(run: dict) -> dict:
+    """Where the run's scheduler logs are (printed with status/wait; not recorded again): the recorded
+    log_out/log_err with %j/%x (and %A for an array) filled in."""
+    from .workflow import _log_name
+
+    p = run["payload"]
+    job = str(p.get("job_id") or "").split(";")[0].strip()
+    name = _scan_opt([str(w) for w in p.get("command") or []], "-J", "--job-name") or f"dureh-{run['wi']}"
+    out = {}
+    for key in ("log_out", "log_err"):
+        if p.get(key):
+            pat = p[key].replace("%A", "%j") if p.get("array") else p[key]
+            out[key] = (_log_name(pat.replace("%a", "%%a"), job, name) or p[key]) if job else p[key]
+    return out
+
+
 def slurm_status(site: Site, actor: str, run_id: str) -> dict:
     led = Ledger(site)
     run = _get_run(led, run_id)
@@ -778,11 +786,12 @@ def slurm_status(site: Site, actor: str, run_id: str) -> dict:
     if not job:
         fail(f"{run_id} has no scheduler job id")
     if run["payload"].get("array"):
-        return _record_array(site, led, actor, run, _array_status(site, run), waited=False)
-    state, line = job_state(site, job)
-    ev = led.event("run.status", actor if actor in ("pipeline-runner", "desk") else "desk", run["wi"],
-                   {"run": run_id, "job_id": job, "scheduler_state": state, "raw": line}, [run_id])
-    return ev
+        ev = _record_array(site, led, actor, run, _array_status(site, run), waited=False)
+    else:
+        state, line = job_state(site, job)
+        ev = led.event("run.status", actor if actor in ("pipeline-runner", "desk") else "desk", run["wi"],
+                       {"run": run_id, "job_id": job, "scheduler_state": state, "raw": line}, [run_id])
+    return {**ev, "logs": _log_hint(run)}
 
 
 TERMINAL_STATES = ("COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED",
@@ -807,14 +816,14 @@ def slurm_wait(site: Site, actor: str, run_id: str, timeout: int = 3600, interva
         ev = _record_array(site, led, actor, run, st, waited=True)
         if not st["final"]:
             ev["note"] = f"still {st['scheduler_state']} ({st['counts']}) after {timeout} s; wait again or check later"
-        return ev
+        return {**ev, "logs": _log_hint(run)}
     state, line, final = wait_job(site, job, int(max(0, deadline - time.monotonic())), interval)
     ev = led.event("run.status", actor if actor in ("pipeline-runner", "desk") else "desk", run["wi"],
                    {"run": run_id, "job_id": job, "scheduler_state": state, "raw": line,
                     "waited": True, "final": final}, [run_id])
     if not final:
         ev["note"] = f"still {state} after {timeout} s; wait again or check later"
-    return ev
+    return {**ev, "logs": _log_hint(run)}
 
 
 def _watch_line(led: Ledger, events: list[dict], run: dict, seen: dict, nxt: str | None = None) -> str:
@@ -1044,16 +1053,70 @@ def _day_check(site: Site, cmd: list[str], script: Path, extra: list[str], cfg: 
                 "per-task --time; tasks that wait for resources start later"} if array else {})}
 
 
-def _sets_output(script: Path, extra: list[str]) -> bool:
-    """The job chooses its own log files (an sbatch argument or an #SBATCH directive)."""
-    flags = ("-o", "--output", "-e", "--error")
-    if any(a.split("=")[0] in flags for a in extra):
-        return True
-    for line in script.read_text(encoding="utf-8", errors="replace").splitlines():
-        line = line.strip()
-        if line.startswith("#SBATCH") and any(w.split("=")[0] in flags for w in line.split()[1:]):
-            return True
-    return False
+LOG_DIR_DEFAULT = "logs/slurm"
+
+
+def log_dir(site: Site) -> Path:
+    """Where scheduler stdout/stderr go: config `slurm.log_dir` (default `logs/slurm`, relative to the site root;
+    an absolute path only inside the site). Never the company root itself or outside the site."""
+    raw = (site.config.get("slurm") or {}).get("log_dir") or LOG_DIR_DEFAULT
+    p = Path(site.expand(str(raw)))
+    p = p if p.is_absolute() else site.root / p
+    real, root = os.path.realpath(p), os.path.realpath(site.root)
+    if not real.startswith(root + os.sep):
+        fail(f"config slurm.log_dir {raw!r} must name a directory inside the site (below {site.root}), not the site root"
+             " or a path outside it")
+    return Path(os.path.normpath(p))
+
+
+def wi_log_dir(site: Site, wi: str) -> Path:
+    return log_dir(site) / wi
+
+
+def _inside(path: str, root: Path) -> bool:
+    real, r = os.path.realpath(path), os.path.realpath(root)
+    return real == r or real.startswith(r + os.sep)
+
+
+def _redirect_log(site: Site, folder: Path, value: str, flag: str, source: str, is_array: bool) -> tuple[str, list[str]]:
+    """The rule (release 32): an absolute name already inside the site's log dir is kept; any other name (relative,
+    absolute elsewhere) keeps only its basename pattern inside `<log_dir>/<WI>/`, with a warning. An array name
+    without %a gets `_%a` before its extension and %j becomes %A (warned)."""
+    warns = []
+    if os.path.isabs(value) and "%" not in os.path.dirname(value) and _inside(os.path.dirname(value), log_dir(site)):
+        out = value
+    else:
+        out = str(folder / (os.path.basename(value.rstrip("/")) or ("%x-%A_%a" if is_array else "%x-%j") + ".log"))
+        warns.append(f"{flag} {value} ({source}) is not in the site's log dir; scheduler logs go to {out} instead"
+                     " (do not set --output/--error in job scripts)")
+    if is_array and "%a" not in os.path.basename(out):
+        # a task's %j is its own job id, which no record holds: %A (the array's) + _%a names each task's file
+        base = os.path.basename(out)
+        stem, dot, ext = base.rpartition(".") if "." in base else (base, "", "")
+        new = f"{stem.replace('%j', '%A')}_%a{dot}{ext}"
+        out = os.path.join(os.path.dirname(out), new)
+        warns.append(f"{flag} name {base} holds no %a: array tasks would share one file; using {new}")
+    return out, warns
+
+
+def job_log_paths(site: Site, folder: Path, script: Path, extra: list[str], is_array: bool) -> tuple[str, str, list[str]]:
+    """(stdout path, stderr path, warnings) for a job: always inside `<log_dir>/<WI>/` (see `_redirect_log`).
+    Without a name the defaults are `%x-%j` (`%x-%A_%a` for an array); a job that names only --output keeps
+    stderr in the same file, as sbatch does."""
+    pat = "%x-%A_%a" if is_array else "%x-%j"
+    warns: list[str] = []
+    paths = {}
+    for short, long, ext in (("-o", "--output", "out"), ("-e", "--error", "err")):
+        arg = _scan_opt(extra, short, long)
+        value, source = (arg, "sbatch argument") if arg is not None else (_script_opt(script, short, long), "#SBATCH directive")
+        if value is None:
+            paths[long] = None
+            continue
+        paths[long], w = _redirect_log(site, folder, value, long, source, is_array)
+        warns += w
+    out = paths["--output"] or str(folder / f"{pat}.out")
+    err = paths["--error"] or (out if paths["--output"] else str(folder / f"{pat}.err"))
+    return out, err, warns
 
 
 def slurm_cancel(site: Site, actor: str, run_id: str) -> dict:

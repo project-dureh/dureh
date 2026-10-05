@@ -151,6 +151,7 @@ def _agent_file(site: Site, role, project: str | None = None) -> str:
                         " `--local` unless your brief says so."],
             "pipeline-runner": [f"- Submit every computation with `{dureh} slurm submit --wi <WI> --script <job.sh>`."
                                 " Never run heavy tools in the session.",
+                                f"- {_log_rule(site)}",
                                 "- Never wait for a job in the session (no `squeue`/`sleep` loops, no background commands,"
                                 f" no long `slurm wait`): after submitting, report the run id(s) and end your turn; the desk"
                                 f" re-dispatches you when `dureh slurm watch` reports the job, and `{dureh} slurm status --run <run-id>`"
@@ -188,6 +189,20 @@ def _item_names(site: Site) -> dict:
         return item_env(site)
     except DurehError:
         return dict(DEFAULT_ITEM_ENV)
+
+
+def _log_rule(site: Site) -> str:
+    """The generated scheduler-log rule (release 32), with the site's `slurm.log_dir` relative to the site."""
+    from ..ops import LOG_DIR_DEFAULT, log_dir
+    from ..util import DurehError
+
+    try:
+        d = log_dir(site)
+        shown = os.path.relpath(d, site.root) if str(d).startswith(str(site.root) + os.sep) else str(d)
+    except DurehError:
+        shown = LOG_DIR_DEFAULT
+    return (f"Do not set --output/--error in job scripts; the harness writes scheduler logs to {shown}/<WI>/."
+            " It passes its own --output/--error to sbatch, so a script's #SBATCH -o/-e only names the file inside that folder.")
 
 
 def _item_names_text(site: Site) -> str:
@@ -256,7 +271,7 @@ def _claude_md(site: Site) -> str:
               " `--check` commands run with the WI worktree (the target repository's root) as the working directory, or the target root when the role has no worktree;"
               " `$DUREH_TARGET_ROOT` is the target's main tree and `$DUREH_SITE` the site. `--output` paths are relative to that same working directory."
               f" The checker's `{dureh} verify --wi <WI>` runs the declared checks as ONE scheduler job (config `checks.runner`: `slurm` by default where `sbatch` exists,"
-              " `checks.time`, `checks.sbatch_args`; logs under `logs/slurm/<WI>/verify-*`) and waits for it; `--local` is the escape hatch for a machine without a scheduler."
+              " `checks.time`, `checks.sbatch_args`; logs under `<slurm.log_dir>/<WI>/verify-*`, default `logs/slurm`) and waits for it; `--local` is the escape hatch for a machine without a scheduler."
               " Nobody runs a module's test suite (`pytest`, `unittest discover`) in the session: tests are checks or `slurm submit` jobs."
               " Place each output inside the owning role's write scope (see `.claude/agents/<role>.md`).",
               f"2. Gate 1: show the plan to the Director. Only after the Director approves, run `{dureh} wi approve --wi <WI> --memo \"<Director's words>\"`.",
@@ -272,7 +287,7 @@ def _claude_md(site: Site) -> str:
               f"7. Before moving or deleting a path, run `{dureh} path-refs <path>`. Delete only through `{dureh} purge`."
               f" If a dispatch or verify reports a broken worktree or a stale `.venv` (for example after the site moved), run `{dureh} worktree repair --wi <WI>`"
               f" (or `--target <target>` for a main tree's `.venv`); it rebuilds the environment with `env_rebuild` from config.json. Never edit `.git` files or rebuild environments by hand.",
-              f"8. Compute runs only as scheduler jobs through `{dureh} slurm submit`. {SUBJECT_RULE}"
+              f"8. Compute runs only as scheduler jobs through `{dureh} slurm submit`. {SUBJECT_RULE} {_log_rule(site)}"
               f" Jobs end outside agent turns: keep `{dureh} slurm watch` running as a Monitor (one line per tracked job that ends:"
               " run, job, WI, role, agent, state, next step; it records the final state, so a restart reports nothing twice;"
               " it checks every 300 s by default with one batched `sacct` call; a job sacct has no state for after `watch_stale_days`"

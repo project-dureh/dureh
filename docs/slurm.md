@@ -10,6 +10,36 @@ dureh slurm watch  [--interval S] [--once]          # desk only
 dureh slurm cancel --run <run id>
 ```
 
+## Scheduler logs never land in the site root or a project tree (release 32)
+
+Director, 2026-10-05: scheduler stdout/stderr belong in the site's log dir only. Evidence: 8
+`dureh-WI-0058-<job>.out/.err` files in the camri-org root from 2026-10-03, written by a script's
+`#SBATCH --output=dureh-%x-%j.out` (relative, so it resolved against the job's directory, the site root).
+
+- **Config `slurm.log_dir`**: default `logs/slurm`, relative to the site root; an absolute path is allowed only
+  inside the site (the site root itself, `..` escapes and paths outside are refused). Every scheduler log of a
+  WI goes to `<log_dir>/<WI>/`.
+- **Always on the command line.** `slurm submit` (and so `container build`) and the checks job of `verify --wi`
+  pass `--output` and `--error` on the `sbatch` command line, after any `--sbatch-arg` / `checks.sbatch_args`:
+  command-line options override `#SBATCH` directives, so a script cannot move them.
+- **Redirect rule.** Without a name: `%x-%j.out|.err` (`%x-%A_%a` for an array). When the script (`#SBATCH -o/-e`)
+  or an sbatch argument names a file: an absolute path whose directory is inside the site's log dir is kept as
+  it is; any other path (relative, absolute elsewhere) keeps only its basename pattern (`%x`, `%j`, `%A`, `%a`
+  ...) inside `<log_dir>/<WI>/`, and a `warning:` line on stderr (also in the record's `warnings`) says so. A job
+  that names only `--output` keeps stderr in the same file (no `--error` is passed), as sbatch does.
+- **Arrays** (`--each`, or `--array` in the script): a name without `%a` gets `_%a` before its extension and
+  its `%j` becomes `%A` (a task's `%j` is its own job id, which no record holds), with a warning.
+- **Records and hints.** The run record's `logs`, `log_out`, `log_err` name the redirected paths; `slurm status`
+  and `slurm wait` print `logs: {log_out, log_err}` with the job id filled in (not recorded again).
+- **Purge and old records.** `purge` finds a WI's logs from the recorded `log_out`/`log_err`, the `--each` item
+  list and wrapper in the configured `<log_dir>/<WI>/` or the old `logs/slurm/<WI>/`, and for records from before
+  release 19 the old candidates (job chdir, target root, site root, the script's own -o/-e directory). Files
+  already in the site root from earlier releases are removed by `dureh purge --wi <WI>` when their record names
+  them (inside the site only).
+- **Agents.** The generated desk and pipeline-runner instructions say: "Do not set --output/--error in job
+  scripts; the harness writes scheduler logs to <log_dir>/<WI>/."
+- The session job keeps its own logs under `logs/session/` (absolute `#SBATCH` lines in the generated script).
+
 ## Jobs end outside agent turns: `dureh slurm watch` (release 30, provisional names)
 
 Measured 2026-10-04 at UNC_Lee_CAMRI-ORG: agents cannot wait for a job inside their session (background waits,
@@ -83,7 +113,7 @@ agent: ended | not started, age_seconds}`. Inside the grace period the refusal s
 agent runs or a deferred start of the role may still bind, the refusal is unchanged (stop it first).
 
 Without `--module`, `submit` works as before: the job script is submitted as it is (job directory = the WI
-target, logs under `logs/slurm/<WI>/` unless the script chooses its own, config `slurm.time` as the fallback
+target, logs under `<slurm.log_dir>/<WI>/` (see above; a script's own name is kept only as a basename there), config `slurm.time` as the fallback
 `--time`, the workday start check) and a `run` record is written.
 
 ## Declared checks as one scheduler job: `dureh verify --wi` (release 27)
@@ -101,7 +131,7 @@ dureh verify --wi <WI> [--local]
   config says (escape hatch; recorded as `runner_override: true`).
 - **Job.** ONE job per verification: `sbatch --parsable --job-name=dureh-verify-<WI> --time=<checks.time, else
   slurm.time, else 01:00:00> --chdir=<work root> --export=ALL [--account/--partition from slurm]
-  [checks.sbatch_args...] logs/slurm/<WI>/verify-<utc ts>.sh`. The work root is the WI worktree (the target root
+  [checks.sbatch_args...] --output=<log_dir>/<WI>/verify-<utc ts>.out --error=... <log_dir>/<WI>/verify-<utc ts>.sh`. The work root is the WI worktree (the target root
   when the role has none), the environment the site's (`site.env()`, `PYTHONDONTWRITEBYTECODE=1`,
   `DUREH_WORK_ROOT`, `DUREH_TARGET_ROOT`, `DUREH_WI`, `DUREH_SITE`), as the in-session run had. The generated
   script runs each declared check through `sh -c` and writes `verify-<ts>.check<i>.{exit,ms,out}` next to the job
@@ -154,8 +184,8 @@ several steps is also one job per subject; group-level steps start after all sub
   `logs/slurm/<WI>/each-<utc ts>.items` (fixed for the run) and a wrapper `each-<utc ts>.sbatch` next to it that
   carries the script's `#SBATCH` lines, maps `$SLURM_ARRAY_TASK_ID` to the item (exit 98 when a task has no item)
   and runs the script with its own interpreter. With `--module` the module wrapper does the same mapping.
-- **Logs.** `logs/slurm/<WI>/%x-%A_%a.out|.err` (one pair per task: `dureh-<WI>-<array job>_<task>.out`), unless
-  the script chooses its own `-o/-e` (then keep `%a` or `%j` in the name; the submit warns otherwise).
+- **Logs.** `<slurm.log_dir>/<WI>/%x-%A_%a.out|.err` (one pair per task: `dureh-<WI>-<array job>_<task>.out`); a
+  script's own `-o/-e` name is kept as a basename there, with `_%a` added (and `%j` turned into `%A`) when it has no `%a`.
 - **Record.** `array: {job_id, items, count, items_file, wrapper, env, level}`, plus `each_file` (the resolved `@file`),
   `max_parallel` and `sbatch_args` (reused by `--resubmit-failed`).
 - **`--after <run>[,<run>...]`** (with or without `--each`, repeatable) adds `--dependency=afterok:<job>[:<job>]`

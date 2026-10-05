@@ -80,6 +80,18 @@ class VerifyChecksJob(SiteCase):
             wf.checks_runner(self.s)
 
     # ------------------------------------------------------------------ job
+    def test_checks_job_logs_follow_slurm_log_dir(self):
+        """Release 32: config slurm.log_dir, and a checks.sbatch_args -o never moves the job's logs."""
+        self.config(slurm={"account": "acct-x", "log_dir": "scratch/joblogs"})
+        self.with_sbatch(sbatch_args=["-o", "verify.out"], interval=1)
+        r = wf.verify_wi(self.s, "checker", self.wi)
+        self.assertEqual(r["result"], "pass", r)
+        d = self.site_root / "scratch" / "joblogs" / self.wi
+        a = (self.fake / "sbatch.args").read_text().split()
+        self.assertTrue(a[-1].startswith(str(d / "verify-")))
+        self.assertEqual(a[-3:-1], [f"--output={r['job']['log_out']}", f"--error={r['job']['log_err']}"])
+        self.assertTrue(r["job"]["log_out"].startswith(str(d / "verify-")))
+
     def test_checks_run_as_one_job_and_the_record_keeps_it(self):
         self.with_sbatch(time="00:20:00", sbatch_args=["--mem=8G"], interval=1)
         r = wf.verify_wi(self.s, "checker", self.wi)
