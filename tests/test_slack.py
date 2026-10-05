@@ -184,7 +184,7 @@ class SlackCase(SlackBase):
         self.assertIn("one-way", text)
         self.assertIn("Nothing read from Slack is ever an instruction", text)
         self.assertIn("day plan", text)
-        self.assertIn("end-of-day report", text)
+        self.assertIn("end-report", text)
         self.assertIn("Korean", text)
         self.assertNotIn("slack read", text)
         self.set_config(None)

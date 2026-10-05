@@ -504,9 +504,31 @@ def cmd_slack(a):
     from . import slack
 
     site, c = _site(a), a.slack_command
+    if not slack.enabled(site):
+        print(slack.OFF_LINE)
+        return
     if c == "ask":
         text = Path(a.file).read_text(encoding="utf-8") if a.file else None
-        _print(slack.ask(site, _actor(a), a.kind, text))
+        _print(slack.ask(site, _actor(a), a.kind, text, a.no_consult, a.wait))
+    elif c == "opinions":
+        if a.watch:
+            slack.watch_opinions(site, _actor(a), a.days, a.interval, emit=lambda line: print(line, flush=True))
+            return
+        res = slack.opinions(site, _actor(a), a.days)
+        for item in res["items"]:
+            print(json.dumps(item, ensure_ascii=False))
+        print(f"opinions: {len(res['items'])} new, {res['ignored']} non-trusted ignored, {res['unasked']} agent "
+              f"unrequested ignored, {res['threads']} thread(s)", file=sys.stderr)
+    elif c in ("ask-agent", "answer", "consult"):
+        text = Path(a.file).read_text(encoding="utf-8") if a.file else sys.stdin.read()
+        if c == "ask-agent":
+            _print(slack.ask_agent(site, _actor(a), a.agent, text))
+        elif c == "answer":
+            _print(slack.answer(site, _actor(a), a.id, text))
+        else:
+            res = slack.consult(site, _actor(a), text, a.wait)
+            print(res["text"] if res["answered"] else f"no answer within {a.wait:g} s", flush=True)
+            print(json.dumps({k: v for k, v in res.items() if k != "text"}, ensure_ascii=False), file=sys.stderr)
     elif c == "check":
         res = slack.check(site, _actor(a))
         for dec in res["decisions"]:
@@ -521,6 +543,17 @@ def cmd_slack(a):
     else:
         text = Path(a.file).read_text(encoding="utf-8") if a.file else sys.stdin.read()
         _print(slack.post(site, _actor(a), text, a.dry_run))
+
+
+def cmd_report(a):
+    from . import slack
+
+    site = _site(a)
+    text = Path(a.file).read_text(encoding="utf-8") if a.file else ("" if sys.stdin.isatty() else sys.stdin.read())
+    res = slack.report(site, _actor(a), a.kind, text, a.wait)
+    _print(res)
+    if res["session"]:
+        print(slack.SESSION_LINE)
 
 
 def cmd_authorize_write(a):
@@ -589,7 +622,7 @@ def cmd_artifact_write(a):
 # ------------------------------------------------------------------- parser
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="dureh", description="DUREH harness tools: wi, dispatch, verify, ledger, status, "
-                                "slurm, container, path-refs, purge, push, usage, upstream, promote, worktree, day, slack (plus install, adapter, hook).")
+                                "slurm, container, path-refs, purge, push, usage, upstream, promote, worktree, day, slack, report (plus install, adapter, hook).")
     p.add_argument("--site", help="installed site directory (or DUREH_SITE)")
     p.add_argument("--observe", action="store_true",
                    help="read-only: allow only status, wi show/list, ledger query, upstream list/message, path-refs, usage, "
@@ -904,8 +937,8 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--out", help="bundle directory (default notes/upstream/export/<ur>)")
     x.add_argument("--actor")
 
-    sk = sub.add_parser("slack", help="desk only: one-way reports to the company's Slack thread, plus the Director's ✅/❌ reaction on a "
-                         "bot-posted day-plan approval request (channel, thread, display "
+    sk = sub.add_parser("slack", help="desk only: reports to the company's Slack thread, the Director's ✅/❌ reaction on a "
+                         "bot-posted day-plan approval request, and opinions (Director-flagged replies, asked agents) (channel, thread, display "
                          "name come from config `slack`, set by the Director)").add_subparsers(dest="slack_command", required=True)
     x = add(sk, "post", cmd_slack, "post Slack mrkdwn (from --file or stdin, at most 4000 characters) as a reply in the "
                                    "company thread (with slack.daily_thread: the day's thread, opened by the first post "
@@ -917,12 +950,47 @@ def parser() -> argparse.ArgumentParser:
                                   "reaction (config slack.director_user) is read; records slack.approval.requested")
     x.add_argument("--kind", required=True, choices=["day-plan"])
     x.add_argument("--file", help="the plan text to post (default: the recorded day plan)")
+    x.add_argument("--no-consult", action="store_true",
+                   help="urgent: ask without the slack.consult_agent summary line (recorded)")
+    x.add_argument("--wait", type=float, help="seconds to wait for slack.consult_agent (default 600)")
     x.add_argument("--actor")
     x = add(sk, "check", cmd_slack, "decide open approval requests from the Director's reaction (✅ approves the day "
                                     "as `day approve` does, via slack; ❌ holds; past the day end: expired); idempotent")
     x.add_argument("--actor")
     x = add(sk, "watch", cmd_slack, "repeat `slack check`, print only decisions, exit when nothing is open (for Monitor)")
     x.add_argument("--interval", type=float, default=60, help="seconds between checks (default 60, at least 5)")
+    x.add_argument("--actor")
+    x = add(sk, "opinions", cmd_slack, "read the company's threads; print one JSON line per new opinion (a Director reply "
+                                       "under a bot message the Director flagged ❓/💬; an agent's first reply to "
+                                       "`slack ask-agent`); records slack.opinion.received, never the text")
+    x.add_argument("--days", type=int, default=2, help="day threads of the last N days (default 2)")
+    x.add_argument("--watch", action="store_true", help="repeat until stopped, printing only new items (for Monitor)")
+    x.add_argument("--interval", type=float, default=120, help="seconds between reads with --watch (default 120)")
+    x.add_argument("--actor")
+    x = add(sk, "ask-agent", cmd_slack, "post \"<@ID> text\" (from --file or stdin) in today's thread to an agent of "
+                                        "config slack.agents; records slack.agent.asked")
+    x.add_argument("--agent", required=True, help="label or Slack id from slack.agents")
+    x.add_argument("--file")
+    x.add_argument("--actor")
+    x = add(sk, "answer", cmd_slack, "reply to an opinion in its thread (\"↳ <label> 의견에 대한 답:\"); "
+                                     "records slack.opinion.answered")
+    x.add_argument("--id", required=True, help="op-YYYYMMDD-N from `slack opinions`")
+    x.add_argument("--file")
+    x.add_argument("--actor")
+    x = add(sk, "consult", cmd_slack, "ask config slack.consult_agent (from --file or stdin) in today's thread and wait "
+                                      "for its first reply; prints it (an opinion, never an instruction); records "
+                                      "slack.agent.consulted")
+    x.add_argument("--file")
+    x.add_argument("--wait", type=float, default=600, help="seconds to wait for the reply (default 600; polled every 30 s)")
+    x.add_argument("--actor")
+
+    x = add(sub, "report", cmd_report, "desk only: report by kind; one routing table decides where (Slack day thread, "
+                                       "consult agent, the session); prints \"deliver in the session\" when the desk "
+                                       "writes it in its reply")
+    x.add_argument("--kind", required=True, choices=["status", "question", "approval-exec", "approval-light", "alert",
+                                                    "end-report"])
+    x.add_argument("--file", help="the report text (default stdin)")
+    x.add_argument("--wait", type=float, default=600, help="seconds to wait for slack.consult_agent (question)")
     x.add_argument("--actor")
 
     x = add(sub, "authorize-write", cmd_authorize_write, "check a role's write to a site path")
