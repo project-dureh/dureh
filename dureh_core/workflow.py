@@ -13,7 +13,7 @@ from datetime import date
 from pathlib import Path
 
 from .paths import target_root
-from .records import ACTIVE, Ledger
+from .records import Ledger
 from .site import Site
 from .util import fail, git, sha256_file
 
@@ -288,15 +288,12 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None) -> 
         if led.wi_status(bundle)["status"] != "dispatched":
             fail(f"bundle {bundle} is not dispatched to {by}")
     st = led.wi_status(wi)["status"]
+    supersedes = None
     if checking:
         if st != "staged":
             fail(f"{wi} is {st}; the checker is dispatched only for staged work")
     elif st == "dispatched":
-        evs = led.events(wi)
-        last = max((i for i, e in enumerate(evs) if e["type"] == "wi.dispatched"), default=None)
-        finished = last is not None and any(e["type"] == "agent.finished" for e in evs[last + 1:])
-        if not finished:
-            fail(f"{wi} is dispatched and its agent has not finished; stop it before re-dispatching")
+        supersedes = _superseded_dispatch(site, led, wi)
     elif st not in ("approved", "rework"):
         fail(f"{wi} is {st}; only approved or rework items can be dispatched")
     entry = site.model_for_tier("writer-academic" if p.get("academic") and not checking else role.tier)
@@ -304,13 +301,22 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None) -> 
     if not ok:
         fail(f"tier {role.tier} model {entry.get('model')} cannot be dispatched: {why}")
     if not checking and not p.get("parent"):
-        # lanes count top-level work; items inside a bundle share their bundle's lane
-        active = [w for w in led.work_items() if w["status"] in ACTIVE
-                  and not led.get("work-item", w["id"])["payload"].get("parent") and w["id"] != wi]
-        if len(active) >= int(site.limit("max_concurrent_lanes", 2)):
-            fail(f"lane limit reached: {', '.join(w['id'] for w in active)} are active")
+        # lanes count top-level work with a live agent or a running job; items inside a bundle share their
+        # bundle's lane (release 30: orphaned bundles and items waiting for the desk hold none)
+        from .ops import lane_holders
+
+        limit = int(site.limit("max_concurrent_lanes", 2))
+        holders = lane_holders(site, led, exclude=wi)
+        if len(holders) >= limit:
+            if not site.observe:
+                led.event("lane.refused", by, wi, {"count": len(holders), "limit": limit, "lane": p["lane"], "by": by,
+                                                    "holders": [{"wi": h["wi"], "lane": h["lane"], "by": h["by"]}
+                                                                for h in holders]})
+            held = "; ".join(f"{h['wi']} held by {', '.join(h['by'])}" for h in holders)
+            fail(f"lane limit reached ({len(holders)}/{limit}): {held}. Only a live agent or a job not known to have"
+                 f" ended holds a lane; an ended job is released once its state is recorded (`dureh slurm watch --once`)")
         if p["lane"] == "reorg":
-            if any(w["lane"] == "reorg" for w in active):
+            if any(h["lane"] == "reorg" for h in holders):
                 fail("a reorganization lane is already active")
             reorg = [f for f in led.load("finding") if "reorg" in (f["payload"].get("tags") or [])]
             if len(reorg) > int(site.limit("reorg_finding_budget", 3)):
@@ -333,9 +339,37 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None) -> 
     header = f"{BRIEF_TAG} {wi} role={role.name} brief={digest}"
     led.event("dispatch.prepared", by, wi, {"role": role.name, "brief": digest, "bytes": len(body), "checking": checking,
                                             "model": entry["model"], "qualification": why,
-                                            "worktree": wt["worktree"], "base": wt["base"], "by": by})
+                                            "worktree": wt["worktree"], "base": wt["base"], "by": by,
+                                            **({"supersedes": supersedes} if supersedes else {})})
     return {"header": header, "brief": header + "\n\n" + text, "model": entry["model"], "worktree": wt["worktree"],
             "subagent_type": role.name}
+
+
+def _superseded_dispatch(site: Site, led: Ledger, wi: str) -> dict:
+    """What a new dispatch of an already dispatched WI supersedes (release 30, desk finding of 2026-10-04):
+    the latest dispatch when its agent finished, or when no agent started for it within
+    `dispatch_start_grace_seconds` (a spawn that never happened; a deferred start of the role still counts as
+    starting). Refused while an agent runs or may still be binding."""
+    from datetime import datetime, timezone
+
+    from .ops import _deferred_start
+
+    evs = led.events(wi)
+    last = max((i for i, e in enumerate(evs) if e["type"] == "wi.dispatched"), default=None)
+    if last is None:  # dispatched by status only (a repaired record): nothing to supersede
+        return {}
+    later = [e["type"] for e in evs[last + 1:]]
+    disp = evs[last]
+    if "agent.finished" in later:
+        return {"dispatched": disp["id"], "agent": "ended"}
+    if "agent.started" in later or _deferred_start(led, disp):
+        fail(f"{wi} is dispatched and its agent has not finished; stop it before re-dispatching")
+    age = int((datetime.now(timezone.utc) - datetime.fromisoformat(disp["ts"])).total_seconds())
+    grace = int(site.limit("dispatch_start_grace_seconds", 120))
+    if age < grace:
+        fail(f"{wi} was dispatched {age} s ago and no agent has started for it yet; after {grace} s a new dispatch"
+             f" supersedes it (or release it now with `dispatch stop --wi {wi} --reason ...`)")
+    return {"dispatched": disp["id"], "agent": "not started", "age_seconds": age}
 
 
 def _render_brief(site: Site, rec: dict, role: str, wt: dict, entry: dict,

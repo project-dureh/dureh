@@ -318,6 +318,8 @@ def cmd_slurm(a):
         _print(ops.slurm_status(site, _actor(a), a.run))
     elif a.slurm_command == "wait":
         _print(ops.slurm_wait(site, _actor(a), a.run, a.timeout, a.interval))
+    elif a.slurm_command == "watch":
+        ops.slurm_watch(site, _actor(a), a.interval, a.once)
     else:
         _print(ops.slurm_cancel(site, _actor(a), a.run))
 
@@ -724,6 +726,12 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--run", required=True)
     x.add_argument("--timeout", type=int, default=3600, help="seconds (default 3600)")
     x.add_argument("--interval", type=int, default=60, help="seconds between checks (default 60)")
+    x.add_argument("--actor")
+    x = add(sl, "watch", cmd_slurm, "desk only: print one line per tracked job as it ends (run, job, WI, role, agent, "
+                                    "state, next step) and record its final state; run it as a Monitor, re-dispatch "
+                                    "the owning WI when a line arrives")
+    x.add_argument("--interval", type=int, default=60, help="seconds between scheduler checks (default 60)")
+    x.add_argument("--once", action="store_true", help="one pass, then exit")
     x.add_argument("--actor")
 
     co = sub.add_parser("container", help="sanctioned container builds (scheduler jobs)").add_subparsers(

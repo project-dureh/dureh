@@ -19,9 +19,10 @@ TEXT_SUFFIXES = {".md", ".py", ".sh", ".yaml", ".yml", ".json", ".toml", ".txt",
 
 
 # ----------------------------------------------------------------- status
-def agent_state(led: Ledger, wi: str) -> str:
-    """State of the agent bound to the latest dispatch of a WI: running, ended or not started."""
-    evs = led.events(wi)
+def agent_state(led: Ledger, wi: str, events: list[dict] | None = None) -> str:
+    """State of the agent bound to the latest dispatch of a WI: running, ended, starting or not started.
+    `events` (all of the site's events, preloaded) spares one load per call."""
+    evs = [e for e in events if e["wi"] == wi] if events is not None else led.events(wi)
     last = max((i for i, e in enumerate(evs) if e["type"] == "wi.dispatched"), default=None)
     if last is None:
         return "not started"
@@ -30,13 +31,13 @@ def agent_state(led: Ledger, wi: str) -> str:
         return "ended"
     if "agent.started" in later:
         return "running"
-    return "starting" if _deferred_start(led, evs[last]) else "not started"
+    return "starting" if _deferred_start(led, evs[last], events) else "not started"
 
 
-def _deferred_start(led: Ledger, dispatched: dict) -> bool:
+def _deferred_start(led: Ledger, dispatched: dict, events: list[dict] | None = None) -> bool:
     """An agent of the dispatched role started after this dispatch and is still waiting to be bound."""
     role = dispatched["payload"].get("role")
-    all_events = led.events()
+    all_events = events if events is not None else led.events()
     done = {e["payload"].get("agent_id") for e in all_events
             if e["type"] == "agent.finished" or (e["type"] == "agent.started" and e["wi"])}
     return any(e["type"] == "agent.started" and not e["wi"] and e["actor"] == role and e["ts"] >= dispatched["ts"]
@@ -53,7 +54,9 @@ def orphaned(led: Ledger, wis: list[dict]) -> list[dict]:
         kids = [w["id"] for w in wis if led.get("work-item", w["id"])["payload"].get("parent") == wi]
         running = [k for k in kids if state.get(k) in ("running", "starting")]
         if state[wi] == "not started":
-            action = f"if no agent is starting, `dispatch stop --wi {wi} --reason ...` (resuming needs Gate 1)"
+            action = (f"if no agent is starting, re-dispatch with `dispatch brief --wi {wi}` (allowed once the dispatch is"
+                      f" {int(led.site.limit('dispatch_start_grace_seconds', 120))} s old; it supersedes the one that never"
+                      f" started) or release with `dispatch stop --wi {wi} --reason ...`")
         elif running:
             action = f"wait for {', '.join(running)}, or re-adopt with `dispatch brief --wi {wi}`"
         else:
@@ -61,6 +64,98 @@ def orphaned(led: Ledger, wis: list[dict]) -> list[dict]:
         out.append({"wi": wi, "role": led.get("work-item", wi)["payload"]["role"], "agent": state[wi],
                     "children_running": running, "action": action})
     return out
+
+
+LIVE_AGENT = ("running", "starting")
+
+
+def _recorded_states(events: list[dict]) -> dict[str, tuple[str, bool]]:
+    """Latest recorded scheduler state per run id from run.status events: {run: (STATE, final)}."""
+    out: dict[str, tuple[str, bool]] = {}
+    for e in events:
+        if e["type"] == "run.status" and e["payload"].get("run"):
+            state = (e["payload"].get("scheduler_state") or "").split()
+            out[e["payload"]["run"]] = (state[0] if state else "UNKNOWN", bool(e["payload"].get("final")))
+    return out
+
+
+def _tracked_runs(led: Ledger) -> list[dict]:
+    """Runs submitted through `slurm submit` (single jobs and `--each` arrays) with a scheduler job id."""
+    return [r for r in led.load("run") if r["payload"].get("run_type") == "slurm" and r["payload"].get("job_id")
+            and r["payload"].get("status") == "submitted"]
+
+
+def _probe_run(site: Site, run: dict) -> dict | None:
+    """Ask the scheduler for a run's state: {state, final, raw | items, counts}; None when it cannot be asked."""
+    try:
+        if run["payload"].get("array"):
+            st = _array_status(site, run)
+            return {"state": st["scheduler_state"], "final": st["final"], "array": st}
+        state, line = job_state(site, str(run["payload"]["job_id"]))
+        return {"state": state.split()[0] if state else "UNKNOWN", "final": state.split()[0] in TERMINAL_STATES, "raw": line}
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def live_job_runs(site: Site, led: Ledger, wis: set[str], events: list[dict], probe: bool = True) -> list[dict]:
+    """Tracked runs of these WIs whose job is not known to have ended: [{run, job_id, wi, state}]. A run with a
+    recorded terminal state has ended; otherwise the scheduler is asked (`probe`), and a run it cannot report
+    counts as live until a state is recorded."""
+    recorded = _recorded_states(events)
+    out = []
+    for run in _tracked_runs(led):
+        if run["wi"] not in wis:
+            continue
+        state, final = recorded.get(run["id"], ("UNKNOWN", False))
+        if final or state in TERMINAL_STATES:
+            continue
+        if probe:
+            seen = _probe_run(site, run)
+            if seen is not None and seen["final"]:
+                continue
+            state = seen["state"] if seen is not None else state
+        out.append({"run": run["id"], "job_id": str(run["payload"]["job_id"]), "wi": run["wi"], "state": state})
+    return out
+
+
+def lane_holders(site: Site, led: Ledger, wis: list[dict] | None = None, exclude: str | None = None,
+                 probe: bool = True) -> list[dict]:
+    """Top-level work items that hold a lane (release 30): active items (dispatched, staged, rework, verified)
+    with a live agent (started, not finished; a deferred start counts) or a scheduler job not known to have
+    ended, on the item itself or on an item of its bundle. Orphaned bundles and staged/rework/verified items
+    waiting for the desk hold no lane. Each entry: {wi, lane, role, status, by: [what holds it]}."""
+    wis = led.work_items() if wis is None else wis
+    parent_of = {w["id"]: led.get("work-item", w["id"])["payload"].get("parent") for w in wis}
+    role_of = {w["id"]: w["role"] for w in wis}
+    top = [w for w in wis if w["status"] in ACTIVE and not parent_of[w["id"]] and w["id"] != exclude]
+    if not top:
+        return []
+    events = led.events()
+    members = {t["id"]: [t["id"]] + [w for w, par in parent_of.items() if par == t["id"]] for t in top}
+    jobs = live_job_runs(site, led, {m for ms in members.values() for m in ms}, events, probe)
+    out = []
+    for t in top:
+        by = []
+        for m in members[t["id"]]:
+            st = agent_state(led, m, events)
+            if st in LIVE_AGENT:
+                by.append(f"{role_of[m]} agent {st} on {m}")
+        by += [f"job {j['job_id']} {j['state']} on {j['wi']} ({j['run']})" for j in jobs if j["wi"] in members[t["id"]]]
+        if by:
+            out.append({"wi": t["id"], "lane": t["lane"], "role": t["role"], "status": t["status"], "by": by})
+    return out
+
+
+def lane_refusals(led: Ledger, hours: int = 24) -> dict:
+    """Lane refusals (`lane.refused` events) of the last `hours`: count and the latest one."""
+    from datetime import datetime, timedelta, timezone
+
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    recent = [e for e in led.events() if e["type"] == "lane.refused" and e["ts"] >= since]
+    last = recent[-1] if recent else None
+    return {"hours": hours, "count": len(recent),
+            "last": {"wi": last["wi"], "ts": last["ts"], "by": last["actor"],
+                     "holders": [h["wi"] for h in last["payload"].get("holders") or []]} if last else None}
 
 
 def _upstream(site: Site) -> dict:
@@ -75,7 +170,7 @@ def status(site: Site) -> dict:
     by_status: dict[str, list] = {}
     for w in wis:
         by_status.setdefault(w["status"] or "unknown", []).append(w)
-    active_top = [w for w in wis if w["status"] in ACTIVE and not led.get("work-item", w["id"])["payload"].get("parent")]
+    lanes = lane_holders(site, led, wis)
     reorg = [f for f in led.load("finding") if "reorg" in (f["payload"].get("tags") or [])]
     sessions = led.load("session")
     return {
@@ -88,7 +183,9 @@ def status(site: Site) -> dict:
         "awaiting_gate2": [w["id"] for w in wis if w["status"] == "verified"],
         "orphaned": orphaned(led, wis),
         "upstream": _upstream(site),
-        "active_lanes": f"{len(active_top)}/{site.limit('max_concurrent_lanes', 2)}",
+        "active_lanes": f"{len(lanes)}/{site.limit('max_concurrent_lanes', 2)}",
+        "lanes": lanes,
+        "lane_refusals": lane_refusals(led),
         "reorg_findings": f"{len(reorg)}/{site.limit('reorg_finding_budget', 3)}",
         "findings": len(led.load("finding")),
         "last_session": sessions[-1]["ts"] if sessions else None,
@@ -129,6 +226,13 @@ def render_status(st: dict) -> str:
         lines.append(f"Upstream: collaborating; open {', '.join(u['open']) or 'none'}; blocked WIs "
                      f"{', '.join(u['blocked_wis']) or 'none'}; merge window {u['merge_window']}"
                      + (f"; {n} new message{'s' if n != 1 else ''} from upstream (`dureh upstream inbox`)" if n else ""))
+    for lane in st.get("lanes") or []:
+        lines.append(f"Lane: {lane['wi']} {lane['role']} [{lane['status']}] held by {'; '.join(lane['by'])}")
+    lr = st.get("lane_refusals") or {}
+    if lr.get("count"):
+        last = lr["last"]
+        lines.append(f"Lane refusals ({lr['hours']}h): {lr['count']}; last {last['wi']} by {last['by']} at {last['ts'][11:19]} UTC"
+                     f" (held by {', '.join(last['holders']) or 'none'})")
     for o in st.get("orphaned") or []:
         still = f"; still running: {', '.join(o['children_running'])}" if o["children_running"] else ""
         lines.append(f"Orphaned: {o['wi']} {o['role']} agent {o['agent']}{still} -> {o['action']}")
@@ -528,7 +632,7 @@ def _array_status(site: Site, run: dict) -> dict:
             "final": all(s in TERMINAL_STATES for s in items.values())}
 
 
-def _record_array(site: Site, led: Ledger, actor: str, run: dict, st: dict, waited: bool) -> dict:
+def _record_array(site: Site, led: Ledger, actor: str, run: dict, st: dict, waited: bool, watched: bool = False) -> dict:
     """Record an array's state. Per-item final states are recorded once: when all tasks are terminal and the
     same final states are already recorded, that record is returned instead of a new one."""
     rid = run["id"]
@@ -542,6 +646,8 @@ def _record_array(site: Site, led: Ledger, actor: str, run: dict, st: dict, wait
                "items": st["items"], "counts": st["counts"], "final": st["final"]}
     if waited:
         payload["waited"] = True
+    if watched:
+        payload["watched"] = True
     if st["final"]:
         payload["item_states"] = st["items"]
         failed = [i for i, s in st["items"].items() if s != "COMPLETED"]
@@ -622,6 +728,87 @@ def slurm_wait(site: Site, actor: str, run_id: str, timeout: int = 3600, interva
     if not final:
         ev["note"] = f"still {state} after {timeout} s; wait again or check later"
     return ev
+
+
+def _watch_line(led: Ledger, events: list[dict], run: dict, seen: dict) -> str:
+    """One line per ended job: run, job, WI, owner role and agent, state, and what the desk does next."""
+    wi = run["wi"]
+    rec = led.get("work-item", wi)
+    role = rec["payload"]["role"]
+    bound = [e for e in events if e["type"] == "agent.started" and e["wi"] == wi]
+    agent = bound[-1]["payload"].get("agent_id") if bound else None
+    agent_s = f"{str(agent)[:8]}:{agent_state(led, wi, events)}" if agent else "none"
+    st = led.wi_status(wi)["status"]
+    parent = rec["payload"].get("parent")
+    if agent_s.endswith(":running") or agent_s.endswith(":starting"):
+        nxt = "agent still running; nothing to do"
+    elif st not in ("dispatched", "rework"):
+        nxt = f"none (WI {st})"
+    elif parent and agent_state(led, parent, events) in LIVE_AGENT:
+        nxt = f"the manager of bundle {parent} re-dispatches {wi}"
+    elif parent:
+        nxt = f"dispatch brief --wi {parent} (bundle; its manager re-dispatches {wi})"
+    else:
+        nxt = f"dispatch brief --wi {wi}"
+    extra = ""
+    if seen.get("array"):
+        counts = seen["array"]["counts"]
+        extra = " items=" + ",".join(f"{k}:{v}" for k, v in sorted(counts.items()))
+    from .util import utc_now
+
+    return (f"{utc_now()[:19]}Z run={run['id']} job={run['payload']['job_id']} wi={wi} role={role} agent={agent_s}"
+            f" state={seen['state']}{extra} next={nxt}")
+
+
+def watch_round(site: Site, actor: str, reported: set[str]) -> list[str]:
+    """One pass of `slurm watch`: for every tracked run not yet known to have ended, ask the scheduler; record
+    a terminal state once (`run.status` with final and watched; not in observe mode) and return its line.
+    Runs whose final state is already recorded (by `wait`, `status` or an earlier watch) are not reported."""
+    led = Ledger(site)
+    events = led.events()
+    recorded = _recorded_states(events)
+    lines = []
+    for run in _tracked_runs(led):
+        if run["id"] in reported:
+            continue
+        state, final = recorded.get(run["id"], ("UNKNOWN", False))
+        if final or state in TERMINAL_STATES:
+            reported.add(run["id"])
+            continue
+        seen = _probe_run(site, run)
+        if seen is None or not seen["final"]:
+            continue
+        if not site.observe:
+            if seen.get("array"):
+                _record_array(site, led, actor, run, seen["array"], waited=False, watched=True)
+            else:
+                led.event("run.status", actor, run["wi"], {"run": run["id"], "job_id": run["payload"]["job_id"],
+                                                           "scheduler_state": seen["state"], "raw": seen.get("raw", ""),
+                                                           "final": True, "watched": True}, [run["id"]])
+        reported.add(run["id"])
+        lines.append(_watch_line(led, events, run, seen))
+    return lines
+
+
+def slurm_watch(site: Site, actor: str, interval: int = 60, once: bool = False, out=None,
+                rounds: int | None = None) -> list[str]:
+    """Print one line per tracked job that ends (for the desk's Monitor); poll every `interval` seconds until
+    stopped, or one pass with `once`. Idempotent across restarts: what is recorded is not reported again."""
+    import time
+
+    if site.org.role(actor).kind != "desk":
+        fail("only the desk watches jobs; after `slurm submit` end your turn: the desk re-dispatches you when the job ends")
+    out = out or sys.stdout
+    reported: set[str] = set()
+    printed, n = [], 0
+    while True:
+        for line in watch_round(site, actor, reported):
+            print(line, file=out, flush=True)
+            printed.append(line)
+        n += 1
+        if once or (rounds is not None and n >= rounds):
+            return printed
+        time.sleep(max(1, interval))
 
 
 def slurm_resubmit_failed(site: Site, actor: str, run_id: str, script: str | None = None, dry_run: bool = False,

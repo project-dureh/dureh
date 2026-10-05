@@ -197,9 +197,11 @@ class Bundle(SiteCase):
         w = wf.wi_new(self.s, "desk", "r", "research", "researcher", "site", ["summary"])["id"]
         wf.wi_approve(self.s, "desk", w, "ok")
         self.assertIsNone(self.spawn("desk", "researcher", wf.dispatch_brief(self.s, w, "desk")["brief"]))
-        with self.assertRaisesRegex(DurehError, "has not finished"):
+        with self.assertRaisesRegex(DurehError, "no agent has started for it yet"):  # release 30: refused within the grace
             wf.dispatch_brief(self.s, w, "desk")
         self.start("researcher", "a-r1")
+        with self.assertRaisesRegex(DurehError, "has not finished"):
+            wf.dispatch_brief(self.s, w, "desk")
         hook(self.s, hook_event_name="SubagentStop", agent_type="researcher", agent_id="a-r1")
         again = wf.dispatch_brief(self.s, w, "desk")
         self.assertIsNone(self.spawn("desk", "researcher", again["brief"]))
@@ -211,10 +213,15 @@ class Bundle(SiteCase):
             w = wf.wi_new(self.s, "desk", f"r{i}", "research", "researcher", "site", ["summary"])
             wf.wi_approve(self.s, "desk", w["id"], "ok")
             ids.append(w["id"])
-        for w in ids[:2]:
+        for n, w in enumerate(ids[:2]):
             self.spawn("desk", "researcher", wf.dispatch_brief(self.s, w, "desk")["brief"])
+            self.start("researcher", f"a-r{n}")  # release 30: only a live agent (or a running job) holds a lane
+            hook(self.s, hook_event_name="PreToolUse", tool_name="Bash", tool_input={"command": "ls"},
+                 cwd=str(self.site_root), agent_type="researcher", agent_id=f"a-r{n}")  # first tool call binds it
         with self.assertRaisesRegex(DurehError, "lane limit"):
             wf.dispatch_brief(self.s, ids[2], "desk")
+        hook(self.s, hook_event_name="SubagentStop", agent_type="researcher", agent_id="a-r0")
+        wf.dispatch_brief(self.s, ids[2], "desk")  # the ended agent's item waits for the desk; it holds no lane
 
     def test_expired_waiver_blocks_dispatch(self):
         cfg = json.loads(self.s.config_path.read_text())

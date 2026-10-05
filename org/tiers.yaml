@@ -26,5 +26,7 @@ limits:
   worker_report_lines: 30
   max_concurrent_lanes: 2
   reorg_lanes: 1
+  # a dispatch with no agent.started after this many seconds never spawned; a new dispatch supersedes it (release 30)
+  dispatch_start_grace_seconds: 120
   reorg_finding_budget: 3
   memory_cap_bytes: 65536
