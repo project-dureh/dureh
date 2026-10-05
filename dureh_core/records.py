@@ -46,6 +46,7 @@ TRANSITIONS = {
     "reverted": set(),
 }
 ACTIVE = {"dispatched", "staged", "rework", "verified"}
+_RECORD_CACHE: dict[str, dict[str, tuple[tuple[int, int], str]]] = {}  # dir -> file name -> (size, mtime), json
 
 
 class Ledger:
@@ -131,18 +132,57 @@ class Ledger:
 
     # --- reading -----------------------------------------------------------
     def load(self, kind: str) -> list[dict]:
+        """All records of a kind, oldest first. A file read and checked once is kept in a per-process cache keyed
+        by its size and mtime (records are create-only), so the many loads of one command (status reads the
+        events a dozen times) cost a directory listing and a stat each, not a read of every file: measured
+        2026-10-05, `--observe status` at a site with 3355 events spent minutes in NFS reads."""
         directory = self.site.record_dir(kind)
         if not directory.is_dir():
             fail(f"record store is missing: {directory}")
-        rows = []
-        for path in sorted(directory.glob("*.json")):
-            rec = read_json(path)
-            if rec.get("id") != path.stem:
-                fail(f"record id does not match its file name: {path}")
-            check_record(rec)
-            rows.append(rec)
+        cache = _RECORD_CACHE.setdefault(str(directory), {})
+        rows, seen = [], set()
+        with os.scandir(directory) as it:
+            entries = sorted((e for e in it if e.name.endswith(".json")), key=lambda e: e.name)
+        for entry in entries:
+            path = Path(entry.path)
+            try:
+                st = entry.stat()
+                key = (st.st_size, st.st_mtime_ns)
+            except OSError:
+                key = None
+            hit = cache.get(entry.name)
+            if key is not None and hit is not None and hit[0] == key:
+                text = hit[1]
+            else:
+                rec = read_json(path)
+                if rec.get("id") != path.stem:
+                    fail(f"record id does not match its file name: {path}")
+                check_record(rec)
+                text = json.dumps(rec)
+                if key is not None:
+                    cache[entry.name] = (key, text)
+            seen.add(entry.name)
+            rows.append(json.loads(text))  # a fresh copy: callers may change what they get
+        for gone in set(cache) - seen:
+            del cache[gone]
         rows.sort(key=lambda r: (r["ts"], r["id"]))
         return rows
+
+    def work_item_payloads(self, events: list[dict] | None = None) -> dict[str, dict]:
+        """Every work item's payload with its `wi.amended` fields applied (as `get` does), from one read of the
+        events: for loops over all items, where `get` per item would read the events once per item."""
+        events = self.events() if events is None else events
+        amended: dict[str, list[dict]] = {}
+        for e in events:
+            if e["type"] == "wi.amended" and e["wi"]:
+                amended.setdefault(e["wi"], []).append(e)
+        out = {}
+        for rec in self.load("work-item"):
+            payload = rec["payload"]
+            for e in amended.get(rec["id"], []):
+                payload.update(e["payload"].get("fields") or {})
+            out[rec["id"]] = payload
+        return out
 
     def get(self, kind: str, record_id: str) -> dict:
         path = self.site.record_dir(kind) / f"{record_id}.json"

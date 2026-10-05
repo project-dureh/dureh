@@ -11,7 +11,6 @@ from .util import fail, read_json
 
 RECORD_KINDS = ("work-item", "run", "decision", "session", "finding", "event")
 READ_ONLY_SITE_DIRS = ("references", "startup")
-_OBSERVE_DIRS: set = set()
 _VAR = re.compile(r"\$\{(\w+)(?::-([^}]*))?\}|\$(\w+)")
 TOOL_NAMES = ("wi", "dispatch", "verify", "ledger", "status", "slurm", "container", "path-refs", "purge", "push", "usage", "upstream", "promote", "worktree", "day", "slack", "report")
 
@@ -89,14 +88,13 @@ class Site:
 
     def index_path(self) -> Path:
         if self.observe:
-            import atexit
-            import shutil
-            import tempfile
+            # observe keeps its own index outside the site, never the site's shared one; it stays between calls
+            # (fresh while the records' fingerprint matches), so a second observe read does not rebuild it
+            import hashlib
 
-            private = Path(tempfile.gettempdir()) / f"dureh-observe-{os.getpid()}-{self.site_id}"
-            if private not in _OBSERVE_DIRS:
-                _OBSERVE_DIRS.add(private)
-                atexit.register(shutil.rmtree, private, True)
+            tag = hashlib.sha1(str(self.root).encode()).hexdigest()[:8]
+            base = os.environ.get("TMPDIR") or "/tmp"
+            private = Path(base) / f"dureh-observe-{os.environ.get('USER', 'user')}-{self.site_id}-{tag}"
             return private / "index.sqlite"
         configured = (self.config.get("index") or {}).get("path")
         if configured:

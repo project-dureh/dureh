@@ -46,12 +46,16 @@ def _deferred_start(led: Ledger, dispatched: dict, events: list[dict] | None = N
 
 def orphaned(led: Ledger, wis: list[dict]) -> list[dict]:
     dispatched = [w["id"] for w in wis if w["status"] == "dispatched"]
-    state = {wi: agent_state(led, wi) for wi in dispatched}
+    if not dispatched:
+        return []
+    events = led.events()
+    state = {wi: agent_state(led, wi, events) for wi in dispatched}
+    payloads = led.work_item_payloads(events)
     out = []
     for wi in dispatched:
         if state[wi] in ("running", "starting"):
             continue
-        kids = [w["id"] for w in wis if led.get("work-item", w["id"])["payload"].get("parent") == wi]
+        kids = [w["id"] for w in wis if (payloads.get(w["id"]) or {}).get("parent") == wi]
         running = [k for k in kids if state.get(k) in ("running", "starting")]
         if state[wi] == "not started":
             action = (f"if no agent is starting, re-dispatch with `dispatch brief --wi {wi}` (allowed once the dispatch is"
@@ -61,7 +65,7 @@ def orphaned(led: Ledger, wis: list[dict]) -> list[dict]:
             action = f"wait for {', '.join(running)}, or re-adopt with `dispatch brief --wi {wi}`"
         else:
             action = f"re-adopt with `dispatch brief --wi {wi}`, or release with `dispatch stop --wi {wi} --reason ...`"
-        out.append({"wi": wi, "role": led.get("work-item", wi)["payload"]["role"], "agent": state[wi],
+        out.append({"wi": wi, "role": payloads[wi]["role"], "agent": state[wi],
                     "children_running": running, "action": action})
     return out
 
@@ -203,12 +207,13 @@ def lane_holders(site: Site, led: Ledger, wis: list[dict] | None = None, exclude
     ended, on the item itself or on an item of its bundle. Orphaned bundles and staged/rework/verified items
     waiting for the desk hold no lane. Each entry: {wi, lane, role, status, by: [what holds it]}."""
     wis = led.work_items() if wis is None else wis
-    parent_of = {w["id"]: led.get("work-item", w["id"])["payload"].get("parent") for w in wis}
+    events = led.events()
+    payloads = led.work_item_payloads(events)
+    parent_of = {w["id"]: (payloads.get(w["id"]) or {}).get("parent") for w in wis}
     role_of = {w["id"]: w["role"] for w in wis}
     top = [w for w in wis if w["status"] in ACTIVE and not parent_of[w["id"]] and w["id"] != exclude]
     if not top:
         return []
-    events = led.events()
     members = {t["id"]: [t["id"]] + [w for w, par in parent_of.items() if par == t["id"]] for t in top}
     jobs = live_job_runs(site, led, {m for ms in members.values() for m in ms}, events, probe)
     out = []
