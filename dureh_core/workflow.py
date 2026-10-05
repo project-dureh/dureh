@@ -212,11 +212,14 @@ def _pending_rebase(site: Site, wi: str) -> str | None:
 AMENDABLE = ("acceptance", "checks", "constraints", "outputs")
 
 
-def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: str | None = None) -> dict:
+def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: str | None = None,
+             add_constraints: list[str] | None = None) -> dict:
     """Change a WI's acceptance, checks, constraints or outputs, or move its base, without a replacement WI.
 
     The goal, role and target never change (that is a new WI). The amendment is approved like Gate 1:
-    --memo carries the Director's words (or, in workday mode, the plan approval that covers it)."""
+    --memo carries the Director's words (or, in workday mode, the plan approval that covers it).
+    `add_constraints` (`--add-constraint`, release 37, UR-20261005-02) appends to the constraints (after any
+    `--constraint` replacement); it alone is allowed on a staged item, since it only adds context for a rework."""
     from .ops import agent_state
 
     if site.org.role(actor).kind != "desk":
@@ -226,14 +229,25 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
     led = Ledger(site)
     rec = led.get("work-item", wi)
     st = led.wi_status(wi)["status"]
-    if st not in ("approved", "rework", "dispatched", "proposed", "stopped"):
-        fail(f"{wi} is {st}; amend only proposed, approved, rework, stopped or dispatched-and-ended items")
+    adds = [c for c in (add_constraints or []) if c is not None]
+    if any(not c.strip() for c in adds):
+        fail("--add-constraint needs text")
+    only_adds = bool(adds) and not any(v is not None for v in fields.values()) and rebase is None
+    if st == "staged" and not only_adds:
+        fail(f"{wi} is staged; only --add-constraint (which appends) is allowed on a staged item. To change"
+             f" acceptance, checks, constraints, outputs or the base: `dureh dispatch stop --wi {wi} --reason ...`, then"
+             f" `dureh wi amend --wi {wi} --memo ...` with the change (the amendment re-opens the stopped item)")
+    if st not in ("approved", "rework", "dispatched", "proposed", "stopped", "staged"):
+        fail(f"{wi} is {st}; amend only proposed, approved, rework, stopped, staged (--add-constraint only) or"
+             " dispatched-and-ended items")
     if st == "dispatched" and agent_state(led, wi) in ("running", "starting"):
         fail(f"an agent is running for {wi}; stop it at a safe point before amending")
     bad = [k for k in fields if k not in AMENDABLE]
     if bad:
         fail(f"cannot amend {', '.join(bad)}; a different goal, role or target is a new work item")
     fields = {k: list(v) for k, v in fields.items() if v is not None}
+    if adds:
+        fields["constraints"] = list(fields.get("constraints", rec["payload"].get("constraints") or [])) + adds
     if "acceptance" in fields and not fields["acceptance"]:
         fail("a work item needs at least one acceptance criterion")
     rebase_onto = None
@@ -243,7 +257,7 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
             fail(f"{wi} targets {rec['payload']['target']}, which is not a git repository")
         rebase_onto = git(["rev-parse", rebase or "HEAD"], root)
     if not fields and not rebase_onto:
-        fail("nothing to amend: give --acceptance, --check, --constraint, --output or --rebase")
+        fail("nothing to amend: give --acceptance, --check, --constraint, --add-constraint, --output or --rebase")
     draft = {"id": wi, "payload": {**rec["payload"], **fields}}
     role = site.org.role(rec["payload"]["role"])
     n, limit = brief_bytes(site, draft), _brief_limit(site, role)
@@ -251,7 +265,8 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
         fail(f"amended brief would be {n} bytes, over the {limit}-byte limit")
     before = {k: rec["payload"].get(k) for k in fields}
     ev = led.event("wi.amended", actor, wi, {"fields": fields, "before": before, "rebase_onto": rebase_onto,
-                                              "memo": memo, "by": "Director"})
+                                              "memo": memo, "by": "Director",
+                                              **({"added_constraints": adds, "status": st} if adds else {})})
     if st == "stopped":  # an amended stopped item is re-opened with the same approval words
         wi_approve(site, actor, wi, f"amended ({ev['id']}): {memo}")
     return ev
@@ -333,16 +348,64 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None) -> 
     text = _render_brief(site, rec, role.name, wt, entry)
     limit = _brief_limit(site, role)
     body = text.encode("utf-8")
-    if len(body) > limit:
+    if len(body) > limit:  # the budget covers the desk-written part only
         fail(f"brief for {wi} is {len(body)} bytes, over the {limit}-byte limit; split the work item")
-    digest = hashlib.sha256(body).hexdigest()[:16]
+    # release 37 (UR-20261005-02): a rework brief carries the last failed verification, outside the budget
+    block = "" if checking or led.wi_status(wi)["rework"] <= 0 else last_verification_block(led, wi)
+    full = text + block
+    digest = hashlib.sha256(full.encode("utf-8")).hexdigest()[:16]
     header = f"{BRIEF_TAG} {wi} role={role.name} brief={digest}"
     led.event("dispatch.prepared", by, wi, {"role": role.name, "brief": digest, "bytes": len(body), "checking": checking,
                                             "model": entry["model"], "qualification": why,
                                             "worktree": wt["worktree"], "base": wt["base"], "by": by,
+                                            **({"verification_bytes": len(block.encode("utf-8"))} if block else {}),
                                             **({"supersedes": supersedes} if supersedes else {})})
-    return {"header": header, "brief": header + "\n\n" + text, "model": entry["model"], "worktree": wt["worktree"],
+    return {"header": header, "brief": header + "\n\n" + full, "model": entry["model"], "worktree": wt["worktree"],
             "subagent_type": role.name}
+
+
+VERIFICATION_BLOCK_BYTES = 4096
+VERIFICATION_TAIL_LINES = 20
+
+
+def last_verification_block(led: Ledger, wi: str) -> str:
+    """The "Last verification" block of a rework brief: from the latest failed verify run of the WI, the failed
+    check ids with exit codes, their last output lines (at most 20 each) and log paths, ownership violations and
+    missing outputs. At most VERIFICATION_BLOCK_BYTES; empty when no failed verification is recorded."""
+    runs = [r for r in led.load("run") if r["wi"] == wi and r["payload"].get("run_type") == "verify"
+            and r["payload"].get("status") == "fail"]
+    if not runs:
+        return ""
+    run = runs[-1]
+    p = run["payload"]
+    job = p.get("job") or {}
+
+    def render(tail_lines: int) -> str:
+        lines = ["", f"Last verification (run {run['id']}, {run['ts'][:19]}Z, head {str(p.get('head') or '-')[:12]}):"
+                     f" FAIL, {p.get('note', '')}"]
+        for i, c in enumerate(p.get("checks") or [], 1):
+            if c.get("exit") == 0:
+                continue
+            secs = f", {c['seconds']} s" if c.get("seconds") is not None else ""
+            lines.append(f"- check {i} `{c['command']}`: exit {c['exit']}{secs}"
+                         + (f"; log {c['log']}" if c.get("log") else ""))
+            tail = [ln for ln in (c.get("tail") or "").rstrip("\n").splitlines()][-tail_lines:] if tail_lines else []
+            lines += [f"    {ln}" for ln in tail]
+        if p.get("violations"):
+            lines.append("- outside the role's write scope: " + ", ".join(p["violations"]))
+        if p.get("missing_outputs"):
+            lines.append("- declared outputs missing: " + ", ".join(p["missing_outputs"]))
+        if job.get("log_out"):
+            lines.append(f"- job {job.get('job_id')} ({job.get('state')}) logs: {job['log_out']}, {job.get('log_err')}")
+        lines.append("Fix these before staging again; the same head fails the same way.")
+        return "\n".join(lines) + "\n"
+
+    for n in (VERIFICATION_TAIL_LINES, 10, 5, 2, 0):
+        out = render(n)
+        if len(out.encode("utf-8")) <= VERIFICATION_BLOCK_BYTES:
+            return out
+    cut = "\n... (truncated)\n"
+    return out.encode("utf-8")[:VERIFICATION_BLOCK_BYTES - len(cut)].decode("utf-8", "ignore") + cut
 
 
 def _superseded_dispatch(site: Site, led: Ledger, wi: str) -> dict:
@@ -427,7 +490,7 @@ def _render_brief(site: Site, rec: dict, role: str, wt: dict, entry: dict,
                   "3. Re-dispatch at most twice per item after a failed check; then stop and report.",
                   f"4. When every item is verified, run `{dureh} wi stage --wi {rec['id']} --summary ...` and return a summary of at most 30 lines."]
     elif role == "checker":
-        lines += ["", f"Run `{dureh} verify --wi {rec['id']}` and return its measured output. Do not edit files."]
+        lines += [""] + _checker_lines(site, rec, dureh)
     elif role == "data-steward":
         lines += ["", f"Never write derivatives/ yourself. Promote a verified checkpoint with `{dureh} promote --wi {rec['id']} "
                   "--run <completed slurm run id> --source checkpoints/<step>/<path> --dataset <derivatives name>`;"
@@ -441,6 +504,28 @@ def _render_brief(site: Site, rec: dict, role: str, wt: dict, entry: dict,
         lines += ["", f"When done, commit on the WI branch, then run `{dureh} wi stage --wi {rec['id']} --summary \"...\"`.",
                   "Return at most 30 lines: changed paths, commands run with results, open assumptions. The checker owns validation."]
     return "\n".join(lines) + "\n"
+
+
+def _checker_lines(site: Site, rec: dict, dureh: Path) -> list[str]:
+    """The checker's run instructions (release 37): with the slurm runner and declared checks, submit the checks
+    job and end the turn, then collect on re-dispatch; never run verify in the background."""
+    wi = rec["id"]
+    never = "Never run verify in the background. Do not edit files."
+    try:
+        slurm = bool(rec["payload"].get("checks")) and not site.org.role(rec["payload"]["role"]).is_manager \
+            and checks_runner(site) == "slurm"
+    except Exception:  # an invalid checks.runner fails at verify time with its own message
+        slurm = False
+    if not slurm:
+        return [f"Run `{dureh} verify --wi {wi}` in the foreground and return its measured output. {never}"]
+    pend = pending_verify(Ledger(site), wi) if wi != "WI-0000" else None
+    if pend:
+        return [f"Verify run {pend['id']} (job {pend['payload']['job_id']}) was submitted: run `{dureh} verify --wi {wi}"
+                f" --collect` and return its measured output. If it says the job is still running, report that and end"
+                f" your turn. {never}"]
+    return [f"Run `{dureh} verify --wi {wi} --submit`, report the run id it prints and end your turn; the desk"
+            f" re-dispatches you when the job ends, then run `{dureh} verify --wi {wi} --collect` and return its"
+            f" measured output. {never}"]
 
 
 def dispatch_stop(site: Site, actor: str, wi: str, reason: str) -> dict:
@@ -615,10 +700,10 @@ def _checks_script(wi: str, cwd: Path, troot: Path, site_root: Path, prefix: Pat
     return "\n".join(lines) + "\n"
 
 
-def _run_checks_slurm(site: Site, wi: str, cwd: Path, troot: Path, checks: list[str]) -> tuple[list[dict], dict]:
-    """Submit the declared checks as one Slurm job (cwd = the work root, the site's environment), wait for it
-    like `slurm wait`, and read the per-check results back. Returns (results, job)."""
-    from . import cluster, ops
+def _submit_checks_job(site: Site, wi: str, cwd: Path, troot: Path, checks: list[str]) -> dict:
+    """Submit the declared checks as one Slurm job (cwd = the work root, the site's environment). Returns the job
+    description: {job_id, script, prefix, log_out, log_err, command, time}. Nothing is recorded here."""
+    from . import ops
     from .util import utc_compact
 
     cfg = site.config.get("checks") or {}
@@ -646,15 +731,12 @@ def _run_checks_slurm(site: Site, wi: str, cwd: Path, troot: Path, checks: list[
     if proc.returncode != 0:
         fail(f"{wi}: sbatch failed for the checks job: {proc.stderr.strip()[-2000:]}; nothing was recorded. Set config"
              " checks.runner to local or run `dureh verify --wi ... --local` on a machine without a scheduler")
-    job_id = proc.stdout.strip().split(";")[0]
-    limit = cluster.parse_time(wall)
-    wait = int(cfg.get("wait") or ((limit.total_seconds() if limit else 3600) + 900))
-    interval = int(cfg.get("interval") or 15)
-    t0 = time.monotonic()
-    state, raw, final = ops.wait_job(site, job_id, wait, interval)
-    if not final:
-        subprocess.run(["scancel", job_id], capture_output=True, text=True, timeout=60, env=site.env())
-        state = f"{state} (not finished after {wait} s; cancelled)"
+    return {"job_id": proc.stdout.strip().split(";")[0], "script": str(script), "prefix": str(prefix),
+            "log_out": f"{prefix}.out", "log_err": f"{prefix}.err", "command": cmd, "time": wall}
+
+
+def _read_check_results(prefix: str, checks: list[str], job_id: str, state: str) -> list[dict]:
+    """Per-check results the job script left next to its log (`<prefix>.check<i>.{exit,ms,out}`)."""
     results = []
     for i, check in enumerate(checks, 1):
         base = Path(f"{prefix}.check{i}")
@@ -666,15 +748,34 @@ def _run_checks_slurm(site: Site, wi: str, cwd: Path, troot: Path, checks: list[
             tail = out_file.read_text(encoding="utf-8", errors="replace")[-2000:] if out_file.is_file() else ""
         else:
             rc, seconds, tail = "not-run", None, f"no result from job {job_id} ({state})"
-        results.append({"command": check, "exit": rc, "seconds": seconds, "tail": tail})
-    job = {"job_id": job_id, "state": state, "raw": raw, "script": str(script), "log_out": f"{prefix}.out",
-           "log_err": f"{prefix}.err", "command": cmd, "time": wall, "waited_seconds": round(time.monotonic() - t0, 2)}
+        results.append({"command": check, "exit": rc, "seconds": seconds, "tail": tail, "log": str(out_file)})
+    return results
+
+
+def _run_checks_slurm(site: Site, wi: str, cwd: Path, troot: Path, checks: list[str]) -> tuple[list[dict], dict]:
+    """Submit the declared checks as one Slurm job, wait for it like `slurm wait`, and read the per-check results
+    back. Returns (results, job)."""
+    from . import cluster, ops
+
+    cfg = site.config.get("checks") or {}
+    job = _submit_checks_job(site, wi, cwd, troot, checks)
+    job_id = job["job_id"]
+    limit = cluster.parse_time(job["time"])
+    wait = int(cfg.get("wait") or ((limit.total_seconds() if limit else 3600) + 900))
+    interval = int(cfg.get("interval") or 15)
+    t0 = time.monotonic()
+    state, raw, final = ops.wait_job(site, job_id, wait, interval)
+    if not final:
+        subprocess.run(["scancel", job_id], capture_output=True, text=True, timeout=60, env=site.env())
+        state = f"{state} (not finished after {wait} s; cancelled)"
+    results = _read_check_results(job["prefix"], checks, job_id, state)
+    job.update({"state": state, "raw": raw, "waited_seconds": round(time.monotonic() - t0, 2)})
     return results, job
 
 
-def verify_wi(site: Site, actor: str, wi: str, timeout: int = 1800, local: bool = False) -> dict:
+def _verify_context(site: Site, actor: str, wi: str) -> dict:
+    """What every per-WI verification checks first: the actor, a staged item, a sane work root."""
     led = Ledger(site)
-    org = site.org
     if actor not in ("checker", "desk"):
         fail("verification is recorded by the checker")
     rec = led.get("work-item", wi)
@@ -682,27 +783,46 @@ def verify_wi(site: Site, actor: str, wi: str, timeout: int = 1800, local: bool 
     status = led.wi_status(wi)["status"]
     if status != "staged":
         fail(f"{wi} is {status}; only staged work can be verified")
-    start = time.monotonic()
-    if org.role(p["role"]).is_manager:
-        return _verify_bundle(site, actor, wi, start)
-    paths, head = changed_paths(site, wi)
-    violations = [x for x in paths if not org.scope_allows(p["role"], f"{p['target']}/{x}")]
-    results = []
     wt = site.worktrees / wi
     troot = target_root(site, p["target"]) or site.root
     cwd = wt if wt.is_dir() else troot
+    return {"led": led, "rec": rec, "p": p, "troot": troot, "cwd": cwd,
+            "bundle": site.org.role(p["role"]).is_manager, "checks": list(p.get("checks") or [])}
+
+
+def _check_venv(wi: str, cwd: Path):
     stale = stale_venv(cwd)
     if stale:
         fail(f"{wi}: stale virtualenv in {cwd}/.venv (its scripts name {stale}, which does not exist); checks would run"
              f" another environment. Repair first: `dureh worktree repair --wi {wi}`. Nothing was recorded.")
-    missing = [o for o in p.get("outputs", []) if not (Path(cwd) / o).exists()]  # the work root only
-    checks = list(p.get("checks") or [])
+
+
+def verify_wi(site: Site, actor: str, wi: str, timeout: int = 1800, local: bool = False) -> dict:
+    ctx = _verify_context(site, actor, wi)
+    start = time.monotonic()
+    if ctx["bundle"]:
+        return _verify_bundle(site, actor, wi, start)
+    cwd, troot, checks = ctx["cwd"], ctx["troot"], ctx["checks"]
+    _check_venv(wi, cwd)
+    paths, head = changed_paths(site, wi)
     runner = "local" if local else checks_runner(site)  # release 27: checks are a scheduler job, not session work
-    job = None
+    results, job = [], None
     if checks and runner == "slurm":
         results, job = _run_checks_slurm(site, wi, cwd, troot, checks)
     elif checks:
         results = _run_checks_local(site, wi, cwd, troot, checks, timeout)
+    return _record_verification(site, ctx, actor, wi, paths, head, results, runner, job, start, local=local)
+
+
+def _record_verification(site: Site, ctx: dict, actor: str, wi: str, paths: list[str], head: str | None,
+                         results: list[dict], runner: str, job: dict | None, start: float, local: bool = False,
+                         extra: dict | None = None) -> dict:
+    """Ownership, declared outputs and check results into one verify run, its verification event, and either
+    `wi.verified` or `rework.requested` (the synchronous and the collected path record the same)."""
+    led, p, cwd, checks = ctx["led"], ctx["p"], ctx["cwd"], ctx["checks"]
+    org = site.org
+    violations = [x for x in paths if not org.scope_allows(p["role"], f"{p['target']}/{x}")]
+    missing = [o for o in p.get("outputs", []) if not (Path(cwd) / o).exists()]  # the work root only
     hashes = {}
     for x in paths:
         f = Path(cwd) / x
@@ -722,14 +842,108 @@ def verify_wi(site: Site, actor: str, wi: str, timeout: int = 1800, local: bool 
         payload["runner_override"] = True
     if job:
         payload["job"] = job
-    run = led.append("run", "verify", actor, wi, {"run_type": "verify", "status": payload["result"], **payload})
+    payload.update(extra or {})
+    refs = [extra["collected_from"]] if extra and extra.get("collected_from") else None
+    run = led.append("run", "verify", actor, wi, {"run_type": "verify", "status": payload["result"], **payload}, refs)
     led.event("verification.recorded", actor, wi, {"result": payload["result"], "run": run["id"], "head": head}, [run["id"]])
     if passed:
         led.event("wi.verified", actor, wi, {"run": run["id"], "head": head}, [run["id"]])
     else:
         led.event("rework.requested", actor, wi, {"run": run["id"], "reason": note,
                                                   "violations": violations, "missing_outputs": missing}, [run["id"]])
+    payload["run"] = run["id"]
     return payload
+
+
+def _verify_jobs(led: Ledger, wi: str) -> list[dict]:
+    """Submitted verify jobs of a WI (`verify --submit`), oldest first."""
+    return [r for r in led.load("run") if r["wi"] == wi and r["payload"].get("run_type") == "verify"
+            and r["payload"].get("status") == "submitted" and r["payload"].get("job_id")]
+
+
+def _collected(led: Ledger, run_id: str) -> dict | None:
+    return next((r for r in led.load("run") if r["payload"].get("run_type") == "verify"
+                 and r["payload"].get("collected_from") == run_id), None)
+
+
+def pending_verify(led: Ledger, wi: str) -> dict | None:
+    """The latest submitted verify job of this WI not yet collected, or None."""
+    for r in reversed(_verify_jobs(led, wi)):
+        return None if _collected(led, r["id"]) else r
+    return None
+
+
+def verify_submit(site: Site, actor: str, wi: str, timeout: int = 1800) -> dict:
+    """`verify --wi --submit` (release 37, UR-20261005-02): submit the declared-checks job and return at once with
+    a pending verify run; `verify --wi --collect` records the verification after the job ended. With nothing to
+    submit (a bundle, no declared checks, or the local runner) the verification runs synchronously as usual."""
+    ctx = _verify_context(site, actor, wi)
+    if ctx["bundle"] or not ctx["checks"] or checks_runner(site) != "slurm":
+        r = verify_wi(site, actor, wi, timeout=timeout)
+        return {"submitted": False, "why": "nothing to submit (bundle, no declared checks, or checks.runner local);"
+                                           " verified synchronously", **r}
+    led = ctx["led"]
+    pend = pending_verify(led, wi)
+    if pend:
+        fail(f"{wi} already has verify run {pend['id']} (job {pend['payload']['job_id']}) waiting to be collected;"
+             f" run `dureh verify --wi {wi} --collect` once `slurm watch` reports it ended")
+    cwd, troot = ctx["cwd"], ctx["troot"]
+    _check_venv(wi, cwd)
+    _, head = changed_paths(site, wi)
+    job = _submit_checks_job(site, wi, cwd, troot, ctx["checks"])
+    run = led.append("run", "verify", actor, wi, {
+        "run_type": "verify", "status": "submitted", "runner": "slurm", "job_id": job["job_id"], "head": head,
+        "checks": ctx["checks"], "script": job["script"], "prefix": job["prefix"], "log_out": job["log_out"],
+        "log_err": job["log_err"], "command": job["command"], "time": job["time"],
+        "note": f"declared checks submitted as scheduler job {job['job_id']}; collect with `verify --wi {wi} --collect`"})
+    return {"submitted": True, "run": run["id"], "job_id": job["job_id"], "head": head, "script": job["script"],
+            "log_out": job["log_out"], "log_err": job["log_err"],
+            "next": f"end your turn; when `slurm watch` reports the job, the checker runs `dureh verify --wi {wi} --collect`"}
+
+
+def verify_collect(site: Site, actor: str, wi: str, run_id: str | None = None) -> dict:
+    """Record the verification of a submitted verify job once it ended, exactly as the synchronous path does.
+    Refused while the job is pending or running."""
+    from . import ops
+
+    ctx = _verify_context(site, actor, wi)
+    led = ctx["led"]
+    if run_id:
+        run = ops._get_run(led, run_id)
+        if run["wi"] != wi or run["payload"].get("run_type") != "verify" or run["payload"].get("status") != "submitted":
+            fail(f"{run_id} is not a submitted verify job of {wi}")
+        done = _collected(led, run_id)
+        if done:
+            fail(f"verify run {run_id} was already collected as {done['id']} ({done['payload']['status']})")
+    else:
+        run = pending_verify(led, wi) or fail(f"{wi} has no submitted verify job to collect; run `dureh verify --wi {wi}"
+                                              " --submit` first")
+    p = run["payload"]
+    job_id = str(p["job_id"])
+    recorded = ops._recorded_states(led.events(wi)).get(run["id"])
+    if recorded and (recorded[1] or recorded[0] in ops.TERMINAL_STATES):
+        state, raw = recorded[0], ""
+    else:
+        state, raw = ops.job_state(site, job_id)
+    first = (state.split() or ["UNKNOWN"])[0]
+    have_all = all(Path(f"{p['prefix']}.check{i}.exit").is_file() for i in range(1, len(p["checks"]) + 1))
+    if first not in ops.TERMINAL_STATES and not (first == "UNKNOWN" and have_all):
+        fail(f"verify run {run['id']}: job {job_id} is still {first}; nothing was recorded. End your turn: the desk"
+             f" re-dispatches the checker when `slurm watch` reports the job ended, then run `verify --wi {wi} --collect`")
+    paths, head = changed_paths(site, wi)
+    if head != p.get("head"):
+        fail(f"{wi} moved from {str(p.get('head'))[:12]} to {str(head)[:12]} after verify run {run['id']} was submitted;"
+             f" its results do not describe this head. Submit again: `dureh verify --wi {wi} --submit`")
+    if p.get("checks") != ctx["checks"]:
+        fail(f"the declared checks of {wi} changed after verify run {run['id']} was submitted; submit again")
+    if not recorded or not recorded[1]:
+        led.event("run.status", "desk", wi, {"run": run["id"], "job_id": job_id, "scheduler_state": state, "raw": raw,
+                                             "final": True, "collected": True}, [run["id"]])
+    results = _read_check_results(p["prefix"], p["checks"], job_id, state)
+    job = {k: p[k] for k in ("job_id", "script", "prefix", "log_out", "log_err", "command", "time")}
+    job.update({"state": state, "raw": raw})
+    return _record_verification(site, ctx, actor, wi, paths, head, results, "slurm", job, time.monotonic(),
+                                extra={"collected_from": run["id"], "submitted_ts": run["ts"]})
 
 
 def _verify_bundle(site: Site, actor: str, wi: str, start: float) -> dict:

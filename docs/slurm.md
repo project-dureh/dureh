@@ -152,6 +152,34 @@ Agents: the generated role files say that test suites (`pytest`, `unittest disco
 the checker's `verify --wi` runs the declared checks as this job and other computation goes through
 `slurm submit`.
 
+### Asynchronous verify: `--submit` / `--collect` (release 37, UR-20261005-02)
+
+Evidence: a checker ran `verify --wi` in the background twice; the ~15-minute checks job outlived the agent, its
+end-of-agent cleanup killed the command and no verification was recorded.
+
+```
+dureh verify --wi <WI> --submit          # checker: submit the checks job, print the verify run id, end the turn
+dureh verify --wi <WI> --collect [RUN]   # checker, re-dispatched: record the verification from the ended job
+```
+
+- **Submit** writes the same job script and logs as the synchronous path and records a pending verify `run`
+  (`run_type: verify`, `status: submitted`, `job_id`, `head`, `checks`, `script`, `prefix`, `log_out`, `log_err`,
+  `command`, `time`); it returns at once. One pending verify job per WI. With nothing to submit (a bundle, no
+  declared checks, or `checks.runner: local`) it verifies synchronously as before.
+- **Watch.** `slurm watch` tracks pending verify jobs with the other jobs; when one ends it records the final
+  state and prints `next=dispatch brief --wi <WI> --role checker (checker collects verify run <id>)` (for a bundle
+  item: its manager dispatches the checker).
+- **Collect** reads each check's `.exit/.ms/.out` files and records the verification exactly as the synchronous
+  path (`verification.recorded`, then `wi.verified` or `rework.requested`; the record adds `collected_from`). It is
+  refused, recording nothing, while the job is pending or running, when the WI head or its declared checks changed
+  since submission, or when the run was already collected.
+- **Lanes.** A pending verify job is a running scheduler job: it holds its item's lane until its end is recorded.
+- **Rework briefs.** `dispatch brief` for an item with rework > 0 appends a "Last verification" block from the
+  latest failed verify run: failed check ids and commands, exit codes, the last 20 output lines of each, per-check
+  log paths and the job logs, violations and missing outputs. The block is outside the 2048-byte brief budget
+  (which covers the desk-written part) and capped at 4 KB.
+- The synchronous `verify --wi` stays for the local runner and small checks. Never run verify in the background.
+
 ## One job per subject: `--each`, `--after`, `--resubmit-failed` (release 26)
 
 Director's rule (2026-10-04): the unit of submission is one job per subject, all subjects submitted at once, and

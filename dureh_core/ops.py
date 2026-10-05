@@ -84,9 +84,10 @@ def _recorded_states(events: list[dict]) -> dict[str, tuple[str, bool]]:
 
 
 def _tracked_runs(led: Ledger) -> list[dict]:
-    """Runs submitted through `slurm submit` (single jobs and `--each` arrays) with a scheduler job id."""
-    return [r for r in led.load("run") if r["payload"].get("run_type") == "slurm" and r["payload"].get("job_id")
-            and r["payload"].get("status") == "submitted"]
+    """Runs submitted through `slurm submit` (single jobs and `--each` arrays) and verify jobs submitted through
+    `verify --wi --submit` (release 37), with a scheduler job id."""
+    return [r for r in led.load("run") if r["payload"].get("run_type") in ("slurm", "verify")
+            and r["payload"].get("job_id") and r["payload"].get("status") == "submitted"]
 
 
 def _probe_run(site: Site, run: dict) -> dict | None:
@@ -843,6 +844,16 @@ def _watch_line(led: Ledger, events: list[dict], run: dict, seen: dict, nxt: str
     parent = rec["payload"].get("parent")
     if nxt is not None:
         pass
+    elif run["payload"].get("run_type") == "verify":  # release 37: the checker collects a submitted verify job
+        collect = f"checker collects verify run {run['id']}"
+        if st != "staged":
+            nxt = f"none (WI {st})"
+        elif parent and agent_state(led, parent, events) in LIVE_AGENT:
+            nxt = f"the manager of bundle {parent} dispatches the checker for {wi} ({collect})"
+        elif parent:
+            nxt = f"dispatch brief --wi {parent} (bundle; its manager dispatches the checker for {wi}: {collect})"
+        else:
+            nxt = f"dispatch brief --wi {wi} --role checker ({collect})"
     elif agent_s.endswith(":running") or agent_s.endswith(":starting"):
         nxt = "agent still running; nothing to do"
     elif st not in ("dispatched", "rework"):

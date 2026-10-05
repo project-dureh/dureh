@@ -125,7 +125,7 @@ def cmd_wi_amend(a):
 
     fields = {"acceptance": a.acceptance, "checks": a.check, "constraints": a.constraint, "outputs": a.output}
     _print(wi_amend(_site(a), _actor(a), a.wi, a.memo, {k: v for k, v in fields.items() if v is not None},
-                    a.rebase))
+                    a.rebase, add_constraints=a.add_constraint))
 
 
 def cmd_wi_show(a):
@@ -210,12 +210,28 @@ def cmd_verify(a):
         return
     if not a.wi:
         fail("verify needs --self, --wi, or --exam")
-    from .workflow import verify_wi
+    from .workflow import verify_collect, verify_submit, verify_wi
 
-    r = verify_wi(_site(a), _actor(a), a.wi, local=a.local)
+    if a.submit and (a.collect is not None or a.local):
+        fail("--submit cannot be combined with --collect or --local")
+    if a.collect is not None and a.local:
+        fail("--collect cannot be combined with --local")
+    if a.submit:
+        r = verify_submit(_site(a), _actor(a), a.wi)
+        if r["submitted"]:
+            _print({k: r[k] for k in ("submitted", "run", "job_id", "head", "log_out", "next")})
+            return
+    elif a.collect is not None:
+        r = verify_collect(_site(a), _actor(a), a.wi, a.collect or None)
+    else:
+        r = verify_wi(_site(a), _actor(a), a.wi, local=a.local)
     out = {k: r[k] for k in ("result", "note", "changed", "violations", "missing_outputs", "seconds", "runner")}
+    if r.get("run"):
+        out["run"] = r["run"]
+    if r.get("collected_from"):
+        out["collected_from"] = r["collected_from"]
     if r.get("job"):
-        out["job"] = {k: r["job"][k] for k in ("job_id", "state", "log_out", "waited_seconds")}
+        out["job"] = {k: r["job"][k] for k in ("job_id", "state", "log_out", "waited_seconds") if k in r["job"]}
     _print(out | {"checks": [{"command": c["command"], "exit": c["exit"], "seconds": c["seconds"]} for c in r["checks"]]})
     if r["result"] != "pass":
         raise SystemExit(1)
@@ -676,6 +692,8 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--acceptance", action="append", help="replaces the whole list (repeat)")
     x.add_argument("--check", action="append", help="replaces the whole list (repeat)")
     x.add_argument("--constraint", action="append", help="replaces the whole list (repeat)")
+    x.add_argument("--add-constraint", action="append",
+                   help="appends to the constraints (repeat); the only amendment allowed on a staged item")
     x.add_argument("--output", action="append", help="replaces the whole list (repeat)")
     x.add_argument("--rebase", nargs="?", const="", default=None,
                    help="move the base to REV (default: the target's current HEAD); the next brief tells the worker to rebase")
@@ -711,6 +729,11 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--local", action="store_true",
                    help="with --wi: run the declared checks in this process instead of a scheduler job "
                         "(escape hatch; the default is config checks.runner: slurm where sbatch exists, else local)")
+    x.add_argument("--submit", action="store_true",
+                   help="with --wi: submit the declared-checks job and return at once with a verify run id (checker;"
+                        " end the turn, then --collect when `slurm watch` reports the job ended)")
+    x.add_argument("--collect", nargs="?", const="", default=None, metavar="RUN",
+                   help="with --wi: record the verification of a finished submitted verify job (default: the latest)")
     x.add_argument("--exam", help="role whose exam to score")
     x.add_argument("--task")
     x.add_argument("--answers")

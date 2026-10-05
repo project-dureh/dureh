@@ -144,11 +144,16 @@ def _agent_file(site: Site, role, project: str | None = None) -> str:
             "- Return at most 30 lines with numbers: changed paths, commands and results, unresolved assumptions.",
         ]
         extra = {
-            "checker": [f"- Your job: `{dureh} verify --wi <WI>` for the item in your brief. It checks ownership, declared"
+            "checker": [f"- Your job: verify the item in your brief with `{dureh} verify --wi <WI>`. It checks ownership, declared"
                         " outputs, and declared checks, and records the result. Report its numbers; never fix the artifact.",
-                        "- The declared checks run as one scheduler job (the command submits it, waits for it and records the"
-                        " job id and state); never run them, a test suite or `pytest` yourself in the session, and never pass"
-                        " `--local` unless your brief says so."],
+                        "- The declared checks run as one scheduler job; never run them, a test suite or `pytest` yourself in"
+                        " the session, and never pass `--local` unless your brief says so.",
+                        f"- With the slurm checks runner (your brief says so): run `{dureh} verify --wi <WI> --submit`, report the"
+                        f" run id it prints and end your turn; when the desk re-dispatches you after the job ended, run"
+                        f" `{dureh} verify --wi <WI> --collect` and report its result (if it says the job is still running,"
+                        " report that and end your turn). Otherwise run `verify --wi <WI>` in the foreground.",
+                        "- Never run verify in the background (no `&`, no background shell): a background command is killed"
+                        " when you end and nothing is recorded."],
             "pipeline-runner": [f"- Submit every computation with `{dureh} slurm submit --wi <WI> --script <job.sh>`."
                                 " Never run heavy tools in the session.",
                                 f"- {_log_rule(site)}",
@@ -321,7 +326,11 @@ def _claude_md(site: Site) -> str:
               " `--check` commands run with the WI worktree (the target repository's root) as the working directory, or the target root when the role has no worktree;"
               " `$DUREH_TARGET_ROOT` is the target's main tree and `$DUREH_SITE` the site. `--output` paths are relative to that same working directory."
               f" The checker's `{dureh} verify --wi <WI>` runs the declared checks as ONE scheduler job (config `checks.runner`: `slurm` by default where `sbatch` exists,"
-              " `checks.time`, `checks.sbatch_args`; logs under `<slurm.log_dir>/<WI>/verify-*`, default `logs/slurm`) and waits for it; `--local` is the escape hatch for a machine without a scheduler."
+              " `checks.time`, `checks.sbatch_args`; logs under `<slurm.log_dir>/<WI>/verify-*`, default `logs/slurm`); `--local` is the escape hatch for a machine without a scheduler."
+              " With the slurm runner the checker runs `verify --wi <WI> --submit` (returns a verify run id at once) and ends its turn; `slurm watch` reports the verify job's end"
+              " with `next=dispatch brief ... (checker collects verify run <id>)`; re-dispatch the checker, which runs `verify --wi <WI> --collect`. A pending verify job holds the item's lane."
+              " A rework brief carries the last failed verification (check ids, exit codes, last lines, log paths) outside the brief budget;"
+              " add context to a staged or reworked item with `wi amend --add-constraint TEXT` (appends; `--constraint` replaces the list)."
               " Nobody runs a module's test suite (`pytest`, `unittest discover`) in the session: tests are checks or `slurm submit` jobs."
               " Place each output inside the owning role's write scope (see `.claude/agents/<role>.md`).",
               f"2. Gate 1: show the plan to the Director. Only after the Director approves, run `{dureh} wi approve --wi <WI> --memo \"<Director's words>\"`.",
