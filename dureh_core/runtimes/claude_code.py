@@ -149,15 +149,20 @@ def _agent_file(site: Site, role, project: str | None = None) -> str:
                         "- The declared checks run as one scheduler job (the command submits it, waits for it and records the"
                         " job id and state); never run them, a test suite or `pytest` yourself in the session, and never pass"
                         " `--local` unless your brief says so."],
-            "pipeline-runner": [f"- Submit every computation with `{dureh} slurm submit --wi <WI> --script <job.sh>` and"
-                                f" follow it with `{dureh} slurm wait --run <run-id>`. Never run heavy tools in the session.",
+            "pipeline-runner": [f"- Submit every computation with `{dureh} slurm submit --wi <WI> --script <job.sh>`."
+                                " Never run heavy tools in the session.",
+                                "- Never wait for a job in the session (no `squeue`/`sleep` loops, no background commands,"
+                                f" no long `slurm wait`): after submitting, report the run id(s) and end your turn; the desk"
+                                f" re-dispatches you when `dureh slurm watch` reports the job, and `{dureh} slurm status --run <run-id>`"
+                                f" then shows its final state (per item for `--each`). `{dureh} slurm wait --run <run-id>` only for"
+                                " a job expected to end within a few minutes.",
                                 f"- {SUBJECT_RULE} Items are `sub-<label>` (or `sub-<label>_ses-<label>` for session-level jobs);"
                                 f" the script reads them from the environment: {_item_names_text(site)};"
                                 f" rerun only the failed subjects with `{dureh} slurm submit --wi <WI> --resubmit-failed <run> [--script <fixed.sh>]`.",
                                 f"- Build a container image only with `{dureh} container build --wi <WI> --module <m> --rev <rev> [--name <name>]`"
                                 " (the recipe is the module's own `containers/<name or m>.def` at that rev; add"
                                 " `--recipe projects/<p>/code/containers/<name>.def` only for a project-local image);"
-                                f" after `{dureh} slurm wait --run <run-id>`, record it with `{dureh} container status --wi <WI>`"
+                                f" when the build job has ended (you are re-dispatched), record it with `{dureh} container status --wi <WI>`"
                                 " (never `apptainer build`, never write the container cache)."],
             "py-writer": ["- A module's container recipes are `containers/<name>.def` at the module root (canonical; the build context is"
                           " `git archive <rev>` of the module, so `%files` paths are module-relative). Commit them on the WI branch;"
@@ -252,13 +257,23 @@ def _claude_md(site: Site) -> str:
               f" If a dispatch or verify reports a broken worktree or a stale `.venv` (for example after the site moved), run `{dureh} worktree repair --wi <WI>`"
               f" (or `--target <target>` for a main tree's `.venv`); it rebuilds the environment with `env_rebuild` from config.json. Never edit `.git` files or rebuild environments by hand.",
               f"8. Compute runs only as scheduler jobs through `{dureh} slurm submit`. {SUBJECT_RULE}"
+              f" Jobs end outside agent turns: keep `{dureh} slurm watch` running as a Monitor (one line per tracked job that ends:"
+              " run, job, WI, role, agent, state, next step; it records the final state, so a restart reports nothing twice)."
+              f" When a line arrives, re-dispatch the owning WI: `{dureh} dispatch brief --wi <WI>` (for an item of a bundle whose manager"
+              " ended, re-dispatch the bundle so its manager re-dispatches the item). Workers never wait for jobs in the session;"
+              " a dispatched item whose agent ended is normal while its job runs, not an incident."
+              " Lanes: only an item with a live agent or a job not known to have ended holds one (items waiting for you and orphaned"
+              " bundles do not); every lane refusal is recorded as `lane.refused` and counted in status."
+              f" A dispatch whose agent never started is superseded by a new `{dureh} dispatch brief --wi <WI>` after"
+              " `dispatch_start_grace_seconds` (default 120 s); `dispatch stop` is for releasing the item, not for clearing it."
               f" Brief pipeline-runners the same way (subject list or `@file`, steps, `--after` order); container images only through `{dureh} container build`"
               f" (a pipeline-runner WI on the module or a project, recipe = the module's `containers/<name>.def` at `--rev`; `{dureh} container status --wi <WI>` records `container.built` with the sha256 for the data-steward's manifest;"
               f" `{dureh} container retire --sif <file> --reason ...` removes an image no project manifest pins). External pushes only through `{dureh} push` with a Director decision."
               f" Verified checkpoints reach `derivatives/` only through `{dureh} promote`, run by a dispatched data-steward;"
               f" a code-generated report lands with `{dureh} promote --kind report ... --dataset <pipeline> --name <report>` in derivatives/<pipeline>/reports/<report>/ with provenance.json.",
               f"9. Self-test the harness and this site with `{dureh} verify --self` after any harness or package update."
-              f" Several work items at once: `{dureh} wi show --wi A --wi B --summary`. Wait for a scheduler job with `{dureh} slurm wait --run <id>`, not a polling loop."
+              f" Several work items at once: `{dureh} wi show --wi A --wi B --summary`. Never wait for a scheduler job in a polling loop:"
+              f" `{dureh} slurm watch` as a Monitor reports it; `{dureh} slurm wait --run <id>` only for a job expected within minutes."
               f" A NEW module starts with `{dureh} site new-module --id <id> --package <pkg> [--depends <site module>] [--source <dir>]`"
               " (standard skeleton, registered with env_rebuild, a WI target at once; site modules it imports are pinned by git revision).",
               f"10. A harness problem (not a site problem) is a finding tagged `upstream`; turn it into a request with `{dureh} upstream draft --finding <id> --type bug|change|decision|friction --severity blocking|degrading|minor`."
@@ -831,25 +846,36 @@ def _marked(original: str, agent_id: str, simple: bool) -> str:
     return f"{ident} {original}" if simple else f"export {ident}\n{original}"
 
 
+WAIT_HINT = ("do not wait for jobs in the session: end your turn; the desk re-dispatches you when `dureh slurm watch`"
+             " reports the job")
+_WAIT_FORM = re.compile(r"(?<![\w-])(squeue|sacct|sleep|until|while|scontrol\s+show\s+job|slurm\s+(wait|status))(?![\w-])")
+
+
+def _wait_hint(reason: str, command: str, always: bool = False) -> str:
+    """Release 30: a refused form that looks like waiting for a job gets the rule that replaces the wait."""
+    return f"{reason}; {WAIT_HINT}" if always or _WAIT_FORM.search(command) else reason
+
+
 def guard_bash(site: Site, role: str, data: dict) -> dict | None:
     ti = data.get("tool_input") or {}
     original = ti.get("command") or ""
     command = _LITERAL_SUBST.sub("LITERAL", original)  # checked form; the original runs
     command = re.sub(r"\$\(\s*pwd\s*\)", "$PWD", command)  # same value as $PWD, which is not a command
     if ti.get("run_in_background"):
-        return _deny("no hidden background work in the session; submit computation with `dureh slurm submit`")
+        return _deny(_wait_hint("no hidden background work in the session; submit computation with `dureh slurm submit`",
+                                original, always=True))
     if "`" in command or "$(" in command:
         if role != "desk":
-            return _deny("command substitution cannot be checked; run the parts as separate commands")
+            return _deny(_wait_hint("command substitution cannot be checked; run the parts as separate commands", original))
     try:
         segs = _segments(command)
     except ValueError as exc:
-        return _deny(f"cannot parse the command ({exc}); simplify it")
+        return _deny(_wait_hint(f"cannot parse the command ({exc}); simplify it", original))
     cwd = Path(data.get("cwd") or site.root)
     scheduler_only = _scheduler_only(site)
     words_only = [s for s in segs if s[0] not in _SEPARATORS]
     if any(s == ["&"] for s in segs):
-        return _deny("no background jobs (`&`) in the session; use the scheduler")
+        return _deny(_wait_hint("no background jobs (`&`) in the session; use the scheduler", original))
     agent_id = data.get("agent_id")
     led = Ledger(site)
     agent_wi = _bind(led, role, data, "first-tool") if agent_id else None
@@ -887,10 +913,10 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
                              "or another path), so the hook can set your identity")
         if role != "desk" and (first in _INTERPRETERS or re.match(r"python3?\.\d+$", first)) \
                 and any(w in ("<<", "<<-", "<<<") for w in words):
-            return _deny(f"a heredoc or here-string fed to `{first}` runs its body, which cannot be checked; "
-                         "write a script file in your scope and run it")
+            return _deny(_wait_hint(f"a heredoc or here-string fed to `{first}` runs its body, which cannot be checked; "
+                                    "write a script file in your scope and run it", original))
         if first in ALWAYS_DENY_FIRST:
-            return _deny(ALWAYS_DENY_FIRST[first])
+            return _deny(_wait_hint(ALWAYS_DENY_FIRST[first], original))
         if any(fnmatchcase(first, pat) for pat in scheduler_only):
             return _deny(f"`{first}` runs only as a scheduler job; use `dureh slurm submit`")
         if first == "git" and "push" in words[1:3]:
