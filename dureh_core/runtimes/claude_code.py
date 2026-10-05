@@ -259,7 +259,7 @@ def _claude_md(site: Site) -> str:
               f"8. Compute runs only as scheduler jobs through `{dureh} slurm submit`. {SUBJECT_RULE}"
               f" Jobs end outside agent turns: keep `{dureh} slurm watch` running as a Monitor (one line per tracked job that ends:"
               " run, job, WI, role, agent, state, next step; it records the final state, so a restart reports nothing twice;"
-              " it checks every 300 s by default with one batched `sacct` call; a job with no final state after `watch_stale_days`"
+              " it checks every 300 s by default with one batched `sacct` call; a job sacct has no state for after `watch_stale_days`"
               " (default 7) is reported once with `next=check by hand` and no longer checked)."
               f" When a line arrives, re-dispatch the owning WI: `{dureh} dispatch brief --wi <WI>` (for an item of a bundle whose manager"
               " ended, re-dispatch the bundle so its manager re-dispatches the item). Workers never wait for jobs in the session;"

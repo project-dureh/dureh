@@ -311,6 +311,28 @@ class Batched(WatchCase):
         self.assertEqual(self.watch(), [])
         self.assertEqual(self.calls(), [fresh["payload"]["job_id"]], "the stale run is not probed again")
 
+    def test_running_after_8_days_stays_live_and_holds_its_lane(self):
+        run, arr = self.submit(), self.submit(each="a,b")
+        for r in (run, arr):
+            self.age(r, 8)
+        job, ajob = run["payload"]["job_id"], arr["payload"]["job_id"]
+        self.sacct(job, "RUNNING|0:0|8-00:00:00")
+        self.sacct(ajob, f"{ajob}_0|COMPLETED|0:0", f"{ajob}_1|REQUEUED|0:0")
+        self.calls()
+        for _ in range(2):
+            self.assertEqual(self.watch(), [], "a job sacct reports is never stale")
+        self.assertEqual(self.calls(), [f"{job},{ajob}"] * 2, "and is probed every round")
+        self.assertEqual([e for e in self.led.events(self.item) if e["type"] == "run.status"], [])
+        lanes = {l["wi"]: l["by"] for l in ops.status(self.s)["lanes"]}
+        self.assertEqual(lanes, {self.bundle: [f"job {job} RUNNING on {self.item} ({run['id']})",
+                                               f"job {ajob} RUNNING on {self.item} ({arr['id']})"]})
+        for state in ("PENDING", "SUSPENDED"):
+            self.sacct(job, f"{state}|0:0|00:00:00")
+            self.assertEqual(self.watch(), [])
+            self.assertEqual(len(ops.lane_holders(self.s, Ledger(self.s))), 1)
+        self.sacct(job, "COMPLETED|0:0|8-00:01:00")
+        self.assertIn("state=COMPLETED", self.watch()[0])
+
     def test_stale_days_is_a_site_limit(self):
         run = self.submit()
         self.age(run, 8)

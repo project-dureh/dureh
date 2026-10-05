@@ -161,25 +161,35 @@ def _stale(site: Site, run: dict, now=None) -> bool:
     return (now or datetime.now(timezone.utc)) - ts > timedelta(days=days)
 
 
+def _no_state(seen: dict | None) -> bool:
+    """sacct answered and has no state at all for the run (no line, UNKNOWN; an array: no task known)."""
+    if seen is None:
+        return False
+    if seen.get("array"):
+        return all(v == "UNKNOWN" for v in seen["array"]["items"].values())
+    return seen["state"] == "UNKNOWN"
+
+
 def live_job_runs(site: Site, led: Ledger, wis: set[str], events: list[dict], probe: bool = True) -> list[dict]:
     """Tracked runs of these WIs whose job is not known to have ended: [{run, job_id, wi, state}]. A run with a
-    recorded terminal state has ended, and so has a stale run (submitted more than `watch_stale_days` ago with
-    no final state recorded); otherwise the scheduler is asked (`probe`, one batched `sacct` call for all runs),
-    and a run it cannot report counts as live until a state is recorded."""
+    recorded terminal state has ended; otherwise the scheduler is asked (`probe`, one batched `sacct` call for
+    all runs). A stale run (submitted more than `watch_stale_days` ago and sacct has no state at all for it) has
+    ended; a run sacct reports in any non-final state stays live however old, and a run the scheduler cannot be
+    asked about counts as live until a state is recorded."""
     recorded = _recorded_states(events)
     pending = []
     for run in _tracked_runs(led):
         if run["wi"] not in wis:
             continue
         state, final = recorded.get(run["id"], ("UNKNOWN", False))
-        if final or state in TERMINAL_STATES or _stale(site, run):
+        if final or state in TERMINAL_STATES:
             continue
         pending.append((run, state))
     probed = _probe_runs(site, [r for r, _ in pending]) if probe else {}
     out = []
     for run, state in pending:
         seen = probed.get(run["id"])
-        if seen is not None and seen["final"]:
+        if seen is not None and (seen["final"] or (_no_state(seen) and _stale(site, run))):
             continue
         state = seen["state"] if seen is not None else state
         out.append({"run": run["id"], "job_id": str(run["payload"]["job_id"]), "wi": run["wi"], "state": state})
@@ -843,8 +853,9 @@ def watch_round(site: Site, actor: str, reported: set[str]) -> list[str]:
     """One pass of `slurm watch`: every tracked run not yet known to have ended is probed with ONE batched
     `sacct` call; a terminal state is recorded once (`run.status` with final and watched; not in observe mode)
     and its line returned. Runs whose final state is already recorded (by `wait`, `status` or an earlier watch)
-    are not reported. A run older than `watch_stale_days` without a final state is recorded once as stale
-    (UNKNOWN, final) and reported for a check by hand; it is not probed again."""
+    are not reported. A run older than `watch_stale_days` for which sacct has no state at all is recorded once
+    as stale (UNKNOWN, final) and reported for a check by hand; it is not probed again. A run sacct reports as
+    pending, running, requeued, suspended ... is never stale."""
     led = Ledger(site)
     events = led.events()
     recorded = _recorded_states(events)
@@ -863,8 +874,8 @@ def watch_round(site: Site, actor: str, reported: set[str]) -> list[str]:
     for run in todo:
         seen = probed.get(run["id"])
         if seen is None or not seen["final"]:
-            if not _stale(site, run):
-                continue
+            if not (_no_state(seen) and _stale(site, run)):
+                continue  # still pending/running (however old), or the scheduler could not be asked
             if not site.observe:
                 led.event("run.status", actor, run["wi"], {"run": run["id"], "job_id": run["payload"]["job_id"],
                                                            "scheduler_state": "UNKNOWN", "final": True, "stale": True,

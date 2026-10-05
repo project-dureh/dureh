@@ -38,10 +38,12 @@ wait for jobs; the desk watches the scheduler and re-dispatches.
   prints nothing twice. No state file. Under `--observe` nothing is recorded, and a later run reports the same
   jobs again. `--once` makes one pass and exits (also a cheap way to refresh job states before a dispatch).
 - **Stale runs.** A tracked run submitted more than `watch_stale_days` ago (org/tiers.yaml limits, default 7;
-  a site overrides it in `config.json` `limits`) for which neither a final state is recorded nor `sacct` reports
-  one (state UNKNOWN or purged from accounting, or still not terminal) is recorded once as `run.status`
+  a site overrides it in `config.json` `limits`) with no recorded final state for which `sacct` returns no state
+  at all (no line, UNKNOWN, purged from accounting; an array: no task known) is recorded once as `run.status`
   `{scheduler_state: UNKNOWN, final: true, stale: true, watched: true}` (not under `--observe`) and reported
-  with `next=check by hand (no scheduler state after N days)`. It is never probed again and holds no lane.
+  with `next=check by hand (no scheduler state after N days)`. It is never probed again and holds no lane. A job
+  `sacct` reports as PENDING, RUNNING, REQUEUED, SUSPENDED ... is never stale: it keeps its lane and is probed
+  however old.
 - **Desk routine.** Run `dureh slurm watch` as a Monitor for the whole company day. When a line arrives,
   re-dispatch the owning WI with `dureh dispatch brief --wi <WI>` (for an item of a bundle whose manager has
   ended, re-dispatch the bundle; its manager re-dispatches the item). The re-dispatched worker reads the final
@@ -59,7 +61,7 @@ and alive**: status dispatched, staged, rework or verified **and** either a live
 `agent.finished` after the latest dispatch; a deferred start of the role counts as starting) or a scheduler job
 not known to have ended, on the item or on an item of its bundle. A job counts as ended when a terminal state
 is recorded, when `sacct` reports one at the time of the check (one batched call for all runs, as in `slurm
-watch`), or when the run is stale (older than `watch_stale_days`, not probed); a run the scheduler cannot report
+watch`), or when the run is stale (older than `watch_stale_days` and `sacct` has no state for it); a run the scheduler cannot report
 counts as live until its state is recorded. Staged, rework and verified items waiting for the desk, and orphaned bundles
 (manager ended, no child agent or job alive), hold no lane. `dureh status` lists each holder (`Lane: WI-0110
 pm-projects [dispatched] held by pipeline-runner agent running on WI-0117; job 3761206 RUNNING on WI-0117
