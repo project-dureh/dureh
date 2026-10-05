@@ -13,7 +13,7 @@ RECORD_KINDS = ("work-item", "run", "decision", "session", "finding", "event")
 READ_ONLY_SITE_DIRS = ("references", "startup")
 _OBSERVE_DIRS: set = set()
 _VAR = re.compile(r"\$\{(\w+)(?::-([^}]*))?\}|\$(\w+)")
-TOOL_NAMES = ("wi", "dispatch", "verify", "ledger", "status", "slurm", "container", "path-refs", "purge", "push", "usage", "upstream", "promote", "worktree", "day")
+TOOL_NAMES = ("wi", "dispatch", "verify", "ledger", "status", "slurm", "container", "path-refs", "purge", "push", "usage", "upstream", "promote", "worktree", "day", "slack")
 
 
 class Site:

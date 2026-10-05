@@ -10,7 +10,7 @@ from pathlib import Path
 from .util import DurehError, dumps, fail
 
 
-RESERVED_EVENT_PREFIXES = ("workday.", "day.", "session.", "hours.")
+RESERVED_EVENT_PREFIXES = ("workday.", "day.", "session.", "hours.", "slack.")
 
 
 def _percent(value: str) -> float:
@@ -270,7 +270,7 @@ def cmd_event_add(a):
     if not a.kind.strip() or not a.wi.strip() or not _actor(a).strip():
         fail("--kind, --wi, and --actor must be nonempty")
     if a.kind.startswith(RESERVED_EVENT_PREFIXES):
-        fail(f"{a.kind} events are written only by `dureh day`, `dureh site workday` and `dureh site session start`")
+        fail(f"{a.kind} events are written only by `dureh day`, `dureh site workday`, `dureh site session start` and `dureh slack post`")
     _print(Ledger(_site(a)).event(a.kind, _actor(a), a.wi, payload))
 
 
@@ -500,6 +500,14 @@ def cmd_upstream(a):
         _print(upstream.export(site, actor, a.ur, a.out))
 
 
+def cmd_slack(a):
+    from . import slack
+
+    site = _site(a)
+    text = Path(a.file).read_text(encoding="utf-8") if a.file else sys.stdin.read()
+    _print(slack.post(site, _actor(a), text, a.dry_run))
+
+
 def cmd_authorize_write(a):
     from .paths import write_decision
 
@@ -566,7 +574,7 @@ def cmd_artifact_write(a):
 # ------------------------------------------------------------------- parser
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="dureh", description="DUREH harness tools: wi, dispatch, verify, ledger, status, "
-                                "slurm, container, path-refs, purge, push, usage, upstream, promote, worktree, day (plus install, adapter, hook).")
+                                "slurm, container, path-refs, purge, push, usage, upstream, promote, worktree, day, slack (plus install, adapter, hook).")
     p.add_argument("--site", help="installed site directory (or DUREH_SITE)")
     p.add_argument("--observe", action="store_true",
                    help="read-only: allow only status, wi show/list, ledger query, upstream list/message, path-refs, usage, "
@@ -879,6 +887,14 @@ def parser() -> argparse.ArgumentParser:
     x = add(up, "export", cmd_upstream, "bundle a UR file with its referenced findings and WIs (desk)")
     x.add_argument("--ur", required=True)
     x.add_argument("--out", help="bundle directory (default notes/upstream/export/<ur>)")
+    x.add_argument("--actor")
+
+    sk = sub.add_parser("slack", help="desk only: one-way reports to the company's Slack thread (channel, thread and display "
+                         "name come from config `slack`, set by the Director)").add_subparsers(dest="slack_command", required=True)
+    x = add(sk, "post", cmd_slack, "post Slack mrkdwn (from --file or stdin, at most 4000 characters) as a reply in the "
+                                   "company thread; records slack.posted {ts, chars}, never the text")
+    x.add_argument("--file")
+    x.add_argument("--dry-run", action="store_true", help="print the payload (never the token) and post nothing")
     x.add_argument("--actor")
 
     x = add(sub, "authorize-write", cmd_authorize_write, "check a role's write to a site path")

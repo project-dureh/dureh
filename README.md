@@ -29,7 +29,7 @@ Hooks and the path checks are workflow controls. They are not an operating-syste
 
 ## Tools
 
-`wi`, `dispatch`, `verify`, `ledger`, `status`, `slurm` (scheduler jobs, optionally on a pinned read-only module tree with `--module`, docs/slurm.md), `container` (image builds as scheduler jobs, docs/containers.md), `path-refs`, `purge`, `push`, `usage` (plus `install`, `adapter sync`, `hook`). Records are one JSON file per record under `state/records/<kind>/`, validated against `schemas/`, never rewritten; work-item status is a projection of events. The SQLite index is node-local and rebuildable.
+`wi`, `dispatch`, `verify`, `ledger`, `status`, `slurm` (scheduler jobs, optionally on a pinned read-only module tree with `--module`, docs/slurm.md), `container` (image builds as scheduler jobs, docs/containers.md), `path-refs`, `purge`, `push`, `usage`, `slack` (desk only: one-way reports to the company's Slack thread, docs/slack.md) (plus `install`, `adapter sync`, `hook`). Records are one JSON file per record under `state/records/<kind>/`, validated against `schemas/`, never rewritten; work-item status is a projection of events. The SQLite index is node-local and rebuildable.
 
 ## Status
 
