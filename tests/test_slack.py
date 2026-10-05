@@ -437,3 +437,149 @@ class SlackApproval(SlackBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+DAILY = {k: v for k, v in CFG.items() if k != "thread_ts"}
+
+
+class SlackDaily(SlackBase):
+    """Release 34: one thread per working day, opened by the first post of the day (Director, 2026-10-05)."""
+
+    def setUp(self):
+        super().setUp()
+        self.set_config(dict(DAILY, token_file=str(self.token_file)))
+        os.environ["DUREH_FAKE_NOW"] = T0.isoformat()
+        self.addCleanup(os.environ.pop, "DUREH_FAKE_NOW", None)
+
+        def fake(method, token, *, data, timeout=30):
+            self.calls.append({"method": method, "token": token, "data": data})
+            return {"ok": True, "ts": f"1791300000.{len(self.calls):06d}", "channel": data["channel"]}
+
+        p = mock.patch.object(slack, "_request", fake)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def opened(self):
+        return [e["payload"] for e in self.slack_events() if e["type"] == "slack.thread.opened"]
+
+    def test_first_post_opens_the_day_thread(self):
+        code, out, err = self.run_cli("post", stdin="출근")
+        self.assertEqual(code, 0, err)
+        top, reply = (c["data"] for c in self.calls)
+        self.assertNotIn("thread_ts", top)
+        self.assertEqual(top["channel"], CFG["channel"])
+        self.assertEqual((top["username"], top["icon_emoji"]), (CFG["username"], CFG["icon_emoji"]))
+        name = json.loads((self.site_root / "config.json").read_text())["site"].get("name") or self.site_root.name
+        self.assertEqual(top["text"], f"*2026-10-05 (월) {name} · {CFG['username']}*\n오늘의 업무 보고 스레드입니다.")
+        self.assertEqual(reply["thread_ts"], "1791300000.000001")
+        self.assertEqual(reply["text"], "출근")
+        self.assertEqual(self.opened(), [{"date": "2026-10-05", "ts": "1791300000.000001", "channel": CFG["channel"]}])
+        res = json.loads(out)
+        self.assertEqual((res["thread_ts"], res["day_thread"]["opened"]), ("1791300000.000001", True))
+        self.assertNotIn(FAKE_TOKEN, out)
+
+    def test_second_post_reuses_the_day_thread(self):
+        self.run_cli("post", stdin="a")
+        code, out, _ = self.run_cli("post", stdin="b")
+        self.assertEqual(code, 0)
+        self.assertEqual(len(self.calls), 3)
+        self.assertEqual(self.calls[2]["data"]["thread_ts"], "1791300000.000001")
+        self.assertEqual(len(self.opened()), 1)
+        self.assertFalse(json.loads(out)["day_thread"]["opened"])
+
+    def test_next_day_opens_a_new_thread(self):
+        self.run_cli("post", stdin="a")
+        os.environ["DUREH_FAKE_NOW"] = (T0 + timedelta(days=1)).isoformat()
+        self.run_cli("post", stdin="b")
+        self.assertTrue(self.calls[2]["data"]["text"].startswith("*2026-10-06 (화) "))
+        self.assertNotIn("thread_ts", self.calls[2]["data"])
+        self.assertEqual(self.calls[3]["data"]["thread_ts"], "1791300000.000003")
+        self.assertEqual([o["date"] for o in self.opened()], ["2026-10-05", "2026-10-06"])
+
+    def test_dry_run_shows_the_thread_it_would_open(self):
+        code, out, _ = self.run_cli("post", "--dry-run", stdin="plan")
+        self.assertEqual(code, 0)
+        res = json.loads(out)
+        self.assertTrue(res["day_thread"]["opens"])
+        self.assertNotIn("thread_ts", res["day_thread"]["opening_payload"])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.slack_events(), [])
+        self.run_cli("post", stdin="x")
+        res = json.loads(self.run_cli("post", "--dry-run", stdin="plan")[1])
+        self.assertEqual(res["payload"]["thread_ts"], "1791300000.000001")
+        self.assertEqual(res["day_thread"], {"date": "2026-10-05", "ts": "1791300000.000001", "opened": False})
+
+    def test_explicit_thread_ts_keeps_the_old_behaviour(self):
+        self.set_config(dict(CFG, token_file=str(self.token_file)))
+        self.run_cli("post", stdin="a")
+        self.run_cli("post", stdin="b")
+        self.assertEqual([c["data"]["thread_ts"] for c in self.calls], [CFG["thread_ts"]] * 2)
+        self.assertEqual(self.opened(), [])
+
+    def test_daily_true_overrides_thread_ts(self):
+        self.set_config(dict(CFG, daily_thread=True, token_file=str(self.token_file)))
+        self.run_cli("post", stdin="a")
+        self.assertNotIn("thread_ts", self.calls[0]["data"])
+        self.assertEqual(self.calls[1]["data"]["thread_ts"], "1791300000.000001")
+
+    def test_daily_false_needs_thread_ts(self):
+        self.set_config(dict(DAILY, daily_thread=False, token_file=str(self.token_file)))
+        code, _, err = self.run_cli("post", stdin="a")
+        self.assertEqual(code, 2)
+        self.assertIn("thread_ts", err)
+        self.set_config(dict(DAILY, daily_thread="yes", token_file=str(self.token_file)))
+        self.assertEqual(self.run_cli("post", stdin="a")[0], 2)
+        self.assertEqual(self.calls, [])
+
+    def test_guards_hold_before_opening(self):
+        self.assertEqual(self.run_cli("post", stdin="xoxb-1")[0], 2)
+        self.assertEqual(self.run_cli("post", stdin="hi", actor="py-writer")[0], 2)
+        self.token_file.unlink()
+        self.assertEqual(self.run_cli("post", stdin="hi")[0], 2)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.slack_events(), [])
+
+    def test_desk_instructions_mention_daily_thread(self):
+        self.assertIn("one thread per working day, opened by your first post", _claude_md(self.site()))
+        self.set_config(dict(CFG, token_file=str(self.token_file)))
+        self.assertNotIn("one thread per working day", _claude_md(self.site()))
+
+
+class SlackDailyApproval(SlackApproval):
+    """Release 34: `slack ask` opens the day thread too; the decision reply goes to the request's thread."""
+
+    def setUp(self):
+        super().setUp()
+        self.set_config(dict(DAILY, token_file=str(self.token_file), director_user=DIRECTOR))
+        self.cfg_workday()
+
+        def fake(method, token, *, data, timeout=30):
+            self.calls.append({"method": method, "token": token, "data": data})
+            return {"ok": True, "ts": ASK_TS if "thread_ts" in data else "1791299999.000001", "channel": data["channel"]}
+
+        p = mock.patch.object(slack, "_request", fake)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_ask_posts_plan_and_question_and_records_no_text(self):
+        res = self.ask()
+        self.assertEqual(len(self.calls), 2)
+        self.assertNotIn("thread_ts", self.calls[0]["data"])
+        self.assertEqual(self.calls[1]["data"]["thread_ts"], "1791299999.000001")
+        self.assertEqual(res["thread_ts"], "1791299999.000001")
+        self.assertEqual(self.events("slack.approval.requested")[0]["payload"]["thread_ts"], "1791299999.000001")
+        # a later post the same day replies in the same thread
+        self.assertEqual(self.run_cli("post", stdin="진행")[0], 0)
+        self.assertEqual(self.calls[-1]["data"]["thread_ts"], "1791299999.000001")
+        self.assertEqual(len(self.events("slack.thread.opened")), 1)
+
+    def test_director_check_approves_the_day_via_slack(self):
+        super().test_director_check_approves_the_day_via_slack()
+        self.assertEqual(self.calls[-1]["data"]["thread_ts"], "1791299999.000001")
+
+    def test_ask_uses_the_file(self):
+        self.plan()
+        f = self.tmp / "plan.md"
+        f.write_text("짧은 계획")
+        self.assertEqual(self.run_cli("ask", "--kind", "day-plan", "--file", str(f))[0], 0)
+        self.assertEqual(self.calls[-1]["data"]["text"], "짧은 계획\n\n" + slack.ASK_LINE)

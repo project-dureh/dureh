@@ -908,7 +908,8 @@ def parser() -> argparse.ArgumentParser:
                          "bot-posted day-plan approval request (channel, thread, display "
                          "name come from config `slack`, set by the Director)").add_subparsers(dest="slack_command", required=True)
     x = add(sk, "post", cmd_slack, "post Slack mrkdwn (from --file or stdin, at most 4000 characters) as a reply in the "
-                                   "company thread; records slack.posted {ts, chars}, never the text")
+                                   "company thread (with slack.daily_thread: the day's thread, opened by the first post "
+                                   "of the working day); records slack.posted {ts, chars}, never the text")
     x.add_argument("--file")
     x.add_argument("--dry-run", action="store_true", help="print the payload (never the token) and post nothing")
     x.add_argument("--actor")
