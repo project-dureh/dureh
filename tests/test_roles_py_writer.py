@@ -81,3 +81,37 @@ class ModuleContainerRecipes(SiteCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ModuleTools(SiteCase):
+    """UR-20261005-01 (option 1, Director 2026-10-05): a module's tools/ (e.g. the pipeline spec schema) is
+    py-writer's write scope; other roles stay out."""
+
+    def setUp(self):
+        super().setUp()
+        self.install()
+        self.make_module("camri")
+        self.s = self.site()
+        led = Ledger(self.s)
+        bundle = wf.wi_new(self.s, "desk", "Bundle", "g", "pm-modules", "modules/camri", ["ok"])["id"]
+        wf.wi_approve(self.s, "desk", bundle, "ok")
+        self.w = wf.wi_new(self.s, "desk", "Schema", "g", "py-writer", "modules/camri", ["ok"], parent=bundle)["id"]
+        wf.wi_approve(self.s, "desk", self.w, "ok")
+        led.event("wi.dispatched", "desk", self.w, {"role": "py-writer", "brief": "0" * 16, "by": "desk"})
+        self.schema = self.site_root / "worktrees" / self.w / "tools" / "pipeline-spec.schema.json"
+        self.schema.parent.mkdir(parents=True)
+
+    def test_py_writer_may_write_module_tools(self):
+        self.assertTrue(self.s.org.scope_allows("py-writer", "modules/camri/tools/pipeline-spec.schema.json"))
+        ok, why = write_decision(self.s, "py-writer", self.schema, agent_wi=self.w)
+        self.assertTrue(ok, why)
+
+    def test_other_roles_may_not(self):
+        self.assertFalse(self.s.org.scope_allows("doc-writer", "modules/camri/tools/pipeline-spec.schema.json"))
+        ok, why = write_decision(self.s, "doc-writer", self.schema)
+        self.assertFalse(ok, why)
+
+    def test_generated_agent_file_names_the_scope(self):
+        from dureh_core.runtimes.claude_code import _agent_file
+
+        self.assertIn("modules/*/tools/**", _agent_file(self.s, self.s.org.role("py-writer")))

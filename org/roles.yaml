@@ -61,6 +61,7 @@ roles:
       - modules/*/pyproject.toml
       - modules/*/uv.lock
       - modules/*/containers/**
+      - modules/*/tools/**
       - projects/*/code/notebooks/**
   web-writer:
     kind: worker
