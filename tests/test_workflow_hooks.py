@@ -278,8 +278,8 @@ class BashGuard(SiteCase):
     def test_worker_write_targets(self):
         self.assertTrue(denied(self.bash("echo x > notes/a.md", role="py-writer")))
         self.assertTrue(denied(self.bash("touch /home/elsewhere/file", role="py-writer")))
-        self.assertIsNone(self.bash(f"echo x > {os.environ['TMPDIR']}/scratch.txt", role="py-writer"))
-        self.assertIsNone(self.bash("python3 -m unittest -q", role="py-writer"))
+        self.assertFalse(denied(self.bash(f"echo x > {os.environ['TMPDIR']}/scratch.txt", role="py-writer")))
+        self.assertFalse(denied(self.bash("python3 -m unittest -q", role="py-writer")))
         self.assertIsNone(self.bash("echo x > notes/a.md"), "desk owns notes/")
 
     def test_dureh_identity_rewrite(self):

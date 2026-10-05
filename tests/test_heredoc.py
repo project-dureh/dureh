@@ -23,12 +23,12 @@ class Heredoc(SiteCase):
 
     def test_commit_message_body_with_arrow_is_not_a_redirect(self):
         cmd = "wc -l <<'EOF'\nAdd docs\n\nDocument the finding -> UR -> forward flow\nEOF"
-        self.assertIsNone(self.bash(cmd))
+        self.assertFalse(denied(self.bash(cmd)))
 
     def test_redirect_on_the_heredoc_line_is_still_checked(self):
         self.assertTrue(denied(self.bash("cat <<EOF > notes/x.md\nhello\nEOF")))
         tmp = os.environ["TMPDIR"]
-        self.assertIsNone(self.bash(f"cat <<EOF > {tmp}/x.md\nhello\nEOF"))
+        self.assertFalse(denied(self.bash(f"cat <<EOF > {tmp}/x.md\nhello\nEOF")))
 
     def test_commands_after_the_delimiter_are_still_checked(self):
         self.assertTrue(denied(self.bash("cat <<EOF\nbody\nEOF\necho x > notes/y.md")))

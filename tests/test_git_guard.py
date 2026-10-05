@@ -51,7 +51,7 @@ class GitGuard(SiteCase):
     def test_writes_in_the_own_worktree_are_allowed(self):
         for c in (f"git -C {self.wa} add src/demo.py", f"git -C {self.wa} commit -m 'add g -> h'",
                   f"cd {self.wa} && git cherry-pick abc123", f"git -C {self.wa}/src restore demo.py"):
-            self.assertIsNone(self.bash(c), c)
+            self.assertFalse(denied(self.bash(c)), c)
 
     def test_writes_in_another_worktree_are_denied_and_recorded(self):
         for c in (f"git -C {self.wb} cherry-pick 9dc16ec", f"cd {self.wb} && git commit -qm x",
@@ -67,7 +67,7 @@ class GitGuard(SiteCase):
         for c in (f"git -C {self.wb} status", f"git -C {self.wb} log --oneline -3", f"git -C {self.wb} diff HEAD~1",
                   f"git -C {self.wb} branch", f"git -C {self.wb} branch --show-current", f"git -C {self.wb} stash list",
                   f"git -C {self.wb} config --get user.name", f"git -C {self.wb} rev-parse HEAD", "git --no-pager log -1"):
-            self.assertIsNone(self.bash(c), c)
+            self.assertFalse(denied(self.bash(c)), c)
 
     def test_main_trees_and_redirected_git_dirs_are_denied(self):
         for c in (f"git -C {self.mod} commit -qm x", f"git -C {self.site_root} add -A",
@@ -77,8 +77,8 @@ class GitGuard(SiteCase):
 
     def test_scratch_repositories_are_allowed(self):
         scratch = Path(os.environ["TMPDIR"]) / "play"
-        self.assertIsNone(self.bash(f"git init -q {scratch}"))
-        self.assertIsNone(self.bash(f"git -C {scratch} commit --allow-empty -m x"))
+        self.assertFalse(denied(self.bash(f"git init -q {scratch}")))
+        self.assertFalse(denied(self.bash(f"git -C {scratch} commit --allow-empty -m x")))
 
     def test_unbound_agent_cannot_write_with_git(self):
         self.assertTrue(denied(self.bash(f"git -C {self.wa} commit -m x", agent_id="a-9")))

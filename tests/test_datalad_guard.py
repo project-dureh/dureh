@@ -51,14 +51,14 @@ class DataladGuard(SiteCase):
     def test_reads_anywhere(self):
         for c in ("datalad status", f"datalad -C {self.wb} diff", f"datalad subdatasets -d {self.wb}", "datalad wtf",
                   f"datalad siblings -d {self.wb}", "datalad --version"):
-            self.assertIsNone(self.bash(c), c)
+            self.assertFalse(denied(self.bash(c)), c)
 
     def test_writes_in_the_own_worktree_or_scratch(self):
         scratch = os.environ["TMPDIR"]
         for c in (f"datalad save -d {self.wa} -m x", f"cd {self.wa} && datalad save -m x", f"datalad -C {self.wa} save",
                   f"datalad create -d {self.wa} {self.wa}/derivatives/x", f"datalad save --dataset={self.wa} -m x",
                   f"datalad create {scratch}/ds", f"datalad get -d {self.wa} src"):
-            self.assertIsNone(self.bash(c), c)
+            self.assertFalse(denied(self.bash(c)), c)
 
     def test_writes_elsewhere_are_denied(self):
         for c in (f"datalad save -d {self.wb} -m x", f"cd {self.wb} && datalad save", f"datalad -C {self.wb} save",

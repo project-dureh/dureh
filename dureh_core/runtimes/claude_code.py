@@ -25,7 +25,8 @@ from pathlib import Path
 from .. import yamlsub
 from ..ops import render_status, status, transcript_usage
 from ..org import HARNESS_ROOT
-from ..paths import classify, write_decision
+from .. import procs
+from ..paths import classify, scratch_roots, write_decision
 from ..records import Ledger
 from ..site import TOOL_NAMES, Site
 from ..util import DurehError, fail, dumps, sha256_bytes, utc_now, write_replace
@@ -134,6 +135,9 @@ def _agent_file(site: Site, role, project: str | None = None) -> str:
             " Inside a WI worktree, paths are relative to the work item target.",
             "- Reference paths are read-only. Heavy computation runs only through the scheduler, never in the session.",
             TESTS_RULE,
+            "- Search only inside your WI worktree, the site, scratch space or the harness: a `find`, `grep -r`, `rg`, `du`,"
+            " `ls -R` or `tree` rooted elsewhere (`/`, `/work`, `/nas`, `/proj`, `/home`, `~`) is refused. Do not leave"
+            " processes running when you end: whatever still runs then is killed and recorded.",
             "- A missing expected input is a failure: report the exact missing path instead of producing an empty result.",
             f"- Use `{dureh}` for records; the hook sets your identity. Do not pass --actor.",
             "- Use only the context in your brief. If you need more, stop and say what is missing.",
@@ -724,6 +728,109 @@ def _names_harness(word: str) -> bool:
     return os.path.basename(w) in ("dureh", "dureh.py") or "dureh_core" in w
 
 
+# Release 27: whole-filesystem scans (WI-0115 left `find /` running for hours after its agent had finished).
+_SCAN_VALUE_OPTS = {
+    "grep": {"-e", "-f", "-A", "-B", "-C", "-m", "-d", "-D", "--include", "--exclude", "--exclude-dir", "--exclude-from",
+             "--regexp", "--file", "--color", "--colour", "--label", "--binary-files", "--max-count", "--context"},
+    "rg": {"-e", "-f", "-g", "-t", "-T", "-A", "-B", "-C", "-m", "-M", "-j", "-E", "-r", "--regexp", "--file", "--glob",
+           "--iglob", "--type", "--type-not", "--type-add", "--max-depth", "--max-count", "--max-columns", "--threads",
+           "--encoding", "--replace", "--color", "--colors", "--sort", "--sortr", "--pre", "--pre-glob", "--context",
+           "--after-context", "--before-context", "--context-separator", "--path-separator", "--max-filesize",
+           "--dfa-size-limit", "--regex-size-limit", "--ignore-file"},
+    "tree": {"-L", "-P", "-I", "-o", "-H", "-T", "--filelimit", "--charset", "--timefmt", "--sort"},
+    "du": {"-d", "-B", "-t", "-X", "--max-depth", "--block-size", "--threshold", "--exclude", "--exclude-from"},
+    "ls": {"-w", "-I", "-T", "--width", "--ignore", "--tabsize", "--block-size", "--time-style", "--format", "--sort",
+           "--color", "--quoting-style", "--hide", "--indicator-style", "--time"},
+}
+_FIND_LEAD = re.compile(r"^-[HLP]+$|^-[DO]")
+_SCAN_VARS = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?")
+
+
+def _positional(first: str, words: list[str]) -> list[str]:
+    """Arguments that are not options (and not an option's value) of a scan command."""
+    out, i, take = [], 0, _SCAN_VALUE_OPTS.get(first, set())
+    while i < len(words):
+        w = words[i]
+        if w == "--":
+            out += words[i + 1:]
+            break
+        if w.startswith("-") and w != "-":
+            if w in take and "=" not in w:
+                i += 1  # the option's value
+        else:
+            out.append(w)
+        i += 1
+    return out
+
+
+def _has_flag(words: list[str], short: str, long: str) -> bool:
+    return any(w == long or (w.startswith("-") and not w.startswith("--") and short in w[1:]) for w in words)
+
+
+def scan_roots(first: str, words: list[str]) -> list[str] | None:
+    """The directories a filesystem scan starts from, or None when the command is not a scan: `find` (always),
+    `grep -r/-R`, `rg` (always), `du` (always), `ls -R`, `tree`; no path argument means the current directory."""
+    args = words[1:]
+    if first == "find":
+        roots, i = [], 0
+        while i < len(args) and _FIND_LEAD.match(args[i]):
+            i += 1
+        while i < len(args) and not args[i].startswith("-") and args[i] not in ("(", "!", ","):
+            roots.append(args[i])
+            i += 1
+        return roots or ["."]
+    if first in ("grep", "egrep", "fgrep"):
+        if not _has_flag(args, "r", "--recursive") and not _has_flag(args, "R", "--dereference-recursive"):
+            return None
+        pos = _positional("grep", args)
+        if not any(a.startswith(("-e", "-f", "--regexp", "--file")) for a in args):
+            pos = pos[1:]  # the pattern
+        return pos or ["."]
+    if first == "rg":
+        pos = _positional("rg", args)
+        if not any(a.startswith(("-e", "-f", "--regexp", "--file", "--files", "--type-list")) for a in args):
+            pos = pos[1:]
+        return pos or ["."]
+    if first == "du":
+        return _positional("du", args) or ["."]
+    if first == "tree":
+        return _positional("tree", args) or ["."]
+    if first in ("ls", "dir", "vdir"):
+        if not _has_flag(args, "R", "--recursive"):
+            return None
+        return _positional("ls", args) or ["."]
+    return None
+
+
+def _scan_check(site: Site, first: str, words: list[str], cwd: Path) -> str | None:
+    roots = scan_roots(first, words)
+    if roots is None:
+        return None
+    env = site.env()
+    known = {"HOME": env.get("HOME", os.path.expanduser("~")), "PWD": str(cwd), "TMPDIR": env.get("TMPDIR", ""),
+             "DUREH_SITE": str(site.root), "DUREH_ROOT": str(HARNESS_ROOT), "USER": env.get("USER", "")}
+    for raw in roots:
+        path = _SCAN_VARS.sub(lambda m: known.get(m.group(1), m.group(0)), raw)
+        if "$" in path:
+            continue  # an unknown variable: not checkable here; the write and git rules still apply
+        path = os.path.expanduser(path)
+        if classify(site, path, cwd).zone != "outside":
+            continue
+        shown = raw if raw != "." else f". (cwd {cwd})"
+        tmp = next(iter(scratch_roots()), Path("/tmp"))
+        return (f"`{first} {shown}` scans outside the allowed roots (whole-filesystem scans run for hours and outlive"
+                f" the agent). Search inside your WI worktree ({site.worktrees}/<WI>), the site ({site.root}: modules/,"
+                f" projects/, scratch/, logs/), scratch space ({tmp}) or the harness ({HARNESS_ROOT}), for example"
+                f" `{first} {site.worktrees}/<WI> ...`; for a known file use its exact path.")
+    return None
+
+
+def _marked(original: str, agent_id: str, simple: bool) -> str:
+    """The command with DUREH_AGENT_ID in its environment, so leftovers can be found when the agent ends."""
+    ident = f"DUREH_AGENT_ID={shlex.quote(agent_id)}"
+    return f"{ident} {original}" if simple else f"export {ident}\n{original}"
+
+
 def guard_bash(site: Site, role: str, data: dict) -> dict | None:
     ti = data.get("tool_input") or {}
     original = ti.get("command") or ""
@@ -798,6 +905,10 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
                 return _deny(why)
         if first == "rm" and any(w.startswith("-") and ("r" in w or "R" in w) for w in words[1:]):
             return _deny("recursive deletion goes through `dureh purge`")
+        if role != "desk":
+            why = _scan_check(site, first, words, cwd)
+            if why:
+                return _deny(why)
         if first == "cd" and len(words) > 1:
             cwd = (cwd / os.path.expanduser(words[1])).resolve()
             continue
@@ -837,6 +948,13 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
         new_input["command"] = f"{ident} {original}" if len(words_only) == 1 and not keyword_lead else f"( export {ident}\n{original}\n)"
         return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
                                        "permissionDecisionReason": "DUREH harness tool; identity set by hook",
+                                       "updatedInput": new_input}}
+    if agent_id and role != "desk" and words_only:
+        # release 27: every process an agent starts carries its agent id, so leftovers are found when it ends
+        new_input = dict(ti)
+        new_input["command"] = _marked(original, agent_id, len(words_only) == 1 and not keyword_lead)
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+                                       "permissionDecisionReason": "DUREH: agent process marker set by hook",
                                        "updatedInput": new_input}}
     return None
 
@@ -987,11 +1105,11 @@ def _bind(led: Ledger, role: str, data: dict, at: str) -> str | None:
             if at == "start" and pending:
                 # the runtime has usually not written the transcript yet: note the start, bind at the first tool call
                 led.event("agent.started", role, None, {"agent_id": agent_id, "bound_by": "deferred", "bound_at": at,
-                                                        "prompt_brief": None})
+                                                        "prompt_brief": None, "runtime_pid": procs.runtime_pid()})
             return None
         led.event("agent.started", role, ev["wi"], {"agent_id": agent_id, "brief": ev["payload"].get("brief"),
-                                                    "bound_by": how, "bound_at": at, "prompt_brief": digest},
-                  [ev["id"]])
+                                                    "bound_by": how, "bound_at": at, "prompt_brief": digest,
+                                                    "runtime_pid": procs.runtime_pid()}, [ev["id"]])
         return ev["wi"]
 
 
@@ -1030,10 +1148,36 @@ def subagent_stop(site: Site, data: dict) -> None:
     wi = _bind(led, role, data, "stop")
     tpath = data.get("agent_transcript_path")
     usage = transcript_usage(Path(tpath)) if tpath else {"coverage": "none", "reason": "runtime did not supply a transcript path"}
-    led.event("agent.finished", role, wi, {"agent_id": data.get("agent_id")})
-    led.append("run", "agent", role, wi, {"run_type": "agent", "status": "completed", "agent_id": data.get("agent_id"),
+    agent_id = data.get("agent_id")
+    leftovers = _cleanup_agent(led, role, wi, agent_id)
+    led.event("agent.finished", role, wi, {"agent_id": agent_id, "leftovers_killed": len(leftovers.get("killed") or [])})
+    led.append("run", "agent", role, wi, {"run_type": "agent", "status": "completed", "agent_id": agent_id,
                                           "runtime": "claude-code", "usage": usage})
     return None
+
+
+def _cleanup_agent(led: Ledger, role: str, wi: str | None, agent_id: str | None) -> dict:
+    """Release 27: kill what the finished agent left running (processes marked with its id, same session job)
+    and record it as `agent.cleaned`. Never the session: this hook's own ancestors and the recorded runtime
+    pid are protected; a failure here never breaks the stop hook."""
+    if not agent_id:
+        return {}
+    protect = set()
+    for ev in reversed(led.load("event")):
+        if ev["type"] == "agent.started" and ev["payload"].get("agent_id") == agent_id:
+            if ev["payload"].get("runtime_pid"):
+                protect.add(int(ev["payload"]["runtime_pid"]))
+            break
+    try:
+        result = procs.kill_leftovers(agent_id, protect)
+    except Exception as exc:  # noqa: BLE001 - cleanup is best effort
+        result = {"method": "environ-marker", "agent_id": agent_id, "scanned": 0, "killed": [], "errors": [{"error": str(exc)}]}
+    if result.get("killed") or result.get("errors"):
+        try:
+            led.event("agent.cleaned", role, wi, result)
+        except DurehError:
+            pass
+    return result
 
 
 def session_start(site: Site, data: dict) -> dict:
