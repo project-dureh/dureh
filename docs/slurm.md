@@ -6,8 +6,72 @@ dureh slurm submit --wi <WI> --script <job.sh> [--sbatch-arg ARG ...] [--module 
                    [--after <run>[,<run>...]] [--max-parallel N]
 dureh slurm status --run <run id>
 dureh slurm wait   --run <run id> [--timeout S] [--interval S]
+dureh slurm watch  [--interval S] [--once]          # desk only
 dureh slurm cancel --run <run id>
 ```
+
+## Jobs end outside agent turns: `dureh slurm watch` (release 30, provisional names)
+
+Measured 2026-10-04 at UNC_Lee_CAMRI-ORG: agents cannot wait for a job inside their session (background waits,
+`&`, `until squeue` loops and `run_in_background` are refused; a long `slurm wait` holds the session), so a
+worker ends its turn while its job runs. Its item then shows as dispatched with an ended agent, the desk
+noticed late and re-adopted by hand, and such items held the two lanes all day. Director's rule: workers never
+wait for jobs; the desk watches the scheduler and re-dispatches.
+
+- **`dureh slurm watch`** (the desk; other actors are refused) polls `sacct` every `--interval` seconds
+  (default 60) for every tracked run — a `run` record of `slurm submit`, single jobs and `--each` arrays,
+  with a job id — whose final state is not recorded yet. When a job is terminal (COMPLETED, FAILED, CANCELLED,
+  TIMEOUT, OUT_OF_MEMORY, NODE_FAIL, PREEMPTED, BOOT_FAIL, DEADLINE; an array once every task is), it records
+  a `run.status` event (`final: true, watched: true`; per-item states for an array, recorded once as for
+  `slurm wait`) and prints ONE line:
+
+  ```
+  2026-10-05T14:02:11Z run=run-20261005T...-ab12 job=3761206 wi=WI-0117 role=pipeline-runner agent=a221b499:ended state=COMPLETED items=COMPLETED:3 next=dispatch brief --wi WI-0117 (bundle WI-0110)
+  ```
+
+  `agent` is the latest agent bound to the WI and its state (running, ended, starting, not started; `none`
+  when no agent ever bound). `next` is `dispatch brief --wi <WI>` when the WI is dispatched or in rework and
+  its agent is gone, `agent still running; nothing to do` while it runs, or `none (WI <status>)`.
+- **Idempotent.** What is reported is derived from records: a run whose final state is recorded (by `slurm
+  wait`, `slurm status` or an earlier `watch`, on any node) is never reported again, so a restarted watch
+  prints nothing twice. No state file. Under `--observe` nothing is recorded, and a later run reports the same
+  jobs again. `--once` makes one pass and exits (also a cheap way to refresh job states before a dispatch).
+- **Desk routine.** Run `dureh slurm watch` as a Monitor for the whole company day. When a line arrives,
+  re-dispatch the owning WI with `dureh dispatch brief --wi <WI>` (for an item of a bundle whose manager has
+  ended, re-dispatch the bundle; its manager re-dispatches the item). The re-dispatched worker reads the final
+  state with `dureh slurm status --run <run id>` and continues (stage, resubmit failed items, ...). A dispatched
+  item whose agent ended while its job runs is the normal state, not an incident.
+- **Workers.** After `slurm submit`, report the run id(s) and end the turn. The generated role files say so,
+  and a refused wait form (background command, `&`, command substitution, a heredoc into an interpreter)
+  carries the hint "do not wait for jobs in the session: end your turn; the desk re-dispatches you when `dureh
+  slurm watch` reports the job". `slurm wait` stays for jobs expected to end within minutes.
+
+### Lanes count live work only (release 30)
+
+`max_concurrent_lanes` (default 2) counts top-level work items (not items inside a bundle) that are **active
+and alive**: status dispatched, staged, rework or verified **and** either a live agent (`agent.started` without
+`agent.finished` after the latest dispatch; a deferred start of the role counts as starting) or a scheduler job
+not known to have ended, on the item or on an item of its bundle. A job counts as ended when a terminal state
+is recorded or when `sacct` reports one at the time of the check; a run the scheduler cannot report counts as
+live until its state is recorded. Staged, rework and verified items waiting for the desk, and orphaned bundles
+(manager ended, no child agent or job alive), hold no lane. `dureh status` lists each holder (`Lane: WI-0110
+pm-projects [dispatched] held by pipeline-runner agent running on WI-0117; job 3761206 RUNNING on WI-0117
+(run-...)`).
+
+Every refusal is recorded as a `lane.refused` event on the refused WI (actor: the dispatcher; payload `count`,
+`limit`, `lane`, `holders: [{wi, lane, by}]`) and counted in status (`Lane refusals (24h): n; last WI-... by
+... at ...`). Query: `dureh ledger query "SELECT ts, wi, actor, payload FROM records WHERE type='lane.refused'"`.
+
+### A dispatch whose agent never started does not block (release 30)
+
+Desk finding `fnd-20261004T214606784656Z-a4f231c9`: WI-0117 was dispatched by its manager at 21:25 UTC, no
+agent ever started, and every later `dispatch brief` was refused with "dispatched and its agent has not
+finished"; only the desk could clear it (`dispatch stop` + `wi amend` + re-approval). Now `dispatch brief` on
+a dispatched item allows the new dispatch when the latest dispatch's agent finished, **or** when no agent
+started for it within `dispatch_start_grace_seconds` (org/tiers.yaml limits, default 120; a site overrides it
+in `config.json` `limits`). The new `dispatch.prepared` record carries `supersedes: {dispatched: <event id>,
+agent: ended | not started, age_seconds}`. Inside the grace period the refusal says how long to wait; while an
+agent runs or a deferred start of the role may still bind, the refusal is unchanged (stop it first).
 
 Without `--module`, `submit` works as before: the job script is submitted as it is (job directory = the WI
 target, logs under `logs/slurm/<WI>/` unless the script chooses its own, config `slurm.time` as the fallback
