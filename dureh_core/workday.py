@@ -504,7 +504,9 @@ def plan(site: Site, actor: str, goal: str, text: str) -> dict:
                                                            "plan": text, "usage_at_plan": u, "heads": heads(site)})
 
 
-def approve(site: Site, actor: str, memo: str) -> dict:
+def approve(site: Site, actor: str, memo: str, via: str | None = None, extra: dict | None = None) -> dict:
+    """Record the Director's approval of the day plan. The desk records the Director's words from the session;
+    `via="slack"` is used only by `dureh slack check` after the Director's own ✅ reaction (release 33)."""
     _require_on(site)
     if not memo.strip():
         fail("--memo must carry the Director's words")
@@ -515,9 +517,10 @@ def approve(site: Site, actor: str, memo: str) -> dict:
     start, end = clock(site, todays_session(_events(site)), _now())
     if hours_mode(site) == "block" and _now() >= _parse(end):
         fail(f"the day started at {start} and ended at {end}; a plan approved now would be past its end")
-    return Ledger(site).event("day.approved", actor, None,
-                              {"start": start, "end": end, "memo": memo, "by": "Director",
-                               "session": d.get("session")}, [d["plan"]])
+    payload = {"start": start, "end": end, "memo": memo, "by": "Director", "session": d.get("session")}
+    if via:
+        payload.update(extra or {}, via=via)
+    return Ledger(site).event("day.approved", actor, None, payload, [d["plan"]])
 
 
 def heads(site: Site) -> dict[str, str | None]:

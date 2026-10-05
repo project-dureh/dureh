@@ -270,7 +270,7 @@ def cmd_event_add(a):
     if not a.kind.strip() or not a.wi.strip() or not _actor(a).strip():
         fail("--kind, --wi, and --actor must be nonempty")
     if a.kind.startswith(RESERVED_EVENT_PREFIXES):
-        fail(f"{a.kind} events are written only by `dureh day`, `dureh site workday`, `dureh site session start` and `dureh slack post`")
+        fail(f"{a.kind} events are written only by `dureh day`, `dureh site workday`, `dureh site session start` and `dureh slack`")
     _print(Ledger(_site(a)).event(a.kind, _actor(a), a.wi, payload))
 
 
@@ -503,9 +503,24 @@ def cmd_upstream(a):
 def cmd_slack(a):
     from . import slack
 
-    site = _site(a)
-    text = Path(a.file).read_text(encoding="utf-8") if a.file else sys.stdin.read()
-    _print(slack.post(site, _actor(a), text, a.dry_run))
+    site, c = _site(a), a.slack_command
+    if c == "ask":
+        text = Path(a.file).read_text(encoding="utf-8") if a.file else None
+        _print(slack.ask(site, _actor(a), a.kind, text))
+    elif c == "check":
+        res = slack.check(site, _actor(a))
+        for dec in res["decisions"]:
+            print(slack.decision_line(dec))
+        for w in res["waiting"]:
+            extra = f"; ignored reactions (not the Director): {', '.join(w['ignored'])}" if w["ignored"] else ""
+            print(f"slack approval {w['ts']} ({w['kind']}): waiting for the Director{extra}")
+        if not res["decisions"] and not res["waiting"]:
+            print("no open Slack approval requests")
+    elif c == "watch":
+        slack.watch(site, _actor(a), a.interval, emit=lambda line: print(line, flush=True))
+    else:
+        text = Path(a.file).read_text(encoding="utf-8") if a.file else sys.stdin.read()
+        _print(slack.post(site, _actor(a), text, a.dry_run))
 
 
 def cmd_authorize_write(a):
@@ -889,12 +904,24 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--out", help="bundle directory (default notes/upstream/export/<ur>)")
     x.add_argument("--actor")
 
-    sk = sub.add_parser("slack", help="desk only: one-way reports to the company's Slack thread (channel, thread and display "
+    sk = sub.add_parser("slack", help="desk only: one-way reports to the company's Slack thread, plus the Director's ✅/❌ reaction on a "
+                         "bot-posted day-plan approval request (channel, thread, display "
                          "name come from config `slack`, set by the Director)").add_subparsers(dest="slack_command", required=True)
     x = add(sk, "post", cmd_slack, "post Slack mrkdwn (from --file or stdin, at most 4000 characters) as a reply in the "
                                    "company thread; records slack.posted {ts, chars}, never the text")
     x.add_argument("--file")
     x.add_argument("--dry-run", action="store_true", help="print the payload (never the token) and post nothing")
+    x.add_argument("--actor")
+    x = add(sk, "ask", cmd_slack, "post today's recorded day plan with the [승인 요청] line; only the Director's ✅/❌ "
+                                  "reaction (config slack.director_user) is read; records slack.approval.requested")
+    x.add_argument("--kind", required=True, choices=["day-plan"])
+    x.add_argument("--file", help="the plan text to post (default: the recorded day plan)")
+    x.add_argument("--actor")
+    x = add(sk, "check", cmd_slack, "decide open approval requests from the Director's reaction (✅ approves the day "
+                                    "as `day approve` does, via slack; ❌ holds; past the day end: expired); idempotent")
+    x.add_argument("--actor")
+    x = add(sk, "watch", cmd_slack, "repeat `slack check`, print only decisions, exit when nothing is open (for Monitor)")
+    x.add_argument("--interval", type=float, default=60, help="seconds between checks (default 60, at least 5)")
     x.add_argument("--actor")
 
     x = add(sub, "authorize-write", cmd_authorize_write, "check a role's write to a site path")
