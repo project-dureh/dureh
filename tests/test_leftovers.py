@@ -119,6 +119,8 @@ class HookCleanup(SiteCase):
         out = self.bash("ls modules")
         self.assertFalse(denied(out))
         self.assertEqual(out["hookSpecificOutput"]["updatedInput"]["command"], "DUREH_AGENT_ID=a-pm ls modules")
+        # no permissionDecision: Claude Code's own permission path (rules, auto-mode classifier) still judges it
+        self.assertNotIn("permissionDecision", out["hookSpecificOutput"])
         out = self.bash("cd modules && ls")
         self.assertEqual(out["hookSpecificOutput"]["updatedInput"]["command"], "export DUREH_AGENT_ID=a-pm\ncd modules && ls")
         out = self.bash("for f in a b; do echo $f; done")
@@ -126,6 +128,7 @@ class HookCleanup(SiteCase):
         # dureh lines keep their identity prefix; the desk is not marked
         out = self.bash("bin/dureh status")
         self.assertEqual(out["hookSpecificOutput"]["updatedInput"]["command"], "DUREH_ACTOR=pm-modules DUREH_AGENT_ID=a-pm bin/dureh status")
+        self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "allow", "release 14 behaviour kept for dureh lines")
         self.assertIsNone(hook(self.s, hook_event_name="PreToolUse", tool_name="Bash", tool_input={"command": "ls"},
                                cwd=str(self.site_root)))
 

@@ -950,12 +950,13 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
                                        "permissionDecisionReason": "DUREH harness tool; identity set by hook",
                                        "updatedInput": new_input}}
     if agent_id and role != "desk" and words_only:
-        # release 27: every process an agent starts carries its agent id, so leftovers are found when it ends
+        # release 27: every process an agent starts carries its agent id, so leftovers are found when it ends.
+        # No permissionDecision: the rewritten command goes through Claude Code's normal permission path (rules,
+        # auto-mode classifier). Measured 2026-10-05 (labs/hook-test): updatedInput without a decision is applied
+        # before that check in both the default path and `--permission-mode auto`.
         new_input = dict(ti)
         new_input["command"] = _marked(original, agent_id, len(words_only) == 1 and not keyword_lead)
-        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
-                                       "permissionDecisionReason": "DUREH: agent process marker set by hook",
-                                       "updatedInput": new_input}}
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "updatedInput": new_input}}
     return None
 
 
