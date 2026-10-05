@@ -730,7 +730,7 @@ def parser() -> argparse.ArgumentParser:
     x = add(sl, "watch", cmd_slurm, "desk only: print one line per tracked job as it ends (run, job, WI, role, agent, "
                                     "state, next step) and record its final state; run it as a Monitor, re-dispatch "
                                     "the owning WI when a line arrives")
-    x.add_argument("--interval", type=int, default=60, help="seconds between scheduler checks (default 60)")
+    x.add_argument("--interval", type=int, default=300, help="seconds between scheduler checks (default 300; one sacct call per check)")
     x.add_argument("--once", action="store_true", help="one pass, then exit")
     x.add_argument("--actor")
 

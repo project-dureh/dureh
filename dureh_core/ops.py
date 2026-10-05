@@ -86,7 +86,8 @@ def _tracked_runs(led: Ledger) -> list[dict]:
 
 
 def _probe_run(site: Site, run: dict) -> dict | None:
-    """Ask the scheduler for a run's state: {state, final, raw | items, counts}; None when it cannot be asked."""
+    """Ask the scheduler for one run's state: {state, final, raw | array}; None when it cannot be asked.
+    Used for a single run; rounds over many runs use `_probe_runs` (one `sacct` call)."""
     try:
         if run["payload"].get("array"):
             st = _array_status(site, run)
@@ -97,23 +98,90 @@ def _probe_run(site: Site, run: dict) -> dict | None:
         return None
 
 
+SACCT_CHUNK = 200  # job ids per batched `sacct` call
+
+
+def sacct_lines(site: Site, jobs: list[str]) -> dict[str, list[str]]:
+    """Accounting lines of many jobs, grouped by job id, from ONE `sacct -n -P -X -j id1,id2,...
+    --format=JobID,State,ExitCode,Elapsed` per SACCT_CHUNK ids. Array tasks (`<job>_<task>`, pending ranges
+    `<job>_[0-3]`) are grouped under their array job id. Raises OSError/SubprocessError like a single call."""
+    jobs = list(dict.fromkeys(str(j) for j in jobs))
+    out: dict[str, list[str]] = {j: [] for j in jobs}
+    for i in range(0, len(jobs), SACCT_CHUNK):
+        chunk = jobs[i:i + SACCT_CHUNK]
+        proc = subprocess.run(["sacct", "-n", "-P", "-X", "-j", ",".join(chunk),
+                               "--format=JobID,State,ExitCode,Elapsed"],
+                              capture_output=True, text=True, timeout=60, env=site.env())
+        for line in proc.stdout.splitlines():
+            line = line.strip()
+            jid = line.split("|")[0]
+            if not line or "." in jid:
+                continue
+            base = jid.split("_")[0].split("+")[0]
+            if base in out:
+                out[base].append(line)
+    return out
+
+
+def _probe_runs(site: Site, runs: list[dict]) -> dict[str, dict | None]:
+    """`_probe_run` for many runs with one batched `sacct` call: {run id: probe or None}. Per-item array
+    states are parsed as by `array_states`; a single job's `raw` is `State|ExitCode|Elapsed` as by `job_state`."""
+    if not runs:
+        return {}
+    try:
+        lines = sacct_lines(site, [str(r["payload"]["job_id"]) for r in runs])
+    except (OSError, subprocess.SubprocessError):
+        return {r["id"]: None for r in runs}
+    out: dict[str, dict | None] = {}
+    for run in runs:
+        job = str(run["payload"]["job_id"])
+        if run["payload"].get("array"):
+            arr = run["payload"]["array"]
+            st = _array_summary(run, _parse_array_lines(job, lines.get(job, []), arr["count"]))
+            out[run["id"]] = {"state": st["scheduler_state"], "final": st["final"], "array": st}
+            continue
+        own = [ln for ln in lines.get(job, []) if ln.split("|")[0] == job] or lines.get(job, [])
+        raw = "|".join(own[0].split("|")[1:]) if own else ""
+        state = (raw.split("|")[0].split() or ["UNKNOWN"])[0] if raw else "UNKNOWN"
+        out[run["id"]] = {"state": state, "final": state in TERMINAL_STATES, "raw": raw}
+    return out
+
+
+def _stale(site: Site, run: dict, now=None) -> bool:
+    """A tracked run submitted more than `watch_stale_days` (limits, default 7) ago."""
+    from datetime import datetime, timedelta, timezone
+
+    days = float(site.limit("watch_stale_days", 7))
+    try:
+        ts = datetime.fromisoformat(run["ts"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (now or datetime.now(timezone.utc)) - ts > timedelta(days=days)
+
+
 def live_job_runs(site: Site, led: Ledger, wis: set[str], events: list[dict], probe: bool = True) -> list[dict]:
     """Tracked runs of these WIs whose job is not known to have ended: [{run, job_id, wi, state}]. A run with a
-    recorded terminal state has ended; otherwise the scheduler is asked (`probe`), and a run it cannot report
-    counts as live until a state is recorded."""
+    recorded terminal state has ended, and so has a stale run (submitted more than `watch_stale_days` ago with
+    no final state recorded); otherwise the scheduler is asked (`probe`, one batched `sacct` call for all runs),
+    and a run it cannot report counts as live until a state is recorded."""
     recorded = _recorded_states(events)
-    out = []
+    pending = []
     for run in _tracked_runs(led):
         if run["wi"] not in wis:
             continue
         state, final = recorded.get(run["id"], ("UNKNOWN", False))
-        if final or state in TERMINAL_STATES:
+        if final or state in TERMINAL_STATES or _stale(site, run):
             continue
-        if probe:
-            seen = _probe_run(site, run)
-            if seen is not None and seen["final"]:
-                continue
-            state = seen["state"] if seen is not None else state
+        pending.append((run, state))
+    probed = _probe_runs(site, [r for r, _ in pending]) if probe else {}
+    out = []
+    for run, state in pending:
+        seen = probed.get(run["id"])
+        if seen is not None and seen["final"]:
+            continue
+        state = seen["state"] if seen is not None else state
         out.append({"run": run["id"], "job_id": str(run["payload"]["job_id"]), "wi": run["wi"], "state": state})
     return out
 
@@ -591,8 +659,13 @@ def array_states(site: Site, job: str, count: int) -> dict[int, str]:
     lines `<job>_<i>|STATE|x:y`, pending ranges `<job>_[0-3,7%2]|PENDING|0:0`. Missing tasks are UNKNOWN."""
     proc = subprocess.run(["sacct", "-j", job, "-X", "-P", "-n", "--format=JobID,State,ExitCode"],
                           capture_output=True, text=True, timeout=60, env=site.env())
+    return _parse_array_lines(job, proc.stdout.splitlines(), count)
+
+
+def _parse_array_lines(job: str, lines: list[str], count: int) -> dict[int, str]:
+    """Per-task states from `sacct` lines whose first two fields are JobID and State (see `array_states`)."""
     states: dict[int, str] = {}
-    for line in proc.stdout.splitlines():
+    for line in lines:
         parts = line.strip().split("|")
         if len(parts) < 2 or not parts[0].startswith(f"{job}_") or "." in parts[0]:
             continue
@@ -622,7 +695,11 @@ def overall_state(states: list[str]) -> str:
 
 def _array_status(site: Site, run: dict) -> dict:
     arr = run["payload"]["array"]
-    by_idx = array_states(site, str(arr["job_id"]), arr["count"])
+    return _array_summary(run, array_states(site, str(arr["job_id"]), arr["count"]))
+
+
+def _array_summary(run: dict, by_idx: dict[int, str]) -> dict:
+    arr = run["payload"]["array"]
     items = {arr["items"][i]: s for i, s in by_idx.items()}
     state = overall_state(list(items.values()))
     counts: dict[str, int] = {}
@@ -730,7 +807,7 @@ def slurm_wait(site: Site, actor: str, run_id: str, timeout: int = 3600, interva
     return ev
 
 
-def _watch_line(led: Ledger, events: list[dict], run: dict, seen: dict) -> str:
+def _watch_line(led: Ledger, events: list[dict], run: dict, seen: dict, nxt: str | None = None) -> str:
     """One line per ended job: run, job, WI, owner role and agent, state, and what the desk does next."""
     wi = run["wi"]
     rec = led.get("work-item", wi)
@@ -740,7 +817,9 @@ def _watch_line(led: Ledger, events: list[dict], run: dict, seen: dict) -> str:
     agent_s = f"{str(agent)[:8]}:{agent_state(led, wi, events)}" if agent else "none"
     st = led.wi_status(wi)["status"]
     parent = rec["payload"].get("parent")
-    if agent_s.endswith(":running") or agent_s.endswith(":starting"):
+    if nxt is not None:
+        pass
+    elif agent_s.endswith(":running") or agent_s.endswith(":starting"):
         nxt = "agent still running; nothing to do"
     elif st not in ("dispatched", "rework"):
         nxt = f"none (WI {st})"
@@ -761,13 +840,15 @@ def _watch_line(led: Ledger, events: list[dict], run: dict, seen: dict) -> str:
 
 
 def watch_round(site: Site, actor: str, reported: set[str]) -> list[str]:
-    """One pass of `slurm watch`: for every tracked run not yet known to have ended, ask the scheduler; record
-    a terminal state once (`run.status` with final and watched; not in observe mode) and return its line.
-    Runs whose final state is already recorded (by `wait`, `status` or an earlier watch) are not reported."""
+    """One pass of `slurm watch`: every tracked run not yet known to have ended is probed with ONE batched
+    `sacct` call; a terminal state is recorded once (`run.status` with final and watched; not in observe mode)
+    and its line returned. Runs whose final state is already recorded (by `wait`, `status` or an earlier watch)
+    are not reported. A run older than `watch_stale_days` without a final state is recorded once as stale
+    (UNKNOWN, final) and reported for a check by hand; it is not probed again."""
     led = Ledger(site)
     events = led.events()
     recorded = _recorded_states(events)
-    lines = []
+    todo = []
     for run in _tracked_runs(led):
         if run["id"] in reported:
             continue
@@ -775,8 +856,22 @@ def watch_round(site: Site, actor: str, reported: set[str]) -> list[str]:
         if final or state in TERMINAL_STATES:
             reported.add(run["id"])
             continue
-        seen = _probe_run(site, run)
+        todo.append(run)
+    probed = _probe_runs(site, todo)
+    days = site.limit("watch_stale_days", 7)
+    lines = []
+    for run in todo:
+        seen = probed.get(run["id"])
         if seen is None or not seen["final"]:
+            if not _stale(site, run):
+                continue
+            if not site.observe:
+                led.event("run.status", actor, run["wi"], {"run": run["id"], "job_id": run["payload"]["job_id"],
+                                                           "scheduler_state": "UNKNOWN", "final": True, "stale": True,
+                                                           "watched": True}, [run["id"]])
+            reported.add(run["id"])
+            lines.append(_watch_line(led, events, run, {"state": "UNKNOWN"},
+                                     nxt=f"check by hand (no scheduler state after {days:g} days)"))
             continue
         if not site.observe:
             if seen.get("array"):
@@ -790,7 +885,7 @@ def watch_round(site: Site, actor: str, reported: set[str]) -> list[str]:
     return lines
 
 
-def slurm_watch(site: Site, actor: str, interval: int = 60, once: bool = False, out=None,
+def slurm_watch(site: Site, actor: str, interval: int = 300, once: bool = False, out=None,
                 rounds: int | None = None) -> list[str]:
     """Print one line per tracked job that ends (for the desk's Monitor); poll every `interval` seconds until
     stopped, or one pass with `once`. Idempotent across restarts: what is recorded is not reported again."""

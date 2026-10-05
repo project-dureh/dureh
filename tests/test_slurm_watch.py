@@ -33,8 +33,17 @@ class WatchCase(SiteCase):
         self.tool("sbatch", "case \"$*\" in *--test-only*) echo 'sbatch: Job 9 to start at 2026-10-03T10:00:00 using 1"
                             " processors on nodes c1 in partition general' >&2; exit 0;; esac\n"
                             f"n=$(cat {self.fake}/n 2>/dev/null || echo 4300); echo $((n+1)) > {self.fake}/n\necho \"$n\"\n")
-        self.tool("sacct", "job=''; prev=''; for a in \"$@\"; do [ \"$prev\" = -j ] && job=$a; prev=$a; done\n"
-                           f"echo \"$job\" >> {self.fake}/sacct.calls\ncat {self.fake}/sacct-$job 2>/dev/null; exit 0\n")
+        # sacct: `-j` takes a comma list; each job prints the file sacct-<job>. With the batched format
+        # (JobID first) a single job's line `STATE|x:y|t` is printed as `<job>|STATE|x:y|t`. One line per call
+        # goes to sacct.calls.
+        self.tool("sacct", "jobs=''; prev=''; batch=''; for a in \"$@\"; do [ \"$prev\" = -j ] && jobs=$a;"
+                           " [ \"$a\" = --format=JobID,State,ExitCode,Elapsed ] && batch=1; prev=$a; done\n"
+                           f"echo \"$jobs\" >> {self.fake}/sacct.calls\n"
+                           "for job in $(echo \"$jobs\" | tr ',' ' '); do\n"
+                           f"  f={self.fake}/sacct-$job; [ -f \"$f\" ] || continue\n"
+                           "  if [ -n \"$batch\" ]; then while IFS= read -r l; do case \"$l\" in \"$job\"_*) echo \"$l\";;"
+                           " *) echo \"$job|$l\";; esac; done < \"$f\"; else cat \"$f\"; fi\n"
+                           "done; exit 0\n")
         cfg = json.loads((self.site_root / "config.json").read_text())
         cfg["env"] = {"path_prepend": [str(self.fake)]}
         cfg["containers"] = {"module": ""}
@@ -206,6 +215,116 @@ class Watch(WatchCase):
         self.assertEqual(rc, 0)
         self.assertEqual(len(buf.getvalue().splitlines()), 1)
         self.assertIn(f"run={run['id']} job=4300", buf.getvalue())
+
+
+class Batched(WatchCase):
+    """One `sacct` call per round for every unfinished tracked run (chunks of SACCT_CHUNK ids); runs with no
+    final state after `watch_stale_days` are recorded once as stale and never probed again."""
+
+    def setUp(self):
+        super().setUp()
+        self.dispatch_bundle()
+        self.dispatch_item()
+        self.runtime("SubagentStart", "pipeline-runner", "a-w1")
+        self.runtime("SubagentStop", "pipeline-runner", "a-w1")
+        self.runtime("SubagentStop", "pm-projects", "a-pm")  # only jobs can hold the lane now
+
+    def calls(self):
+        f = self.fake / "sacct.calls"
+        out = f.read_text().splitlines() if f.exists() else []
+        f.unlink(missing_ok=True)
+        return out
+
+    def age(self, run, days):
+        from datetime import datetime, timedelta
+        path = self.s.record_dir("run") / f"{run['id']}.json"
+        rec = read_json(path)
+        rec["ts"] = (datetime.fromisoformat(rec["ts"]) - timedelta(days=days)).isoformat()
+        path.write_text(json.dumps(rec))
+
+    def test_one_sacct_call_per_round_for_all_runs(self):
+        singles = [self.submit() for _ in range(4)]
+        arrays = [self.submit(each="sub-01,sub-02"), self.submit(each="sub-01,sub-02,sub-03")]
+        jobs = [r["payload"]["job_id"] for r in singles + arrays]
+        for j in jobs[:4]:
+            self.sacct(j, "RUNNING|0:0|00:01:00")
+        self.sacct(jobs[4], f"{jobs[4]}_0|COMPLETED|0:0", f"{jobs[4]}_1|RUNNING|0:0")
+        self.sacct(jobs[5], f"{jobs[5]}_[0-2]|PENDING|0:0")
+        self.calls()
+        self.assertEqual(self.watch(), [])
+        self.assertEqual(self.calls(), [",".join(jobs)], "one call for six unfinished runs (was six calls)")
+        ops.status(self.s)
+        self.assertEqual(len(self.calls()), 1, "status (lane check) asks once too")
+        self.sacct(jobs[0], "COMPLETED|0:0|00:02:00")
+        self.sacct(jobs[4], f"{jobs[4]}_0|COMPLETED|0:0", f"{jobs[4]}_1|FAILED|1:0")
+        lines = self.watch()
+        self.assertEqual(len(lines), 2)
+        self.assertIn(f"job={jobs[0]} wi={self.item}", lines[0])
+        self.assertIn("state=COMPLETED next=", lines[0])
+        self.assertIn(f"job={jobs[4]}", lines[1])
+        self.assertIn("state=FAILED items=COMPLETED:1,FAILED:1", lines[1])
+        self.assertEqual(self.calls(), [",".join(jobs)])
+        self.assertEqual(self.watch(), [])
+        self.assertEqual(self.calls(), [",".join(jobs[1:4] + jobs[5:])], "ended runs are not asked again")
+        single = [e for e in self.led.events(self.item) if e["type"] == "run.status" and e["payload"]["run"] == singles[0]["id"]]
+        self.assertEqual(single[0]["payload"]["raw"], "COMPLETED|0:0|00:02:00", "raw as `slurm status` records it")
+
+    def test_chunks_and_per_item_states_match_the_single_query(self):
+        runs = [self.submit(each="a,b,c") for _ in range(2)] + [self.submit() for _ in range(3)]
+        jobs = [r["payload"]["job_id"] for r in runs]
+        self.sacct(jobs[0], f"{jobs[0]}_0|COMPLETED|0:0", f"{jobs[0]}_0.batch|COMPLETED|0:0", f"{jobs[0]}_[1-2]|PENDING|0:0")
+        self.sacct(jobs[1], f"{jobs[1]}_0|OUT_OF_MEMORY|0:125", f"{jobs[1]}_2|CANCELLED by 1|0:0")
+        self.sacct(jobs[2], "PENDING|0:0|00:00:00")
+        self.calls()
+        from unittest import mock
+        with mock.patch.object(ops, "SACCT_CHUNK", 2):
+            probed = ops._probe_runs(self.s, runs)
+        self.assertEqual(self.calls(), [",".join(jobs[0:2]), ",".join(jobs[2:4]), jobs[4]])
+        for r in runs[:2]:
+            self.assertEqual(probed[r["id"]]["array"], ops._array_status(self.s, r), "per-item states unchanged")
+        self.assertEqual(probed[runs[0]["id"]]["array"]["items"], {"a": "COMPLETED", "b": "PENDING", "c": "PENDING"})
+        self.assertEqual(probed[runs[1]["id"]]["array"]["items"], {"a": "OUT_OF_MEMORY", "b": "UNKNOWN", "c": "CANCELLED"})
+        self.assertEqual((probed[runs[2]["id"]]["state"], probed[runs[2]["id"]]["raw"]), ("PENDING", "PENDING|0:0|00:00:00"))
+        self.assertEqual((probed[runs[3]["id"]]["state"], probed[runs[3]["id"]]["final"]), ("UNKNOWN", False))
+        self.assertEqual(ops._probe_runs(self.s, []), {})
+
+    def test_stale_runs_are_recorded_once_and_hold_no_lane(self):
+        old, fresh, done = self.submit(), self.submit(), self.submit()
+        self.age(old, 8)
+        self.age(done, 8)
+        self.sacct(fresh["payload"]["job_id"], "RUNNING|0:0|00:01:00")
+        self.sacct(done["payload"]["job_id"], "COMPLETED|0:0|00:02:00")  # old but ended: reported as usual
+        lanes = {l["wi"]: l["by"] for l in ops.status(self.s)["lanes"]}
+        self.assertEqual(lanes, {self.bundle: [f"job {fresh['payload']['job_id']} RUNNING on {self.item} ({fresh['id']})"]},
+                         "the stale run holds no lane")
+        self.calls()
+        lines = self.watch()
+        self.assertEqual(len(lines), 2)
+        stale = [l for l in lines if f"run={old['id']}" in l][0]
+        self.assertIn("state=UNKNOWN next=check by hand (no scheduler state after 7 days)", stale)
+        self.assertIn("state=COMPLETED", [l for l in lines if f"run={done['id']}" in l][0])
+        rec = [e for e in self.led.events(self.item) if e["type"] == "run.status" and e["payload"]["run"] == old["id"]]
+        self.assertEqual(len(rec), 1)
+        self.assertEqual({k: rec[0]["payload"][k] for k in ("scheduler_state", "final", "stale", "watched")},
+                         {"scheduler_state": "UNKNOWN", "final": True, "stale": True, "watched": True})
+        self.calls()
+        self.assertEqual(self.watch(), [])
+        self.assertEqual(self.calls(), [fresh["payload"]["job_id"]], "the stale run is not probed again")
+
+    def test_stale_days_is_a_site_limit(self):
+        run = self.submit()
+        self.age(run, 8)
+        cfg = json.loads(self.s.config_path.read_text())
+        cfg["limits"] = {"watch_stale_days": 30}
+        self.s.config_path.write_text(json.dumps(cfg))
+        self.s = self.site()
+        self.assertEqual(self.watch(), [], "8 days is not stale under a 30-day limit")
+        self.assertEqual(len(ops.lane_holders(self.s, Ledger(self.s))), 1)
+        cfg["limits"] = {"watch_stale_days": 2}
+        self.s.config_path.write_text(json.dumps(cfg))
+        self.s = self.site()
+        self.assertIn("after 2 days", self.watch()[0])
+        self.assertEqual(ops.lane_holders(self.s, Ledger(self.s)), [])
 
 
 class Lanes(WatchCase):
@@ -391,6 +510,7 @@ class Instructions(WatchCase):
     def test_generated_instructions_say_so(self):
         claude_md = (self.site_root / "CLAUDE.md").read_text()
         self.assertIn("slurm watch` running as a Monitor", claude_md)
+        self.assertIn("checks every 300 s by default with one batched `sacct` call", claude_md)
         self.assertIn("re-dispatch the owning WI", claude_md)
         self.assertIn("`lane.refused`", claude_md)
         self.assertNotIn("Wait for a scheduler job with", claude_md)

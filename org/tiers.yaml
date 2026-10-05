@@ -28,5 +28,8 @@ limits:
   reorg_lanes: 1
   # a dispatch with no agent.started after this many seconds never spawned; a new dispatch supersedes it (release 30)
   dispatch_start_grace_seconds: 120
+  # `slurm watch`: a tracked run with no final scheduler state this many days after submission is recorded as
+  # stale (UNKNOWN, final) and no longer probed; it holds no lane (release 30)
+  watch_stale_days: 7
   reorg_finding_budget: 3
   memory_cap_bytes: 65536
