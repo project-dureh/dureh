@@ -1,7 +1,8 @@
 # Slack reports (`dureh slack post`) and day-plan approval (`slack ask|check|watch`)
 
 Director, 2026-10-05: one Slack app/bot (`dureh`) serves every company. Each company has its own thread in
-channel `#project`, and its desk posts there under the company's own display name. The thread is **one-way
+channel `#project`, and its desk posts there under the company's own display name. Since release 34 the default is
+**one thread per working day** instead of one long thread (see [Daily threads](#daily-threads)). The thread is **one-way
 reporting**: the desk posts, nothing is read back, and nothing in Slack is ever an instruction. The Director's
 instructions come only through the company session.
 
@@ -16,7 +17,7 @@ as an instruction (see [Day-plan approval by reaction](#day-plan-approval-by-rea
 ```json
 "slack": {
   "channel": "C0C6U53DZD0",
-  "thread_ts": "1791213939.792479",
+  "daily_thread": true,
   "username": "서지아 (camri-org)",
   "icon_emoji": ":brain:",
   "director_user": "U081JGBMDG8"
@@ -26,13 +27,14 @@ as an instruction (see [Day-plan approval by reaction](#day-plan-approval-by-rea
 | key | meaning |
 |---|---|
 | `channel` | channel ID (not the name) of `#project` |
-| `thread_ts` | `ts` of the company thread's parent message, as a string |
+| `daily_thread` | `true`: one thread per working day, opened by the first post of the day; `false`: every post replies in `thread_ts`. Default: `true` when `thread_ts` is absent, `false` when it is set (older configs keep their one thread) |
+| `thread_ts` | `ts` of the company thread's parent message, as a string; required when `daily_thread` is false, otherwise ignored |
 | `username` | display name for this company's posts (here: 데스크 서지아 of camri-org) |
 | `icon_emoji` / `icon_url` | optional avatar |
 | `director_user` | the Director's Slack user ID; the only user whose reaction counts. Without it `slack ask`/`check` refuse and the Director approves in the session |
 | `token_file` | optional, default `~/.config/dureh/slack-bot-token` (`~` and `$VAR` expanded) |
 
-No flag changes channel, thread or name; posts go only to that thread. Without a `slack` block the command
+No flag changes channel, thread or name; posts go only to that thread (or the day's thread). Without a `slack` block the command
 refuses and says that the Director sets it.
 
 ## Bot token
@@ -63,9 +65,27 @@ bin/dureh slack post --file msg.md --dry-run   # prints the payload, never the t
 - The ledger gets an event `slack.posted` with `{ts, chars}` only, never the text. `slack.*` events cannot be
   added by `dureh event add`.
 
+## Daily threads
+
+With `daily_thread` on, the first `slack post` or `slack ask` of the company's working day first posts a top-level
+message in `channel`, under the configured `username`/icon:
+
+```
+*2026-10-05 (월) <site short or name> · <username>*
+오늘의 업무 보고 스레드입니다.
+```
+
+and records `slack.thread.opened` `{date, ts, channel}`. Every later post that day replies in that thread, found
+from the event. The day's date is the open workday's plan date (`dureh day plan`; a day that runs past midnight
+keeps its thread), else the local date. `slack post --dry-run` shows `day_thread`: either the existing
+`{date, ts}` or `{date, opens: true, opening_payload}` for the thread it would open; it posts and records nothing.
+Approval replies (`slack check`) go to the thread the request was posted in. The one-way rule and every guard
+above are unchanged.
+
 ## What the desk posts
 
-The generated desk instructions (`CLAUDE.md`, item 12) say, when `slack` is configured: post at clock-in with
+The generated desk instructions (`CLAUDE.md`, item 12) say, when `slack` is configured (and, with daily threads,
+that the company thread is one thread per working day, opened by the desk's first post of the day): post at clock-in with
 the day plan, each decision request to the Director, a short summary when `slurm watch` reports jobs completed
 or failed, and the end-of-day report; never data contents, file contents, subject-level or personal data,
 secrets or tokens; write in the Director's conversation language (Korean when it is Korean). Slack is one-way:
