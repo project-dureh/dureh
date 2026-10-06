@@ -250,10 +250,20 @@ def refresh_deployment(site: Site) -> dict:
     new["package"] = {**dep.get("package", {}), "rev": git_revision(src) if src.exists() else dep.get("package", {}).get("rev")}
     old_root = (site.config.get("harness") or {}).get("root")
     root_changed = old_root != str(HARNESS_ROOT)
-    if root_changed:
-        # D1: the site now runs this checkout (bin/dureh and the hooks were just regenerated to exec it)
+    stored_site_root, live_root = site.stored_root, str(site.root)
+    site_moved = stored_site_root != live_root
+    if site_moved and stored_site_root:
+        # rename independence step 4: the site is not where config.json says; one `site.moved` per move, recorded
+        # before the refresh so a reader can map paths recorded under the old root (Site.relocate) from now on
+        Ledger(site).event("site.moved", "desk", None, {"from": stored_site_root, "to": live_root})
+        site._previous_roots = None
+    if root_changed or site_moved:
         cfg = dict(site.config)
-        cfg["harness"] = {**(cfg.get("harness") or {}), "root": str(HARNESS_ROOT)}
+        if root_changed:
+            # D1: the site now runs this checkout (bin/dureh and the hooks were just regenerated to exec it)
+            cfg["harness"] = {**(cfg.get("harness") or {}), "root": str(HARNESS_ROOT)}
+        if site_moved:
+            cfg["site"] = {**(cfg.get("site") or {}), "root": live_root}  # informational: readers use the live root
         write_replace(site.config_path, json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", site.config_path.stat().st_mode & 0o777)
         site.config = cfg
     if new["harness"] != dep.get("harness") or new["package"] != dep.get("package") or root_changed:

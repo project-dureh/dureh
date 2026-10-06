@@ -68,6 +68,7 @@ def cmd_adapter_sync(a):
         if other != site.harness_root.resolve():
             os.execv(str(exe), [str(exe), "--site", str(site.root), "adapter", "sync"])
     old_root = (site.config.get("harness") or {}).get("root")
+    stored_site_root = site.stored_root
     m = claude_code.generate(site)
     print(f"generated {len(m['files'])} files for claude-code")
     from .projectgen import generate_projects
@@ -84,6 +85,10 @@ def cmd_adapter_sync(a):
 
     switched = f" (was {old_root})" if old_root != str(site.harness_root) else ""
     print(f"harness: {harness_label(site.harness_root)} at {site.harness_root}{switched}")
+    if stored_site_root != str(site.root):
+        print(f"site root: {site.root} (config site.root said {stored_site_root}; refreshed"
+              + (", site.moved recorded: paths recorded under the old root resolve here" if stored_site_root else "")
+              + "). Next: `worktree repair --all` (dry-run first), then `verify --self`")
 
 
 def cmd_hook(a):

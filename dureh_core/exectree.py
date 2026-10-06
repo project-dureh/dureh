@@ -98,7 +98,7 @@ def env_mode(site: Site, mod: Path, tree: Path) -> str:
 def overriding_assignments(site: Site, script: Path, module: str, root_env: str | None) -> list[str]:
     """Job-script lines that set the module root themselves (they override the wrapper's export)."""
     pat = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$")
-    site_refs = ("$DUREH_SITE", "${DUREH_SITE}", str(site.root))
+    site_refs = ("$DUREH_SITE", "${DUREH_SITE}", str(site.root), *(str(r) for r in site.previous_roots()))
     out = []
     for n, line in enumerate(script.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
         m = pat.match(line)

@@ -12,7 +12,7 @@ from .org import HARNESS_ROOT
 from .util import harness_label
 from .records import ACTIVE, Ledger
 from .site import Site
-from .util import DurehError, fail, git, sha256_file
+from .util import DurehError, fail, git, is_within, sha256_file
 
 TEXT_SUFFIXES = {".md", ".py", ".sh", ".yaml", ".yml", ".json", ".toml", ".txt", ".mjs", ".js", ".ts", ".astro",
                  ".cfg", ".ini", ".erb", ".tsv", ".jsonl", ""}
@@ -742,7 +742,7 @@ def _record_array(site: Site, led: Ledger, actor: str, run: dict, st: dict, wait
         if mod.get("tree"):  # array tasks share one pinned tree: removed once every task has ended
             from . import exectree
 
-            exectree.cleanup(Path(mod["tree"]))
+            exectree.cleanup(site.relocate(mod["tree"]))  # recorded at submit time; the site may have moved since
     ev = led.event("run.status", actor if actor in ("pipeline-runner", "desk") else "desk", run["wi"], payload, [rid])
     return ev
 
@@ -769,9 +769,9 @@ def wait_job(site: Site, job: str, timeout: int, interval: int) -> tuple[str, st
     return state, line, state.split()[0] in TERMINAL_STATES
 
 
-def _log_hint(run: dict) -> dict:
+def _log_hint(site: Site, run: dict) -> dict:
     """Where the run's scheduler logs are (printed with status/wait; not recorded again): the recorded
-    log_out/log_err with %j/%x (and %A for an array) filled in."""
+    log_out/log_err, under the site's live root when it moved since, with %j/%x (and %A for an array) filled in."""
     from .workflow import _log_name
 
     p = run["payload"]
@@ -780,8 +780,9 @@ def _log_hint(run: dict) -> dict:
     out = {}
     for key in ("log_out", "log_err"):
         if p.get(key):
-            pat = p[key].replace("%A", "%j") if p.get("array") else p[key]
-            out[key] = (_log_name(pat.replace("%a", "%%a"), job, name) or p[key]) if job else p[key]
+            rec = str(site.relocate(p[key]))
+            pat = rec.replace("%A", "%j") if p.get("array") else rec
+            out[key] = (_log_name(pat.replace("%a", "%%a"), job, name) or rec) if job else rec
     return out
 
 
@@ -797,7 +798,7 @@ def slurm_status(site: Site, actor: str, run_id: str) -> dict:
         state, line = job_state(site, job)
         ev = led.event("run.status", actor if actor in ("pipeline-runner", "desk") else "desk", run["wi"],
                        {"run": run_id, "job_id": job, "scheduler_state": state, "raw": line}, [run_id])
-    return {**ev, "logs": _log_hint(run)}
+    return {**ev, "logs": _log_hint(site, run)}
 
 
 TERMINAL_STATES = ("COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY", "NODE_FAIL", "PREEMPTED",
@@ -822,14 +823,14 @@ def slurm_wait(site: Site, actor: str, run_id: str, timeout: int = 3600, interva
         ev = _record_array(site, led, actor, run, st, waited=True)
         if not st["final"]:
             ev["note"] = f"still {st['scheduler_state']} ({st['counts']}) after {timeout} s; wait again or check later"
-        return {**ev, "logs": _log_hint(run)}
+        return {**ev, "logs": _log_hint(site, run)}
     state, line, final = wait_job(site, job, int(max(0, deadline - time.monotonic())), interval)
     ev = led.event("run.status", actor if actor in ("pipeline-runner", "desk") else "desk", run["wi"],
                    {"run": run_id, "job_id": job, "scheduler_state": state, "raw": line,
                     "waited": True, "final": final}, [run_id])
     if not final:
         ev["note"] = f"still {state} after {timeout} s; wait again or check later"
-    return {**ev, "logs": _log_hint(run)}
+    return {**ev, "logs": _log_hint(site, run)}
 
 
 def _watch_line(led: Ledger, events: list[dict], run: dict, seen: dict, nxt: str | None = None) -> str:
@@ -970,7 +971,8 @@ def slurm_resubmit_failed(site: Site, actor: str, run_id: str, script: str | Non
     if module is None and mod.get("name"):
         module, rev = mod["name"], rev or mod.get("rev")
     states = {arr["items"][i]: s for i, s in by_idx.items()}
-    return slurm_submit(site, actor, run["wi"], script or p.get("script"), dry_run,
+    recorded_script = str(site.relocate(p["script"])) if p.get("script") else None  # as it is now, after any move
+    return slurm_submit(site, actor, run["wi"], script or recorded_script, dry_run,
                         extra if extra is not None else p.get("sbatch_args"),
                         {"resubmit_of": run_id, "resubmit_states": {i: states[i] for i in failed}},
                         module=module, rev=rev, after=after, items=failed,
@@ -1190,6 +1192,14 @@ def path_refs(site: Site, target: str, roots: list[Path] | None = None, limit: i
     base = os.path.basename(target.rstrip("/"))
     if len(base) >= 4:
         needles.add(base)
+    # after a move or rename: the same path as the site's earlier roots spelled it (records, scripts, notes written
+    # before the move) and, for a path given under an old root, as it is now
+    given = Path(target.rstrip("/") or target)
+    if given.is_absolute():
+        now = site.relocate(given)
+        if is_within(now, site.root):
+            rel = now.relative_to(site.root)
+            needles.update(str(r / rel) for r in [site.root, *site.previous_roots()])
     roots = roots or [site.root, HARNESS_ROOT]
     hits = []
     skip = {".git", "node_modules", "__pycache__", "cache", ".cache", "worktrees", "derivatives", "sourcedata", "rawbids"}

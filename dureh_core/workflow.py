@@ -552,6 +552,7 @@ def last_verification_block(led: Ledger, wi: str) -> str:
     run = runs[-1]
     p = run["payload"]
     job = p.get("job") or {}
+    here = lambda x: str(led.site.relocate(x)) if x else x  # noqa: E731 - log paths recorded before a site move
 
     def render(tail_lines: int) -> str:
         lines = ["", f"Last verification (run {run['id']}, {run['ts'][:19]}Z, head {str(p.get('head') or '-')[:12]}):"
@@ -561,7 +562,7 @@ def last_verification_block(led: Ledger, wi: str) -> str:
                 continue
             secs = f", {c['seconds']} s" if c.get("seconds") is not None else ""
             lines.append(f"- check {i} `{c['command']}`: exit {c['exit']}{secs}"
-                         + (f"; log {c['log']}" if c.get("log") else ""))
+                         + (f"; log {here(c['log'])}" if c.get("log") else ""))
             tail = [ln for ln in (c.get("tail") or "").rstrip("\n").splitlines()][-tail_lines:] if tail_lines else []
             lines += [f"    {ln}" for ln in tail]
         if p.get("violations"):
@@ -569,7 +570,8 @@ def last_verification_block(led: Ledger, wi: str) -> str:
         if p.get("missing_outputs"):
             lines.append("- declared outputs missing: " + ", ".join(p["missing_outputs"]))
         if job.get("log_out"):
-            lines.append(f"- job {job.get('job_id')} ({job.get('state')}) logs: {job['log_out']}, {job.get('log_err')}")
+            lines.append(f"- job {job.get('job_id')} ({job.get('state')}) logs: {here(job['log_out'])},"
+                         f" {here(job.get('log_err'))}")
         lines.append("Fix these before staging again; the same head fails the same way.")
         return "\n".join(lines) + "\n"
 
@@ -1135,13 +1137,14 @@ def verify_collect(site: Site, actor: str, wi: str, run_id: str | None = None) -
                                               " --submit` first")
     p = run["payload"]
     job_id = str(p["job_id"])
+    prefix = str(site.relocate(p["prefix"]))  # the job wrote next to its log; the site may have moved since
     recorded = ops._recorded_states(led.events(wi)).get(run["id"])
     if recorded and (recorded[1] or recorded[0] in ops.TERMINAL_STATES):
         state, raw = recorded[0], ""
     else:
         state, raw = ops.job_state(site, job_id)
     first = (state.split() or ["UNKNOWN"])[0]
-    have_all = all(Path(f"{p['prefix']}.check{i}.exit").is_file() for i in range(1, len(p["checks"]) + 1))
+    have_all = all(Path(f"{prefix}.check{i}.exit").is_file() for i in range(1, len(p["checks"]) + 1))
     if first not in ops.TERMINAL_STATES and not (first == "UNKNOWN" and have_all):
         fail(f"verify run {run['id']}: job {job_id} is still {first}; nothing was recorded. End your turn: the desk"
              f" re-dispatches the checker when `slurm watch` reports the job ended, then run `verify --wi {wi} --collect`")
@@ -1154,8 +1157,9 @@ def verify_collect(site: Site, actor: str, wi: str, run_id: str | None = None) -
     if not recorded or not recorded[1]:
         led.event("run.status", "desk", wi, {"run": run["id"], "job_id": job_id, "scheduler_state": state, "raw": raw,
                                              "final": True, "collected": True}, [run["id"]])
-    results = _read_check_results(p["prefix"], p["checks"], job_id, state)
+    results = _read_check_results(prefix, p["checks"], job_id, state)
     job = {k: p[k] for k in ("job_id", "script", "prefix", "log_out", "log_err", "command", "time")}
+    job.update({k: str(site.relocate(job[k])) for k in ("script", "prefix", "log_out", "log_err") if job.get(k)})
     job.update({"state": state, "raw": raw})
     return _record_verification(site, ctx, actor, wi, paths, head, results, "slurm", job, time.monotonic(),
                                 extra={"collected_from": run["id"], "submitted_ts": run["ts"]})
@@ -1316,10 +1320,13 @@ def _wi_job_logs(site: Site, led: Ledger, wi: str, rec: dict) -> tuple[list[Path
     troot = target_root(site, target) if target not in (None, "site", "harness", "package") else None
     found: list[Path] = []
     skipped: list[dict] = []
+    here = lambda x: str(site.relocate(x)) if x else x  # noqa: E731 - paths recorded before a site move
     for run in led.load("run"):
         if run["wi"] != wi or run["type"] != "slurm" or not run["payload"].get("job_id"):
             continue
-        p = run["payload"]
+        p = {**run["payload"], **{k: here(run["payload"].get(k)) for k in ("script", "chdir", "log_out", "log_err")}}
+        if p.get("array"):
+            p["array"] = {**p["array"], **{k: here(p["array"].get(k)) for k in ("items_file", "wrapper")}}
         job = str(p["job_id"]).split(";")[0].strip()
         jname = _scan_opt([str(w) for w in p.get("command") or []], "-J", "--job-name") or f"dureh-{wi}"
         candidates: list[str] = []

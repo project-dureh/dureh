@@ -350,7 +350,7 @@ def status(site: Site, actor: str, wi: str) -> dict:
         if run["wi"] != wi or not c or not run["payload"].get("job_id"):
             continue
         job = str(run["payload"]["job_id"])
-        cache = Path(c["cache"])
+        cache = site.relocate(c["cache"])  # a cache inside the site, recorded before a move, is read where it is now
         out = {"run": run["id"], "job_id": job, "target": str(cache / c["target"])}
         done = _built_event(led, run["id"])
         if done:

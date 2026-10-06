@@ -186,6 +186,29 @@ session job id when the day was started by `session start`).
 
 ## After the site folder moved or was renamed
 
+One procedure, in this order, with the company idle (no agent running, no session job):
+
+```text
+mv DUREH-Companies/<old name> DUREH-Companies/<new name>   # the move or rename itself (Director)
+<new>/bin/dureh adapter sync                 # generated files name the new location; config site.root refreshed; site.moved recorded
+<new>/bin/dureh worktree repair --all --dry-run && <new>/bin/dureh worktree repair --all   # worktree links and virtualenvs
+<new>/bin/dureh verify --self                # confirms the moved site
+```
+
+`adapter sync` (release 41) regenerates `.claude/settings.json`, `CLAUDE.md`, the agents and the project guidance
+with the new absolute paths (`bin/dureh` and the hooks find the site from their own location and
+`$CLAUDE_PROJECT_DIR`, so they work before the sync too), rewrites config `site.root` to where the site is now
+(informational: every command uses the directory it runs in) and records one `site.moved` event `{from, to}` the
+first time it sees the new location; a second sync records nothing. Records are append-only and keep the paths
+they were written with (worktrees, job scripts, log directories, exec trees, container caches); readers that open
+such a path (`dispatch brief` rework blocks, `verify --collect`, `slurm status|wait`, `purge`, `container status`,
+`slurm submit --resubmit-failed`, `path-refs`) first map it through `Site.relocate`: a path under the live root is
+used as is, one under a previous root (the `from` of the `site.moved` events, config `site.previous_roots` when
+present, or a stale `site.root` the sync has not seen yet) is re-rooted, and a path outside the site is left alone.
+`path-refs <path>` searches the path under every root the site had, so references written before the move are
+found. Session names, the mailbox and WI branches come from config (`session.name`, `upstream.mailbox`, `site.id`),
+not from the folder name (steps 1-2).
+
 Absolute paths live in two places the harness owns: the links between a repository and its WI worktrees
 (`worktrees/<WI>/.git` and `modules/<m>/.git/worktrees/<WI>/gitdir`) and the virtualenvs (script shebangs,
 `bin/activate`'s `VIRTUAL_ENV`, `pyvenv.cfg`). A move or rename breaks both; everything else resolves against

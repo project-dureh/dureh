@@ -7,7 +7,7 @@ from pathlib import Path
 
 from . import yamlsub
 from .org import HARNESS_ROOT, Org
-from .util import fail, read_json
+from .util import DurehError, fail, is_within, read_json
 
 RECORD_KINDS = ("work-item", "run", "decision", "session", "finding", "event")
 READ_ONLY_SITE_DIRS = ("references", "startup")
@@ -27,6 +27,7 @@ class Site:
             fail(f"unsupported site config schema_version in {self.config_path}")
         self._org: Org | None = None
         self._manifest = None
+        self._previous_roots: list[Path] | None = None
 
     # --- paths -----------------------------------------------------------
     @property
@@ -85,6 +86,51 @@ class Site:
     @property
     def observe(self) -> bool:
         return os.environ.get("DUREH_OBSERVE") == "1"
+
+    # --- the site's location over time ----------------------------------------
+    @property
+    def stored_root(self) -> str | None:
+        """config.json `site.root`: where the site was installed, refreshed by `adapter sync` after a move. It is
+        informational; the live root (`self.root`, the directory the command runs in) is what every reader uses."""
+        return (self.config.get("site") or {}).get("root") or None
+
+    def previous_roots(self) -> list[Path]:
+        """Where the site was before it moved, newest first (never the live root): a stored `site.root` that differs
+        from the live root (a move `adapter sync` has not seen yet), config `site.previous_roots` when present, and
+        the `from` of every `site.moved` event (`adapter sync` records one per move). Read once per process."""
+        if self._previous_roots is None:
+            raw: list[str] = []
+            if self.stored_root:
+                raw.append(self.stored_root)
+            raw += [str(x) for x in (self.config.get("site") or {}).get("previous_roots") or []]
+            try:
+                from .records import Ledger
+
+                for e in reversed(Ledger(self).load("event")):
+                    if e["type"] == "site.moved" and e["payload"].get("from"):
+                        raw.append(str(e["payload"]["from"]))
+            except DurehError:  # no record store yet (install in progress): the config is all there is
+                pass
+            roots: list[Path] = []
+            for value in raw:
+                p = Path(value)
+                if p.is_absolute() and p != self.root and p not in roots:
+                    roots.append(p)
+            self._previous_roots = roots
+        return self._previous_roots
+
+    def relocate(self, path) -> Path:
+        """A recorded absolute path as it is now (proposals/site-rename-independence.md row 12): under the live root
+        it is returned unchanged; under one of `previous_roots` that prefix is replaced by the live root; anything
+        else (a relative path, a path outside the site) is returned unchanged. Records are append-only and never
+        rewritten: a reader that opens a path a record names calls this first."""
+        p = Path(path)
+        if not p.is_absolute() or is_within(p, self.root):
+            return p
+        for old in self.previous_roots():
+            if is_within(p, old):
+                return self.root / p.relative_to(old)
+        return p
 
     def index_path(self) -> Path:
         if self.observe:
