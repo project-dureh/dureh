@@ -51,11 +51,32 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    follows its own proposal and records it: `dureh day decide --title ... --choice ... --why ...
    [--rev <commit>]`. That commits the state repository, giving a rollback point. If the Director
    later rolls back to such a point, the desk fixes forward from there, reflecting every change made since.
-4. **End.** When the hours run out, no new agent starts. The desk writes the end report:
-   `dureh day end --done ... --problems ... --overtime <WI>...`, and gives it to the Director.
-5. **Overtime.** Only for fixing errors from the day's work and normalization tests, and only for
-   the items the Director accepts: `dureh day overtime --items <WI>... --memo "..."`.
-6. **Close.** In this order: the desk stops every Monitor and background task, writes the handoff
+4. **End time: finish the plan.** The day's plan is finished the same day. Director, 2026-10-06: "버그는 수정되고,
+   업무는 하루 계획량까지 해야하는게 하네스의 기본 골자입니다", and to the desk: "문제가 발생시, 초과근무로 문제를 모두
+   해결하고 당일 업무를 마무리 짓는다." When a problem appears, the desk fixes it and finishes; a plan item is never moved
+   to tomorrow because of the clock, and plan items need no per-day overtime approval. With config
+   `workday.finish_plan` (default true) the gate keeps allowing work units after the end time for (a) the plan's
+   WIs that are not yet finished (verified, promoted, stopped or reverted) and (b) fixes for problems they caused:
+   a WI created after the plan whose record names a plan WI (or an earlier fix) as `parent` or `fix_for`
+   (`dureh wi new --fix-for <WI>`), or a rework/amendment of a plan WI. The plan's WIs are `day plan --wi ...`, else
+   every WI id the plan text names. The first work unit after the end time records one `day.overtime` event by
+   itself (`rule: finish-plan`, memo `Director rule 2026-10-06: 초과근무로 문제를 모두 해결하고 당일 업무를 마무리`,
+   `by: Director (standing rule)`, `items`: the plan's unfinished WIs); fixes that appear later are appended by
+   further events. New work outside the plan stays refused after the end time; the Director's explicit
+   `dureh day overtime --items <WI>... --memo "..."` still admits it. `dureh day status` shows
+   `end time passed HH:MM; finishing the plan (N items open: ...)`, or `the plan is done; write the end report`.
+5. **Stops.** Three stops end a day being finished past its end time, enforced as during the day: today's Claude
+   usage at the daily share (no new agent), data at risk (`day urgent`: tell the Director at once), and the session
+   job's wall time (status warns and the stop applies under 1 h left; the gate does not refuse on it, there is no
+   duration notion for a spawn). At a stop the desk finishes running work and writes the end report.
+6. **End report.** `dureh day end --done ... --problems ... --overtime <WI>...` is written when the plan is done or a
+   stop hit, not at the end time: with plan items still open and no stop it is refused (an item that cannot proceed
+   today is stopped at a safe point with `dispatch stop` so the report says why; `--early "<Director's words>"` ends
+   anyway). At the end time with the plan done it is written as before. The report gains a `past_end` section
+   ("finished past the end time"): the items the rule carried past the end time with their outcomes, the stop if
+   one hit. Overtime beyond the plan is only for fixing errors from the day's work and normalization tests, and only
+   for the items the Director accepts: `dureh day overtime --items <WI>... --memo "..."`.
+7. **Close.** In this order: the desk stops every Monitor and background task, writes the handoff
    (`state/memory/handoff.md`), runs `dureh day close`, and then does nothing more. `day close` checks that no
    agent runs and the handoff is fresh, records `day.closed`, and releases the session job as described in
    "Closing the session job" below: the job sends `/exit` to its claude and completes by itself.
@@ -106,7 +127,7 @@ What the plan approval covers (agreed with the CAMRI-ORG desk, 2026-10-03):
 - Gate 2 for checker-verified module and project WIs in the plan. Promotion into derivatives and
   harness/package contributions wait for the end report.
 - After the end time, one checker run for an item staged during the day. A re-dispatch after a failed
-  check is overtime.
+  check is overtime (for a plan item, recorded by the harness under the finish-plan rule).
 
 Never held by the plan or the clock: stopping an agent (`dispatch stop`) or a scheduler job, merge-window
 handling (idle, `adapter sync`, `verify --self`), recording upstream replies. For data at risk the desk
@@ -122,8 +143,13 @@ those WIs from the plan, the clock and the budget until the next day.
   The usage gate stays (it is the subscription control).
 - `production`: `workday.weekdays` (default Mon-Fri; names or 0-6) applies. A day started on another weekday
   is overtime: worker agents spawn only for items in a Director overtime record, which on such a day may be
-  recorded before the end report (`dureh day overtime --items ... --memo "..."`). After the hours no new
-  agent starts, as described above.
+  recorded before the end report (`dureh day overtime --items ... --memo "..."`); the finish-plan rule does not
+  replace that memo on Sat/Sun. After the hours only the plan's open items and their fixes go on (finish the
+  plan, above); everything else waits for the Director's word.
+
+The finish-plan rule applies in both phases: in development nothing blocks anyway, but the overtime for plan items
+is still recorded and the end report waits for the plan (or a stop) the same way. `workday.finish_plan: false`
+restores the earlier rule (after the end time nothing new starts; overtime only by the Director's record).
 
 ## Attendance devices (Director switches)
 
@@ -158,7 +184,8 @@ usage against the daily share, by default 1/7 of the weekly allowance (`workday.
   calibration is written to `<exchange>/usage-budget.json` and every site and upstream read it.
 - Limits: sessions on other machines (web, app) leave no local transcript and are not counted;
   the rolling seven days differ from the provider's weekly reset. Recalibrate now and then.
-- Accepted overtime items are not held back by the budget; the end report shows the usage.
+- Overtime items the Director accepted (`day overtime`) are not held back by the budget; plan items finished past
+  the end time under the finish-plan rule are (the usage share is a stop). The end report shows the usage.
 - `dureh day status` shows the account total and this site's part (sessions whose working directory is
   inside the site), so one site cannot silently use up the day for the others.
 

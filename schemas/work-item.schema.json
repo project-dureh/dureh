@@ -132,6 +132,12 @@
             "null"
           ]
         },
+        "fix_for": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "outputs": {
           "type": "array",
           "items": {

@@ -7,9 +7,14 @@ sessions). While on:
   the clock; until the end time the desk works toward the plan's goal without asking again;
 - important decisions follow the desk's own proposal and are recorded with a state commit
   (`day decide`), so a rollback can return to that point;
-- after the hours run out no new agent starts; the desk writes the end report (`day end`) with
-  proposed overtime; overtime covers only the work items the Director accepts (`day overtime`),
-  limited to fixing errors from the day's work and normalization tests;
+- after the end time the day's plan is still finished the same day (Director, 2026-10-06: "버그는 수정되고,
+  업무는 하루 계획량까지 해야하는게 하네스의 기본 골자입니다"; "문제가 발생시, 초과근무로 문제를 모두 해결하고
+  당일 업무를 마무리 짓는다"): with config `workday.finish_plan` (default true) the gate keeps allowing work
+  units for the plan's unfinished WIs and for fixes of problems they caused, and the harness records that
+  overtime itself (`day.overtime`, rule `finish-plan`, by "Director (standing rule)"); work outside the plan
+  stays refused unless the Director accepts it (`day overtime`). The stops are the daily usage share, data at
+  risk (`day urgent`) and the session job's wall time. The end report (`day end`) is written when the plan is
+  done or a stop hits;
 - each work unit (an agent spawn) checks the account-wide Claude usage against the daily share of
   the weekly allowance (default 1/7, all models including Fable), shared by every company and
   the upstream team.
@@ -22,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -44,6 +50,14 @@ DEVICES = ("hours", "weekday", "usage", "session")  # attendance safety devices,
 DEVICE_EVENT, BLACK_EVENT = "workday.device", "workday.black-company"
 BLACK_NAME = "블랙기업모드"  # identifier `black-company`: every device off at once, loudly
 HOURS_EXCEEDED = "hours.exceeded"  # development phase: recorded once per day when the 8 hours pass
+# Finish the plan (Director, 2026-10-06): after the end time the plan's unfinished items and their fixes go on as
+# overtime the harness records itself; `day.overtime` records of this rule carry `rule: "finish-plan"`.
+FINISH_RULE = "finish-plan"
+FINISH_RULE_MEMO = "Director rule 2026-10-06: 초과근무로 문제를 모두 해결하고 당일 업무를 마무리"
+FINISH_RULE_BY = "Director (standing rule)"
+OPEN_STATUSES = ("proposed", "approved", "dispatched", "staged", "rework")  # a work unit can still start
+WI_RE = re.compile(r"\bWI-\d{4,}\b")
+WALL_WARN = timedelta(hours=1)  # the session job's remaining wall time under this is a stop
 
 
 def _now() -> datetime:
@@ -61,9 +75,10 @@ def _parse(ts: str) -> datetime:
 
 def settings(site: Site) -> dict:
     """config.json `workday` (hours, overtime_hours, daily_share, model_weights, transcripts, weekdays, supervised,
-    start/end fallback window); defaults otherwise."""
+    start/end fallback window, finish_plan); defaults otherwise."""
     cfg = site.config.get("workday") or {}
     ot = cfg.get("overtime_hours")
+    fp = cfg.get("finish_plan")
     return {"hours": float(cfg.get("hours") or DEFAULT_HOURS),
             "overtime_hours": float(DEFAULT_OVERTIME_HOURS if ot is None else ot),
             "daily_share": float(cfg.get("daily_share") or 1 / 7),
@@ -71,7 +86,8 @@ def settings(site: Site) -> dict:
             "transcripts": cfg.get("transcripts") or claude_usage.DEFAULT_ROOTS,
             "weekdays": _weekdays(cfg.get("weekdays")),
             "phase": _phase(cfg.get("phase")),
-            "start": cfg.get("start") or None, "end": cfg.get("end") or None}
+            "start": cfg.get("start") or None, "end": cfg.get("end") or None,
+            "finish_plan": True if fp is None else bool(fp)}
 
 
 def _phase(raw) -> str:
@@ -262,25 +278,82 @@ def day(site: Site, events: list[dict] | None = None) -> dict:
                                                          "write the end report"}
         return {**out, "phase": "planned", "reason": "day plan waits for the Director's approval"}
     a = approved[-1]["payload"]
-    out.update(start=a["start"], end=a["end"], approval=approved[-1]["id"])
+    out.update(start=a["start"], end=a["end"], approval=approved[-1]["id"], plan_items=plan_items(plan))
     out["working_day"] = working_day(site, out["start"])
-    items = sorted({w for e in overtime for w in e["payload"]["items"]})
+    # the Director's accepted items (`day overtime --items`) and the ones the finish-plan rule recorded by itself
+    director = sorted({w for e in overtime if e["payload"].get("rule") != FINISH_RULE for w in e["payload"]["items"]})
+    out["overtime_auto"] = sorted({w for e in overtime if e["payload"].get("rule") == FINISH_RULE
+                                   for w in e["payload"]["items"]})
     if not out["working_day"]:
         name = WEEKDAY_NAMES[_parse(out["start"]).weekday()].capitalize()
         out["reason"] = f"{name} is not a working day (workday.weekdays): overtime only"
     if ended:
         out["report"] = ended[-1]["id"]
-        if items:
-            return {**out, "phase": "overtime", "overtime": items}
+        if director:
+            return {**out, "phase": "overtime", "overtime": director}
         return {**out, "phase": "off-duty", "reason": "end report written, no overtime approved"}
-    if mode and _now() >= _parse(a["end"]):
+    out["overtime"] = director
+    past = bool(mode) and _now() >= _parse(a["end"])
+    if past and out["working_day"] and settings(site)["finish_plan"]:
+        out.update(_finishing(site, plan))  # finishing, open, fixes, statuses (Director rule 2026-10-06)
+    if past:
         if mode == "block":
-            return {**out, "phase": "past-end", "reason": f"the day ended at {a['end']}; write the end report"}
+            if out.get("finishing"):
+                return {**out, "phase": "past-end", "reason": _finishing_reason(out)}
+            done = "; the plan is done" if out["plan_items"] and "open" in out else ""
+            return {**out, "phase": "past-end", "reason": f"the day ended at {a['end']}{done}; write the end report"}
         out["hours_exceeded"] = True  # development phase: a warning, not a block
-        out["warning"] = f"the 8-hour day ended at {a['end']} (workday.phase development: not blocking); write the end report"
+        out["warning"] = f"the 8-hour day ended at {a['end']} (workday.phase development: not blocking); " + (
+            _finishing_reason(out) if out.get("finishing") else "write the end report")
+        if out.get("finishing"):
+            out["reason"] = _finishing_reason(out)
     if not out["working_day"]:
-        return {**out, "phase": "overtime", "overtime": items}
+        return {**out, "phase": "overtime"}
     return {**out, "phase": "on-duty"}
+
+
+def plan_items(plan_event: dict) -> list[str]:
+    """The WIs a day plan lists: `items` recorded by `day plan --wi`, else every WI id named in the plan text."""
+    p = plan_event.get("payload") or {}
+    if p.get("items"):
+        return sorted(set(p["items"]))
+    return sorted(set(WI_RE.findall(p.get("plan") or "")))
+
+
+def plan_progress(site: Site, plan_event: dict) -> dict:
+    """Where the plan stands: its WIs (the ones that exist), the fixes they caused, and which are still open.
+    A fix is a WI created after the plan whose record names a plan WI (or an earlier fix) as `parent` or
+    `fix_for`; a rework or amendment of a plan WI keeps its id and needs no link. Open means a work unit can
+    still start for it (OPEN_STATUSES); verified, promoted, stopped and reverted items are finished for the day."""
+    led = Ledger(site)
+    ids = plan_items(plan_event)
+    recs = {r["id"]: r for r in led.load("work-item")}
+    items = [w for w in ids if w in recs]
+    related, fixes = set(items), []
+    for r in sorted(recs.values(), key=lambda r: r["ts"]):
+        if r["id"] in related or r["ts"] <= plan_event["ts"]:
+            continue
+        links = {r["payload"].get("parent"), r["payload"].get("fix_for")} - {None}
+        if links & related:
+            related.add(r["id"])
+            fixes.append(r["id"])
+    status = {w["id"]: w["status"] for w in led.work_items() if w["id"] in related}
+    titles = {w: recs[w]["payload"].get("title") for w in items + fixes}
+    return {"items": items, "fixes": fixes, "statuses": status, "titles": titles,
+            "open": [w for w in items + fixes if status.get(w) in OPEN_STATUSES]}
+
+
+def _finishing(site: Site, plan_event: dict) -> dict:
+    pr = plan_progress(site, plan_event)
+    out = {"open": pr["open"], "fixes": pr["fixes"], "statuses": pr["statuses"]}
+    if pr["open"]:
+        out["finishing"] = True
+    return out
+
+
+def _finishing_reason(d: dict) -> str:
+    n = len(d["open"])
+    return f"end time passed {d['end'][11:16]}; finishing the plan ({n} item{'s' if n != 1 else ''} open: {', '.join(d['open'])})"
 
 
 def _session_clock(site: Site, session: dict | None) -> dict:
@@ -306,7 +379,43 @@ def status(site: Site) -> dict:
         out["usage"] = usage(site, evs)
     except OSError as exc:
         out["usage"] = {"error": str(exc)}
+    if out.get("finishing"):
+        hs = hard_stop(site, out, evs, out["usage"])
+        if hs:
+            out["hard_stop"] = hs
+            note = f"{hs['why']}: finish running work and write the end report (`dureh day end`)"
+            out["warning"] = f"{out['warning']}\n⚠ {note}" if out.get("warning") else note
     return out
+
+
+def wall_left(site: Site, d: dict) -> timedelta | None:
+    """Remaining wall time of the day's session job (squeue %L), None without a recorded job or an answer."""
+    job = d.get("job_id")
+    if not job:
+        return None
+    from . import cluster, sessions
+
+    q = sessions._squeue(site, str(job))
+    if not q.get("queued"):
+        return None
+    return cluster.parse_time(q.get("time_left"))
+
+
+def hard_stop(site: Site, d: dict, evs: list[dict], u: dict | None = None) -> dict | None:
+    """The stops that end a day being finished past its end time (Director, 2026-10-06): today's usage at the
+    daily share, data at risk (a `day urgent` record), the session job's wall time under WALL_WARN."""
+    if device_on(site, "usage", evs):
+        u = u if u is not None else usage(site, evs)
+        if u.get("daily_allowance") and u.get("today_units", 0) >= u["daily_allowance"]:
+            return {"stop": "usage", "why": f"today's Claude usage {u['today_units']} units reached the daily share "
+                                            f"{u['daily_allowance']}"}
+    urgent_items = _urgent(evs)
+    if urgent_items:
+        return {"stop": "urgent", "why": f"data at risk: urgent {', '.join(urgent_items)}"}
+    left = wall_left(site, d)
+    if left is not None and left < WALL_WARN:
+        return {"stop": "wall-time", "why": f"session job {d['job_id']} has {str(left).split('.')[0]} of wall time left"}
+    return None
 
 
 def note_hours_exceeded(site: Site, d: dict, evs: list[dict]) -> dict | None:
@@ -401,19 +510,34 @@ def gate(site: Site, wi: str | None, checking: bool = False) -> str | None:
     if phase in ("off-duty", "planned"):
         return (f"workday mode: no approved day ({d.get('reason')}). Report the day plan with `dureh day plan` "
                 "and record the Director's approval with `dureh day approve --memo`.")
+    fam = _wi_family(Ledger(site), wi) if wi else set()
     if phase == "past-end":
-        return (f"workday mode: the 8-hour day ended at {d['end']}. Start nothing new; write the end report with "
-                "`dureh day end` and propose overtime items for the Director.")
-    if phase == "overtime":
-        if not wi or not (_wi_family(Ledger(site), wi) & set(d["overtime"])):
+        if fam & set(d.get("overtime") or []):
+            return None  # the Director's accepted overtime is not held back by the budget
+        if d.get("finishing") and fam & set(d["open"]):
+            if not site.observe:
+                note_finish_overtime(site, d, wi)  # the harness records the overtime itself; the stops follow
+        elif d.get("finishing"):
+            return (f"workday mode: end time passed {d['end'][11:16]}; only the plan's open items "
+                    f"({', '.join(d['open'])}) and fixes for problems they caused go on (Director rule 2026-10-06). "
+                    "Work outside the plan needs the Director's word: `dureh day overtime --items <WI>... "
+                    "--memo \"<Director's words>\"`.")
+        else:
+            return (f"workday mode: the 8-hour day ended at {d['end']}. Start nothing new; write the end report with "
+                    "`dureh day end` and propose overtime items for the Director.")
+    elif phase == "overtime":
+        if not (fam & set(d["overtime"])):
             if not d.get("working_day", True) and not d.get("report"):
                 return (f"workday mode: {d['reason']}. Worker agents spawn only for items in a Director overtime "
                         "record: `dureh day overtime --items <WI>... --memo \"<Director's words>\"`.")
             return (f"workday mode: overtime covers only {', '.join(d['overtime']) or 'nothing yet'} "
                     "(fixes and normalization tests the Director accepted in the end report).")
         return None  # accepted overtime is not held back by the budget
-    if d.get("hours_exceeded"):
-        note_hours_exceeded(site, d, evs)
+    else:
+        if d.get("hours_exceeded"):
+            note_hours_exceeded(site, d, evs)
+        if d.get("finishing") and fam & set(d["open"]) and not site.observe:
+            note_finish_overtime(site, d, wi)  # development phase: nothing blocks, the overtime is still recorded
     if not device_on(site, "usage"):
         return None  # usage is counted and shown, not gated
     u = usage(site, evs)
@@ -422,6 +546,20 @@ def gate(site: Site, wi: str | None, checking: bool = False) -> str | None:
                 f"{u['daily_allowance']} (1/{round(1 / u['daily_share'])} of the weekly allowance, shared by all "
                 "companies and upstream). Finish running work and write the end report.")
     return None
+
+
+def note_finish_overtime(site: Site, d: dict, wi: str) -> dict | None:
+    """The finish-plan rule's own overtime record (Director, 2026-10-06), written at the first work unit after the
+    end time with the plan's unfinished WIs; later work units append the fixes (and re-opened items) that appeared
+    since. Nothing is written when every open item is already recorded."""
+    recorded = set(d.get("overtime_auto") or [])
+    new = [w for w in d["open"] if w not in recorded]
+    if not new:
+        return None
+    payload = {"items": new, "memo": FINISH_RULE_MEMO, "by": FINISH_RULE_BY, "rule": FINISH_RULE, "plan": d["plan"],
+               "end": d["end"], "at": _ts(_now()), "work_unit": wi}
+    payload["appended" if recorded else "first_work_unit"] = True
+    return Ledger(site).event("day.overtime", "desk", None, payload, [d["plan"]])
 
 
 # ------------------------------------------------------------------ commands
@@ -492,16 +630,23 @@ def calibrate(site: Site, weekly_percent: float) -> dict:
     return {**cal, "record": rec["id"]}
 
 
-def plan(site: Site, actor: str, goal: str, text: str) -> dict:
+def plan(site: Site, actor: str, goal: str, text: str, items: list[str] | None = None) -> dict:
+    """Record the day plan. Its work items are `items` (`day plan --wi`, each an existing WI) or, without them,
+    every WI id the text names: the finish-plan rule reads them (`plan_items`)."""
     _require_on(site)
     if not goal.strip() or not text.strip():
         fail("a day plan needs --goal and the plan text")
     d = day(site)
     if d["phase"] in ("on-duty", "past-end"):
         fail(f"the current day ({d['plan']}) is still open; write its end report first")
+    led = Ledger(site)
+    for w in items or []:
+        led.get("work-item", w)
     u = usage(site)
-    return Ledger(site).event("day.planned", actor, None, {"date": _now().date().isoformat(), "goal": goal,
-                                                           "plan": text, "usage_at_plan": u, "heads": heads(site)})
+    payload = {"date": _now().date().isoformat(), "goal": goal, "plan": text, "usage_at_plan": u, "heads": heads(site)}
+    if items:
+        payload["items"] = sorted(set(items))
+    return led.event("day.planned", actor, None, payload)
 
 
 def approve(site: Site, actor: str, memo: str, via: str | None = None, extra: dict | None = None) -> dict:
@@ -554,7 +699,7 @@ def decide(site: Site, actor: str, title: str, choice: str, why: str, revs: list
 
     _require_on(site)
     d = day(site)
-    if d["phase"] not in ("on-duty", "overtime"):
+    if d["phase"] not in ("on-duty", "overtime") and not d.get("finishing"):
         fail(f"decisions are recorded during the working day (phase {d['phase']})")
     if not (title.strip() and choice.strip() and why.strip()):
         fail("--title, --choice and --why are required")
@@ -575,26 +720,57 @@ def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], e
     if d["phase"] in ("on-duty", "overtime") and not d.get("hours_exceeded") and hours_mode(site) and not early.strip():
         fail(f"the day runs to {d['end']}; stay on duty even when idle (propose next work, watch upstream messages)."
              " End early only on the Director's word: --early \"<Director's words>\"")
+    evs = _events(site)
+    stop = hard_stop(site, d, evs) if d.get("finishing") else None
+    if d.get("finishing") and not stop and not early.strip():
+        n = len(d["open"])
+        fail(f"end time passed {d['end'][11:16]}, but the plan is not finished ({n} item{'s' if n != 1 else ''} open: "
+             f"{', '.join(d['open'])}). Director rule 2026-10-06: fix the problems and finish today's plan; the harness "
+             "records the overtime. The end report is written when the plan is done or a stop hits (today's usage at "
+             "the daily share, data at risk, the session job's wall time). An item that cannot proceed today: stop it "
+             "at a safe point (`dureh dispatch stop --wi <WI> --reason ...`) so the report says why; to end anyway: "
+             "--early \"<Director's words>\"")
     if not done.strip():
         fail("--done is required")
     led = Ledger(site)
     for w in overtime:
         led.get("work-item", w)
+    u = usage(site, evs)
     report = {"done": done, "problems": problems, "overtime_proposed": overtime,
               "decisions": d["decisions"], "start": d.get("start"), "end": d.get("end"), "ended_at": _ts(_now()),
               "session": d.get("session"), "working_day": d.get("working_day", True),
-              "early": early or None, "usage": usage(site), "heads": heads(site)}
+              "early": early or None, "usage": u, "heads": heads(site)}
+    past = past_end_section(site, d, stop, early)
+    if past:
+        report["past_end"] = past
     rec = led.event("day.ended", actor, None, report, [d["plan"]])
     return {**rec, "next": "give the Director this report; record accepted overtime with "
                            "`dureh day overtime --items ... --memo \"<Director's words>\"`, else `dureh day close`"}
 
 
+def past_end_section(site: Site, d: dict, stop: dict | None, early: str = "") -> dict | None:
+    """The end report's "finished past the end time" section: the items the finish-plan rule carried past the end
+    time (recorded `day.overtime`, plus anything still open) with their outcomes; None when nothing went past."""
+    auto = list(d.get("overtime_auto") or [])
+    still_open = list(d.get("open") or [])
+    ids = sorted(set(auto) | set(still_open))
+    if not ids:
+        return None
+    led = Ledger(site)
+    titles = {r["id"]: r["payload"].get("title") for r in led.load("work-item") if r["id"] in ids}
+    status = {w["id"]: w["status"] for w in led.work_items() if w["id"] in ids}
+    items = [{"wi": w, "title": titles.get(w), "outcome": status.get(w),
+              "finished": status.get(w) not in OPEN_STATUSES} for w in ids]
+    return {"rule": FINISH_RULE, "memo": FINISH_RULE_MEMO, "by": FINISH_RULE_BY, "from": d.get("end"),
+            "until": _ts(_now()), "items": items, "open": still_open, "stop": stop, "early": early or None}
+
+
 def overtime(site: Site, actor: str, items: list[str], memo: str) -> dict:
     _require_on(site)
     d = day(site)
-    if not d.get("report") and d.get("working_day", True):
+    if not d.get("report") and d.get("working_day", True) and not d.get("finishing"):
         fail("overtime is agreed in the end report; write it with `dureh day end` first")
-    if not d.get("report") and d["phase"] != "overtime":
+    if not d.get("report") and d["phase"] != "overtime" and not d.get("finishing"):
         fail(f"no open day for overtime (phase {d['phase']})")
     if not memo.strip() or not items:
         fail("--items and --memo (the Director's words) are required")

@@ -119,7 +119,7 @@ def cmd_wi_new(a):
     from .workflow import wi_new
 
     r = wi_new(_site(a), _actor(a), a.title, a.goal, a.role, a.target, a.acceptance, a.lane, a.bundle, a.value,
-               a.check, a.output, a.constraint, a.parent, None, a.academic)
+               a.check, a.output, a.constraint, a.parent, None, a.academic, fix_for=a.fix_for)
     print(f"{r['id']} created (proposed; needs Gate 1): {r['payload']['title']}")
 
 
@@ -511,7 +511,7 @@ def cmd_day(a):
             _print(text if st.get("enabled") else "\n".join(filter(None, [text, "Workday: off (the Director switches it on)"])))
     elif c == "plan":
         text = Path(a.file).read_text(encoding="utf-8") if a.file else sys.stdin.read()
-        _print(workday.plan(site, actor, a.goal, text))
+        _print(workday.plan(site, actor, a.goal, text, a.wi or []))
     elif c == "approve":
         _print(workday.approve(site, actor, a.memo))
     elif c == "decide":
@@ -760,6 +760,8 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--lane", default="work", choices=["work", "reorg", "desk"])
     x.add_argument("--bundle")
     x.add_argument("--parent", help="bundle work item owned by a manager")
+    x.add_argument("--fix-for", help="the work item whose problem this one fixes (after the end time, a fix for a day "
+                                     "plan item goes on under the finish-plan rule)")
     x.add_argument("--value")
     x.add_argument("--check", action="append", help="command the checker runs in the WI worktree")
     x.add_argument("--output", action="append", help="declared output path that must exist")
@@ -1013,6 +1015,8 @@ def parser() -> argparse.ArgumentParser:
     x = add(dy, "plan", cmd_day, "record the day plan for the Director (text from --file or stdin)")
     x.add_argument("--goal", required=True)
     x.add_argument("--file")
+    x.add_argument("--wi", nargs="*", help="the plan's work items (default: every WI id the plan text names); after "
+                                           "the end time they and their fixes go on until finished (finish-plan rule)")
     x = add(dy, "approve", cmd_day, "record the Director's approval of the plan; starts the clock")
     x.add_argument("--memo", required=True)
     x = add(dy, "decide", cmd_day, "record a decision point (own proposal followed) and commit state as a rollback point")
@@ -1020,11 +1024,12 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--choice", required=True)
     x.add_argument("--why", required=True)
     x.add_argument("--rev", action="append", help="commit(s) made for this decision (repeatable)")
-    x = add(dy, "end", cmd_day, "record the end report (done, problems, proposed overtime WIs)")
+    x = add(dy, "end", cmd_day, "record the end report (done, problems, proposed overtime WIs); after the end time "
+                                "only when the plan is finished or a stop hit (usage share, data at risk, wall time)")
     x.add_argument("--done", required=True)
     x.add_argument("--problems")
     x.add_argument("--overtime", nargs="*", help="WIs proposed for overtime (fixes and normalization tests only)")
-    x.add_argument("--early", help="end before the end time: the Director's words")
+    x.add_argument("--early", help="end before the end time, or with plan items still open: the Director's words")
     x = add(dy, "overtime", cmd_day, "record the overtime items the Director accepted")
     x.add_argument("--items", nargs="+", required=True)
     x.add_argument("--memo", required=True)

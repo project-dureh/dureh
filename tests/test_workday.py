@@ -140,9 +140,11 @@ class Workday(SiteCase):
         return hook(self.s, hook_event_name="PreToolUse", tool_name="Agent", cwd=str(self.site_root),
                     tool_input={"subagent_type": "pm-modules", "prompt": brief, "description": "x"})
 
-    def start_day(self):
+    def start_day(self, plan="1. W", items=None):
+        """`plan` is the plan text; the default names no WI id, so the day's WIs are outside the plan (after the
+        end time they are refused as before). The finish-plan tests pass a plan that names them."""
         workday.switch(self.s, True, "trial")
-        workday.plan(self.s, "desk", "finish W", "1. W")
+        workday.plan(self.s, "desk", "finish W", plan, items)
         workday.approve(self.s, "desk", "승인")
 
     def test_off_by_default_changes_nothing(self):
@@ -852,6 +854,233 @@ class Workday(SiteCase):
         self.assertIn("stay on duty", text)
         self.assertIn("day close", text)
         self.assertIn("adapter sync --harness <release checkout>", text)
+        # finish the plan (Director, 2026-10-06)
+        self.assertIn("finished the same day", text)
+        self.assertIn("never move a plan item to tomorrow", text)
+        self.assertIn("records the overtime itself", text)
+        self.assertIn("wi new --fix-for", text)
+        self.assertIn("Write the end report when the plan is done", text)
+
+    # ------------------------------------------------------------ finish the plan (Director, 2026-10-06)
+    def overtime_events(self):
+        return [e for e in Ledger(self.s).events() if e["type"] == "day.overtime"]
+
+    def verify(self, wi):
+        """Stage and verify a WI without a checker: finished for the day (promotion is a desk command)."""
+        wf.wi_stage(self.s, "desk", wi, "done")
+        Ledger(self.s).event("wi.verified", "desk", wi, {"run": None, "head": None})
+
+    def other_wi(self, title="X"):
+        other = wf.wi_new(self.s, "desk", title, "g", "pm-modules", "modules/demo", ["ok"])["id"]
+        wf.wi_approve(self.s, "desk", other, "ok")
+        return other
+
+    def test_finish_plan_continues_plan_items_after_the_end_time(self):
+        # production, blocking clock; the plan names W (by id, as real plans do); X is outside the plan
+        self.start_day(f"| 1 | {self.wi} build W | pm-modules | 2 | 3 |")
+        other = self.other_wi()
+        self.assertEqual(workday.status(self.s)["plan_items"], [self.wi])
+        self.at(T0 + timedelta(hours=8, minutes=1))
+        st = workday.status(self.s)
+        self.assertEqual((st["phase"], st["finishing"], st["open"]), ("past-end", True, [self.wi]))
+        self.assertEqual(st["reason"], f"end time passed 17:00; finishing the plan (1 item open: {self.wi})")
+        self.assertIn(f"Workday: past-end (09:00-17:00); end time passed 17:00; finishing the plan (1 item open: {self.wi})",
+                      render_status(status(self.s)))
+        self.assertEqual(self.overtime_events(), [], "nothing recorded before the first work unit")
+        self.assertIsNone(self.spawn(), "a plan item goes on after the end time")
+        evs = self.overtime_events()
+        self.assertEqual(len(evs), 1)
+        p = evs[0]["payload"]
+        self.assertEqual((p["items"], p["memo"], p["by"], p["rule"], p["plan"], p["first_work_unit"]),
+                         ([self.wi], "Director rule 2026-10-06: 초과근무로 문제를 모두 해결하고 당일 업무를 마무리",
+                          "Director (standing rule)", "finish-plan", st["plan"], True))
+        self.assertEqual(evs[0]["refs"], [st["plan"]])
+        self.assertIsNone(workday.gate(self.s, self.wi))  # (a second dispatch_brief waits for the start grace)
+        self.assertIsNone(workday.gate(self.s, self.wi, checking=True))
+        self.assertEqual(len(self.overtime_events()), 1, "recorded once")
+        # new work outside the plan is still refused; the Director's explicit overtime admits it
+        out = self.spawn(other)
+        self.assertTrue(denied(out))
+        self.assertIn("only the plan's open items", json.dumps(out, ensure_ascii=False))
+        self.assertIn("day overtime", json.dumps(out))
+        with self.assertRaisesRegex(DurehError, "not finished"):
+            workday.end(self.s, "desk", "W still failing", "", [])  # the plan is not done: no end report yet
+        workday.decide(self.s, "desk", "retry", "rerun", "flaky", [])  # decisions still recorded while finishing
+        workday.overtime(self.s, "desk", [other], "X도 오늘")
+        self.assertIsNone(self.spawn(other))
+        self.assertEqual(len(self.overtime_events()), 2)
+        self.assertNotIn("rule", self.overtime_events()[-1]["payload"])
+        # the plan done: status says so, the end report is written, with the past-end section, then the close
+        self.verify(self.wi)
+        st = workday.status(self.s)
+        self.assertEqual(st["phase"], "past-end")
+        self.assertNotIn("finishing", st)
+        self.assertIn("the plan is done; write the end report", st["reason"])
+        rec = workday.end(self.s, "desk", "W verified past the end time", "", [])
+        past = rec["payload"]["past_end"]
+        self.assertEqual((past["rule"], past["by"], past["from"], past["stop"], past["open"]),
+                         ("finish-plan", "Director (standing rule)", (T0 + timedelta(hours=8)).isoformat(), None, []))
+        self.assertEqual(past["items"], [{"wi": self.wi, "title": "W", "outcome": "verified", "finished": True}])
+        self.assertEqual(workday.status(self.s)["phase"], "overtime", "the Director's own item still stands")
+        self.assertEqual(workday.status(self.s)["overtime"], [other])
+        self.write_handoff()
+        workday.close(self.s, "desk", "done")
+        self.assertEqual(workday.status(self.s)["phase"], "off-duty")
+
+    def test_finish_plan_admits_a_fix_for_a_plan_item(self):
+        self.start_day(f"1. {self.wi}")
+        self.at(T0 + timedelta(hours=8, minutes=1))
+        self.assertIsNone(self.spawn())
+        # a fix created after the plan: --fix-for a plan WI (or --parent, the bundle's child)
+        fix = wf.wi_new(self.s, "desk", "fix W", "g", "pm-modules", "modules/demo", ["ok"], fix_for=self.wi)["id"]
+        wf.wi_approve(self.s, "desk", fix, "plan approval covers the fix")
+        child = wf.wi_new(self.s, "desk", "W child", "g", "py-writer", "modules/demo", ["ok"], parent=self.wi)["id"]
+        wf.wi_approve(self.s, "desk", child, "ok")
+        unrelated = self.other_wi("Y")
+        st = workday.status(self.s)
+        self.assertEqual((st["fixes"], st["open"]), ([fix, child], [self.wi, fix, child]))
+        self.assertIsNone(self.spawn(fix))
+        evs = self.overtime_events()
+        self.assertEqual(len(evs), 2, "the fix is appended by a later event")
+        self.assertEqual((evs[1]["payload"]["items"], evs[1]["payload"]["appended"], evs[1]["payload"]["rule"]),
+                         ([fix, child], True, "finish-plan"))
+        self.assertTrue(denied(self.spawn(unrelated)))
+        self.assertEqual(len(self.overtime_events()), 2)
+        # a fix of a fix follows the chain; the record carries fix_for
+        fix2 = wf.wi_new(self.s, "desk", "fix the fix", "g", "pm-modules", "modules/demo", ["ok"], fix_for=fix)["id"]
+        self.assertEqual(Ledger(self.s).get("work-item", fix2)["payload"]["fix_for"], fix)
+        self.assertIn(fix2, workday.status(self.s)["open"])
+        with self.assertRaises(DurehError):
+            wf.wi_new(self.s, "desk", "bad", "g", "pm-modules", "modules/demo", ["ok"], fix_for="WI-9999")
+        rc, out = self.cli("wi", "new", "--title", "cli fix", "--goal", "g", "--role", "pm-modules", "--target",
+                           "modules/demo", "--acceptance", "ok", "--fix-for", self.wi)
+        self.assertEqual(rc, 0, out)
+
+    def test_finish_plan_off_restores_the_refusal(self):
+        self.config(workday={"transcripts": [str(self.projects)], "phase": "production", "weekdays": ALL_WEEK,
+                             "finish_plan": False})
+        self.assertFalse(workday.settings(self.s)["finish_plan"])
+        self.start_day(f"1. {self.wi}")
+        self.at(T0 + timedelta(hours=8, minutes=1))
+        out = self.spawn()
+        self.assertTrue(denied(out))
+        self.assertIn("end report", json.dumps(out))
+        st = workday.status(self.s)
+        self.assertEqual(st["phase"], "past-end")
+        self.assertNotIn("finishing", st)
+        self.assertEqual(self.overtime_events(), [])
+        with self.assertRaisesRegex(DurehError, "end report"):
+            workday.overtime(self.s, "desk", [self.wi], "x")
+        workday.end(self.s, "desk", "done", "", [])  # as before: the end report at the end time
+
+    def test_finish_plan_usage_share_still_stops(self):
+        self.start_day(f"1. {self.wi}")
+        self.spend(7)
+        workday.calibrate(self.s, 10)  # weekly 70, daily 10
+        self.at(T0 + timedelta(hours=8, minutes=1))
+        self.assertIsNone(self.spawn())
+        self.spend(3)
+        self.assertIn("daily share", workday.gate(self.s, self.wi) or "")
+        fix = wf.wi_new(self.s, "desk", "fix W", "g", "pm-modules", "modules/demo", ["ok"], fix_for=self.wi)["id"]
+        wf.wi_approve(self.s, "desk", fix, "ok")
+        out = self.spawn(fix)
+        self.assertTrue(denied(out))
+        self.assertIn("daily share", json.dumps(out))
+        st = workday.status(self.s)
+        self.assertEqual(st["hard_stop"]["stop"], "usage")
+        self.assertIn("reached the daily share", st["warning"])
+        self.assertIn("write the end report", render_status(status(self.s)))
+        rec = workday.end(self.s, "desk", "W unfinished: usage", "", [self.wi])  # a stop: the report may be written
+        past = rec["payload"]["past_end"]
+        self.assertEqual((past["stop"]["stop"], past["open"]), ("usage", [self.wi, fix]))
+        self.assertEqual([i["finished"] for i in past["items"]], [False, False])
+
+    def test_finish_plan_wall_time_warns_and_stops(self):
+        fake = self.fake_slurm(squeue="RUNNING|0:40:00")
+        Ledger(self.s).event("session.started", "desk", None, {"job_id": "777", "purpose": "desk",
+                                                               "submitted_at": T0.isoformat()})
+        self.start_day(f"1. {self.wi}")
+        self.at(T0 + timedelta(hours=8, minutes=1))
+        st = workday.status(self.s)
+        self.assertEqual((st["job_id"], st["hard_stop"]["stop"]), ("777", "wall-time"))
+        self.assertIn("0:40:00 of wall time left", st["warning"])
+        self.assertIn("-j 777", (fake / "squeue-calls").read_text())
+        self.assertIsNone(self.spawn(), "no duration notion for a spawn: the gate only warns through status")
+        workday.end(self.s, "desk", "W unfinished: job ends", "", [self.wi])
+        # with time to spare there is no stop and the end report waits for the plan
+        self.fake_slurm(squeue="RUNNING|5:00:00")
+        self.s = self.site()
+        workday.switch(self.s, True, "again")
+        self.at(T0 + timedelta(days=1))
+        Ledger(self.s).event("session.started", "desk", None, {"job_id": "778", "purpose": "desk",
+                                                               "submitted_at": (T0 + timedelta(days=1)).isoformat()})
+        self.start_day(f"1. {self.wi}")
+        self.at(T0 + timedelta(days=1, hours=8, minutes=1))
+        st = workday.status(self.s)
+        self.assertNotIn("hard_stop", st)
+        with self.assertRaisesRegex(DurehError, "not finished"):
+            workday.end(self.s, "desk", "x", "", [])
+
+    def test_finish_plan_urgent_is_a_stop(self):
+        self.start_day(f"1. {self.wi}")
+        self.at(T0 + timedelta(hours=8, minutes=1))
+        other = self.other_wi()
+        workday.urgent(self.s, "desk", [other], "disk filling")
+        self.assertEqual(workday.status(self.s)["hard_stop"]["stop"], "urgent")
+        workday.end(self.s, "desk", "stopped for the disk", "", [])
+
+    def test_finish_plan_in_the_development_phase(self):
+        self.workday_config()  # development: nothing blocks, the overtime is still recorded, the report waits
+        self.start_day(f"1. {self.wi}")
+        other = self.other_wi()
+        self.at(T0 + timedelta(hours=8, minutes=1))
+        st = workday.status(self.s)
+        self.assertEqual((st["phase"], st["finishing"], st["hours_exceeded"]), ("on-duty", True, True))
+        self.assertEqual(st["reason"], f"end time passed 17:00; finishing the plan (1 item open: {self.wi})")
+        self.assertIn("not blocking); end time passed 17:00; finishing the plan", st["warning"])
+        self.assertIsNone(self.spawn(other), "outside the plan: still only a warning in development")
+        self.assertEqual(self.overtime_events(), [])
+        self.assertIsNone(self.spawn())
+        self.assertEqual([e["payload"]["items"] for e in self.overtime_events()], [[self.wi]])
+        with self.assertRaisesRegex(DurehError, "not finished"):
+            workday.end(self.s, "desk", "x", "", [])
+        wf.dispatch_stop(self.s, "desk", self.wi, "blocked on upstream")  # a stopped item is finished for the day
+        self.assertNotIn("finishing", workday.status(self.s))
+        rec = workday.end(self.s, "desk", "W stopped", "", [])
+        self.assertEqual(rec["payload"]["past_end"]["items"][0]["outcome"], "stopped")
+
+    def test_finish_plan_does_not_replace_the_weekend_memo(self):
+        self.workday_config(phase="production")  # Mon-Fri; T0 is a Saturday
+        self.start_day(f"1. {self.wi}")
+        self.assertTrue(denied(self.spawn()))
+        self.at(T0 + timedelta(hours=8, minutes=1))
+        out = self.spawn()
+        self.assertTrue(denied(out))
+        self.assertIn("end report", json.dumps(out))
+        self.assertEqual(self.overtime_events(), [])
+        self.assertNotIn("finishing", workday.status(self.s))
+
+    def test_day_plan_wi_option_and_text_extraction(self):
+        workday.switch(self.s, True, "trial")
+        other = self.other_wi()
+        with self.assertRaises(DurehError):
+            workday.plan(self.s, "desk", "g", "p", ["WI-9999"])
+        rec = workday.plan(self.s, "desk", "g", f"text names {other} only", [self.wi])
+        self.assertEqual(rec["payload"]["items"], [self.wi])
+        self.assertEqual(workday.plan_items(rec), [self.wi], "--wi wins over the text")
+        self.assertEqual(workday.plan_items({"payload": {"plan": f"a {other}, b {self.wi}, {other} again"}}),
+                         sorted([other, self.wi]))
+        workday.approve(self.s, "desk", "ok")
+        self.at(T0 + timedelta(hours=9))
+        workday.end(self.s, "desk", "x", "", [], early="그만")
+        self.at(T0 + timedelta(days=1))
+        rc, out = self.cli("day", "plan", "--goal", "g", "--file", str(self.write_plan(f"1. {other}")), "--wi", other)
+        self.assertEqual(rc, 0, out)
+
+    def write_plan(self, text):
+        p = self.tmp / "plan.md"
+        p.write_text(text)
+        return p
 
 
 if __name__ == "__main__":

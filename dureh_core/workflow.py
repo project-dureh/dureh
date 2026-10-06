@@ -25,7 +25,9 @@ CACHE_RE = re.compile(r"(^|/)(__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cac
 def wi_new(site: Site, actor: str, title: str, goal: str, role: str, target: str, acceptance: list[str],
            lane: str = "work", bundle: str | None = None, value: str | None = None, checks: list[str] | None = None,
            outputs: list[str] | None = None, constraints: list[str] | None = None, parent: str | None = None,
-           source: str | None = None, academic: bool = False) -> dict:
+           source: str | None = None, academic: bool = False, fix_for: str | None = None) -> dict:
+    """Create a work item. `fix_for` names the WI whose problem this one fixes (recorded as `fix_for`): after the
+    day's end time a fix for a day plan item goes on under the finish-plan rule (workday.py)."""
     org = site.org
     if org.role(actor).kind != "desk":
         fail("only the desk creates work items")
@@ -37,6 +39,8 @@ def wi_new(site: Site, actor: str, title: str, goal: str, role: str, target: str
     if not acceptance:
         fail("a work item needs at least one acceptance criterion")
     led = Ledger(site)
+    if fix_for:
+        led.get("work-item", fix_for)
     prec = led.get("work-item", parent) if parent else None
     if prec:
         owner = prec["payload"]["role"]
@@ -49,6 +53,8 @@ def wi_new(site: Site, actor: str, title: str, goal: str, role: str, target: str
                "lane": lane, "bundle": bundle, "value": value, "checks": list(checks or []),
                "constraints": list(constraints or []), "parent": parent, "source": source,
                "scope_frozen": lane == "reorg", "academic": bool(academic)}
+    if fix_for:
+        payload["fix_for"] = fix_for
     if outputs:
         payload["outputs"] = list(outputs)
     draft = {"id": "WI-0000", "payload": payload}
