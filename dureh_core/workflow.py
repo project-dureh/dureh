@@ -157,8 +157,13 @@ def worktree_problem(wt: Path, wi: str, site: Site | None = None) -> str | None:
     return None
 
 
-def worktree_repair(site: Site, actor: str, wi: str) -> dict:
-    """Re-link a WI worktree after the site moved, keeping branch and commits; prune it if its directory is gone."""
+def worktree_repair(site: Site, actor: str, wi: str, dry_run: bool = False, envs: bool = True,
+                    force: bool = False) -> dict:
+    """Re-link a WI worktree after the site moved, keeping branch and commits; prune it if its directory is gone.
+
+    `dry_run` reports the state the repair would reach without running git or the rebuild and without a record;
+    `envs=False` leaves the worktree's `.venv` alone; `force` rebuilds the `.venv` even when it is not stale
+    (the three are `worktree repair --all` options; `--wi` keeps the defaults)."""
     from .ops import agent_state
 
     if site.org.role(actor).kind != "desk":
@@ -172,22 +177,190 @@ def worktree_repair(site: Site, actor: str, wi: str) -> dict:
         fail(f"an agent is running for {wi}; stop it before repairing its worktree")
     wt = site.worktrees / wi
     if not wt.exists():
-        git(["worktree", "prune"], root)
+        if not dry_run:
+            git(["worktree", "prune"], root)
         state, env = "pruned", {"env": "ok"}
     else:
         if worktree_problem(wt, wi, site) is None:
             state = "ok"
+        elif dry_run:
+            state = "repaired"
         else:
             proc = subprocess.run(["git", "worktree", "repair", str(wt)], cwd=root, capture_output=True, text=True)
             err = worktree_problem(wt, wi, site)
             if err:
                 fail(f"repair of {wt} failed: {err} {(proc.stderr or '').strip()[-300:]}")
             state = "repaired"
-        env = _repair_env(site, wt, p["target"])
-    if state != "ok" or env["env"] == "rebuilt":
+        env = _repair_env(site, wt, p["target"], force=force, dry_run=dry_run) if envs else {"env": "skipped"}
+    if not dry_run and (state != "ok" or env["env"] == "rebuilt"):
         led.event("worktree.repaired", actor, wi, {"worktree": str(wt), "target": p["target"], "state": state,
                                                    **{k: v for k, v in env.items() if k != "hint"}})
     return {"wi": wi, "worktree": str(wt), "state": state, **env}
+
+
+WI_ID_RE = re.compile(r"^WI-\d{4,}$")
+EXEC_TREE_RE = re.compile(r"^(WI-\d{4,})-(.+)-[0-9a-f]{7}-\d{8}T\d{12}Z$")
+REPAIR_STATES = ("repaired", "pruned", "rebuilt", "unchanged", "skipped", "error")
+
+
+def _site_repos(site: Site) -> list[tuple[str, Path]]:
+    """(target, root) for every modules/<m> and projects/<p> directory of the site (git repositories or not)."""
+    out = []
+    for kind in ("modules", "projects"):
+        d = site.root / kind
+        if d.is_dir():
+            out += [(f"{kind}/{p.name}", p) for p in sorted(d.iterdir()) if p.is_dir() and not p.name.startswith(".")]
+    return out
+
+
+def _registered_worktrees(root: Path) -> list[Path]:
+    """The linked worktrees a repository registers (`git worktree list`), at the paths it recorded (after a move:
+    the old ones), whether or not those directories still exist."""
+    proc = subprocess.run(["git", "worktree", "list", "--porcelain"], cwd=root, capture_output=True, text=True)
+    if proc.returncode != 0:
+        return []
+    paths = [Path(ln[len("worktree "):]) for ln in proc.stdout.splitlines() if ln.startswith("worktree ")]
+    return [p for p in paths[1:]]  # the first entry is the main tree
+
+
+def _exec_venvs(site: Site) -> list[tuple[Path, Path, str | None]]:
+    """(venv, tree, module) for every exec-tree sibling environment `<tree>.venv` / `<tree>.venv-<task>`."""
+    from .exectree import exec_root
+
+    root = exec_root(site)
+    if not root.is_dir():
+        return []
+    out = []
+    for venv in sorted(root.iterdir()):
+        if ".venv" not in venv.name or not venv.is_dir():
+            continue
+        tree = root / venv.name.split(".venv", 1)[0]
+        m = EXEC_TREE_RE.match(tree.name)
+        out.append((venv, tree, m.group(2) if m else None))
+    return out
+
+
+def _env_state(r: dict) -> dict:
+    """A repair-all row's state from a _repair_env result."""
+    if r["env"] == "rebuilt":
+        return {"state": "rebuilt", "command": r.get("command"), "stale": r.get("stale_interpreter")}
+    if r["env"] == "stale":
+        return {"state": "skipped", "reason": "no env_rebuild", "stale": r.get("stale_interpreter")}
+    return {"state": "unchanged"}
+
+
+def worktree_repair_all(site: Site, actor: str, dry_run: bool = False, envs: bool = True,
+                        envs_only: bool = False, force: bool = False) -> dict:
+    """`worktree repair --all`: every WI worktree of the site and every virtualenv it owns, after a move or rename
+    (proposals/site-rename-independence.md rows 13-14, step 3).
+
+    Worktrees: the directories under `worktrees/` and the entries every modules/* and projects/* repository
+    registers (a registered path whose directory is gone is pruned); each is handled as `--wi` handles one. Then a
+    plain `git worktree repair` in each repository with linked worktrees, for worktrees that live elsewhere.
+    Environments (`envs`): the main tree of every module and project, the WI worktrees' (through the worktree
+    pass; in the env pass with `envs_only`) and the exec-tree siblings `<tree>.venv`; only stale ones are rebuilt
+    unless `force`; no `env_rebuild` for the target is "skipped", not an error. The pass never stops at an error:
+    each item ends repaired, pruned, rebuilt, unchanged, skipped or error. Records: `worktree.repaired` and
+    `env.repaired` per changed item as the single forms write them, plus one `worktree.repair-all` with the
+    counts; `dry_run` writes nothing and runs neither git nor a rebuild."""
+    from .ops import agent_state
+    from .util import DurehError
+
+    if site.org.role(actor).kind != "desk":
+        fail("only the desk repairs worktrees")
+    led = Ledger(site)
+    targets = {rec["id"]: rec["payload"].get("target") for rec in led.load("work-item")}
+    repos = _site_repos(site)
+    git_repos = [(t, r) for t, r in repos if (r / ".git").exists()]
+    rows: list[dict] = []
+    if not envs_only:
+        found: dict[str, str | None] = {}
+        for target, root in git_repos:
+            for p in _registered_worktrees(root):
+                if p.parent.name == "worktrees" and WI_ID_RE.match(p.name):
+                    found.setdefault(p.name, target)
+        if site.worktrees.is_dir():
+            for d in sorted(site.worktrees.iterdir()):
+                if d.is_dir():
+                    found.setdefault(d.name, None)
+        for wi in sorted(found):
+            row = {"kind": "worktree", "name": wi, "target": targets.get(wi) or found[wi],
+                   "path": str(site.worktrees / wi)}
+            rows.append(row)
+            if wi not in targets:
+                row.update(state="error", error="no work-item record")
+                continue
+            try:
+                if led.wi_status(wi)["status"] == "dispatched" and agent_state(led, wi) == "running":
+                    row.update(state="skipped", reason="agent running")
+                    continue
+                r = worktree_repair(site, actor, wi, dry_run=dry_run, envs=envs, force=force)
+            except DurehError as exc:
+                row.update(state="error", error=str(exc))
+                continue
+            row.update(state="unchanged" if r["state"] == "ok" else r["state"])
+            if envs and r["state"] != "pruned":
+                row["env"] = {"ok": "unchanged", "stale": "skipped", "rebuilt": "rebuilt"}[r["env"]]
+                if r["env"] == "stale":
+                    row["env_reason"] = "no env_rebuild"
+                if r.get("stale_interpreter"):
+                    row["stale"] = r["stale_interpreter"]
+        if not dry_run:
+            for target, root in git_repos:
+                if not _registered_worktrees(root):
+                    continue
+                proc = subprocess.run(["git", "worktree", "repair"], cwd=root, capture_output=True, text=True)
+                fixed = [ln for ln in (proc.stderr or "").splitlines() if ln.startswith("repair:")]
+                if proc.returncode != 0:
+                    rows.append({"kind": "repo", "name": target, "target": target, "state": "error",
+                                 "error": (proc.stderr or proc.stdout).strip()[-300:]})
+                elif fixed:
+                    rows.append({"kind": "repo", "name": target, "target": target, "state": "repaired",
+                                 "detail": "; ".join(fixed)})
+    if envs:
+        venvs: list[tuple[str, str | None, Path, Path]] = []  # name, target, cwd (where env_rebuild runs), venv
+        for target, root in repos:
+            if (root / ".venv").is_dir():
+                venvs.append((target, target, root, root / ".venv"))
+        if envs_only and site.worktrees.is_dir():
+            for d in sorted(site.worktrees.iterdir()):
+                if (d / ".venv").is_dir():
+                    venvs.append((f"worktrees/{d.name}", targets.get(d.name), d, d / ".venv"))
+        for venv, tree, module in _exec_venvs(site):
+            venvs.append((str(venv.relative_to(site.root)), f"modules/{module}" if module else None, tree, venv))
+        for name, target, cwd, venv in venvs:
+            row = {"kind": "env", "name": name, "target": target, "path": str(venv)}
+            rows.append(row)
+            if target is None:
+                row.update(state="skipped", reason="no work-item record" if name.startswith("worktrees/")
+                           else "unrecognised exec tree name")
+                continue
+            if not cwd.is_dir():
+                row.update(state="skipped", reason="its tree is gone")
+                continue
+            try:
+                r = _repair_env(site, cwd, target, venv=venv, force=force, dry_run=dry_run)
+            except DurehError as exc:
+                row.update(state="error", error=str(exc))
+                continue
+            row.update(_env_state(r))
+            if row["state"] == "rebuilt" and not dry_run:
+                led.event("env.repaired", actor, None, {"target": target, "venv": str(venv),
+                                                        **{k: v for k, v in r.items() if k != "hint"}})
+    worktrees = {k: 0 for k in REPAIR_STATES if k != "rebuilt"}
+    envs_c = {k: 0 for k in REPAIR_STATES if k not in ("repaired", "pruned")}
+    for row in rows:
+        if row["kind"] in ("worktree", "repo"):
+            worktrees[row["state"]] += 1
+            if row.get("env") in envs_c:
+                envs_c[row["env"]] += 1
+        else:
+            envs_c[row["state"]] += 1
+    summary = {"dry_run": dry_run, "envs": envs, "envs_only": envs_only, "force": force, "items": len(rows),
+               "worktrees": worktrees, "venvs": envs_c}
+    if not dry_run:
+        led.event("worktree.repair-all", actor, None, summary)
+    return {"items": rows, "summary": summary}
 
 
 def _base_of(site: Site, wi: str) -> str | None:
@@ -583,22 +756,54 @@ def _git_z(args: list[str], cwd: Path) -> list[str]:
 
 
 def stale_venv(root: Path) -> str | None:
-    """The first missing interpreter named by a script shebang in <root>/.venv/bin, or None."""
-    bindir = Path(root) / ".venv" / "bin"
+    """The first path <root>/.venv names that is not this environment (see venv_stale), or None."""
+    return venv_stale(Path(root) / ".venv")
+
+
+_ACTIVATE_RE = re.compile(r"""^\s*(?:export\s+)?VIRTUAL_ENV=(['"]?)(/[^'"\s]*)\1\s*$""")
+
+
+def venv_stale(venv: Path) -> str | None:
+    """The first path the environment `venv` names that is not the environment where it now is, or None.
+
+    Checked: the shebang of every script in bin/ (an interpreter that does not exist), `bin/activate`'s
+    VIRTUAL_ENV when it is a literal path (must be this directory: it also catches a copy whose old location still
+    exists), the `home` of pyvenv.cfg (the base interpreter's directory must exist) and a dangling bin/python
+    link. A site move leaves all of them at the old location; `worktree repair` rebuilds such an environment with
+    the target's env_rebuild."""
+    venv = Path(venv)
+    bindir = venv / "bin"
     if not bindir.is_dir():
         return None
+    own = {os.path.normpath(venv), os.path.realpath(venv)}
+
     for f in sorted(bindir.iterdir()):
         if f.is_symlink() or not f.is_file():
             continue
         try:
             with open(f, "rb") as fh:
                 first = fh.readline(4096)
+                rest = fh.read(65536) if f.name == "activate" else b""
         except OSError:
             continue
         if first.startswith(b"#!"):
             interp = first[2:].strip().split(b" ")[0].decode("utf-8", "replace")
             if interp.startswith("/") and not os.path.exists(interp):
                 return interp
+        if f.name == "activate":
+            for line in (first + rest).decode("utf-8", "replace").splitlines():
+                m = _ACTIVATE_RE.match(line)
+                if m and os.path.normpath(m.group(2)) not in own:
+                    return m.group(2)
+    cfg = venv / "pyvenv.cfg"
+    if cfg.is_file():
+        for line in cfg.read_text(errors="replace").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "home" and value.strip().startswith("/") and not os.path.isdir(value.strip()):
+                return value.strip()
+    py = bindir / "python"
+    if py.is_symlink() and not py.exists():
+        return os.path.join(bindir, os.readlink(py))
     return None
 
 
@@ -610,22 +815,32 @@ def _env_rebuild_command(site: Site, target: str) -> str | None:
     return (site.config.get("env") or {}).get("rebuild")
 
 
-def _repair_env(site: Site, root: Path, target: str) -> dict:
-    stale = stale_venv(root)
-    if not stale:
+def _repair_env(site: Site, root: Path, target: str, venv: Path | None = None, force: bool = False,
+                dry_run: bool = False) -> dict:
+    """Rebuild `venv` (default <root>/.venv) with the target's env_rebuild, run in `root`, when it is stale (or
+    `force`). An environment elsewhere than <root>/.venv (an exec tree's sibling) is named to the command through
+    VIRTUAL_ENV and UV_PROJECT_ENVIRONMENT, as the job wrapper does. `dry_run` only reports."""
+    venv = Path(venv) if venv is not None else Path(root) / ".venv"
+    stale = venv_stale(venv)
+    if not stale and not (force and venv.is_dir()):
         return {"env": "ok"}
     cmd = _env_rebuild_command(site, target)
     if not cmd:
         return {"env": "stale", "stale_interpreter": stale,
                 "hint": f"set `env_rebuild` on the {target} entry in config.json (or `env.rebuild`), for example"
                         " \"uv sync --frozen --all-groups\", then run the repair again; the Director owns config.json"}
-    proc = subprocess.run(cmd, shell=True, cwd=root, capture_output=True, text=True, timeout=3600, env=site.env())
+    if dry_run:
+        return {"env": "rebuilt", "command": cmd, "stale_interpreter": stale, "dry_run": True}
+    env = site.env()
+    if venv != Path(root) / ".venv":
+        env.update(VIRTUAL_ENV=str(venv), UV_PROJECT_ENVIRONMENT=str(venv))
+    proc = subprocess.run(cmd, shell=True, cwd=root, capture_output=True, text=True, timeout=3600, env=env)
     if proc.returncode != 0:
         fail(f"environment rebuild `{cmd}` failed in {root} (exit {proc.returncode}): "
              f"{(proc.stderr or proc.stdout).strip()[-600:]}")
-    still = stale_venv(root)
+    still = venv_stale(venv)
     if still:
-        fail(f"environment rebuild `{cmd}` ran but {root}/.venv still names {still}")
+        fail(f"environment rebuild `{cmd}` ran but {venv} still names {still}")
     return {"env": "rebuilt", "command": cmd, "stale_interpreter": stale}
 
 
@@ -793,7 +1008,7 @@ def _verify_context(site: Site, actor: str, wi: str) -> dict:
 def _check_venv(wi: str, cwd: Path):
     stale = stale_venv(cwd)
     if stale:
-        fail(f"{wi}: stale virtualenv in {cwd}/.venv (its scripts name {stale}, which does not exist); checks would run"
+        fail(f"{wi}: stale virtualenv in {cwd}/.venv (it names {stale}, which is not this environment); checks would run"
              f" another environment. Repair first: `dureh worktree repair --wi {wi}`. Nothing was recorded.")
 
 

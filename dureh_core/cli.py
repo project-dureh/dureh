@@ -609,11 +609,48 @@ def cmd_authorize_write(a):
 
 
 def cmd_worktree(a):
-    from .workflow import env_repair, worktree_repair
+    from .workflow import env_repair, worktree_repair, worktree_repair_all
 
+    if a.all:
+        if a.wi or a.target:
+            fail("--all covers every worktree and environment of the site; it takes neither --wi nor --target")
+        if a.envs_only and a.no_envs:
+            fail("give at most one of --envs-only and --no-envs")
+        r = worktree_repair_all(_site(a), _actor(a), dry_run=a.dry_run, envs=not a.no_envs, envs_only=a.envs_only,
+                                force=a.force)
+        if a.json:
+            _print(r)
+            return
+        for line in repair_all_lines(r):
+            print(line)
+        return
+    if a.dry_run or a.force or a.envs_only or a.no_envs or a.json:
+        fail("--dry-run, --force, --envs-only, --no-envs and --json go with --all")
     if bool(a.wi) == bool(a.target):
-        fail("give exactly one of --wi (a WI worktree) or --target (a target's main tree, environment only)")
+        fail("give exactly one of --wi (a WI worktree), --target (a target's main tree, environment only) or --all")
     _print(worktree_repair(_site(a), _actor(a), a.wi) if a.wi else env_repair(_site(a), _actor(a), a.target))
+
+
+def repair_all_lines(r: dict) -> list[str]:
+    """One table-like line per item of `worktree repair --all` and a summary line (a dry run says "would")."""
+    dry = r["summary"]["dry_run"]
+    would = {"repaired": "would repair", "pruned": "would prune", "rebuilt": "would rebuild"} if dry else {}
+    out = []
+    for row in r["items"]:
+        state = would.get(row["state"], row["state"])
+        note = row.get("error") or row.get("reason") or row.get("detail") or ""
+        if row.get("env"):
+            note = f"env {would.get(row['env'], row['env'])}" + (f": {row['env_reason']}" if row.get("env_reason") else "")
+        if row.get("stale") and row["state"] != "error":
+            note = f"{note} (named {row['stale']})" if note else f"named {row['stale']}"
+        out.append(f"{row['kind']:<9} {row['name']:<40} {(row.get('target') or '-'):<18} {state:<14} {note}".rstrip())
+    w, v = r["summary"]["worktrees"], r["summary"]["venvs"]
+    fmt = lambda c: ", ".join(f"{n} {would.get(k, k)}" for k, n in c.items())
+    out.append(f"summary: worktrees {fmt(w)}; environments {fmt(v)}" if r["summary"]["envs"]
+               else f"summary: worktrees {fmt(w)} (environments not checked: --no-envs)")
+    if dry:
+        out.append("dry run: nothing was changed or recorded")
+    return out
 
 
 def cmd_promote(a):
@@ -1062,9 +1099,21 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--path", required=True)
     wt = sub.add_parser("worktree", help="WI worktrees").add_subparsers(dest="worktree_command", required=True)
     x = add(wt, "repair", cmd_worktree, "desk: re-link a WI worktree after the site moved (or prune it if its directory is"
-            " gone) and rebuild a stale .venv with the configured env_rebuild; --target rebuilds a main tree's .venv")
+            " gone) and rebuild a stale .venv with the configured env_rebuild; --target rebuilds a main tree's .venv;"
+            " --all does both for every worktree and environment of the site (after a move or rename)")
     x.add_argument("--wi")
     x.add_argument("--target")
+    x.add_argument("--all", action="store_true", help="every WI worktree (worktrees/* and the entries modules/* and"
+                   " projects/* repositories register; gone ones are pruned) and every .venv the site owns (main trees,"
+                   " worktrees, exec-tree siblings); stale ones are rebuilt, each item ends repaired, pruned, rebuilt,"
+                   " unchanged, skipped or error, and one worktree.repair-all record holds the counts")
+    x.add_argument("--dry-run", action="store_true", help="with --all: show what would change; nothing is written")
+    x.add_argument("--envs-only", action="store_true", help="with --all: only the environments (no git repair)")
+    x.add_argument("--no-envs", action="store_true", help="with --all: only the worktrees (no environment check or"
+                   " rebuild, for example without network)")
+    x.add_argument("--force", action="store_true", help="with --all: rebuild every environment that has an"
+                   " env_rebuild, stale or not")
+    x.add_argument("--json", action="store_true", help="with --all: print the items and summary as JSON")
     x.add_argument("--actor")
     x = add(sub, "promote", cmd_promote, "data-steward: promote verified checkpoints into a derivatives subdataset, "
             "or (--kind report) land a generated report into derivatives/<dataset>/reports/<name>/")

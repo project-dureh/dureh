@@ -183,3 +183,32 @@ bin/dureh site session start --no-apply-landed             # boot on the current
 
 `dureh status` and the session start show a `Workday:` line while the mode is on (phase, start-end and the
 session job id when the day was started by `session start`).
+
+## After the site folder moved or was renamed
+
+Absolute paths live in two places the harness owns: the links between a repository and its WI worktrees
+(`worktrees/<WI>/.git` and `modules/<m>/.git/worktrees/<WI>/gitdir`) and the virtualenvs (script shebangs,
+`bin/activate`'s `VIRTUAL_ENV`, `pyvenv.cfg`). A move or rename breaks both; everything else resolves against
+`$DUREH_SITE` (proposals/site-rename-independence.md). Repair with one desk command (release 40):
+
+```text
+bin/dureh worktree repair --all --dry-run   # what would change; nothing written
+bin/dureh worktree repair --all             # every worktree and environment of the site
+bin/dureh worktree repair --all --no-envs   # worktrees only (no network needed)
+bin/dureh worktree repair --all --envs-only # environments only; --force rebuilds them stale or not
+bin/dureh worktree repair --wi <WI> | --target <target>   # one worktree, or one main tree's .venv (unchanged)
+```
+
+`--all` covers every `worktrees/*` directory and every worktree the `modules/*` and `projects/*` repositories
+register (a registered worktree whose directory is gone is pruned), each handled as `--wi` handles one, then a
+plain `git worktree repair` per repository. The environments are the main tree of every module and project, the
+WI worktrees' and the exec-tree siblings `scratch/exec/<tree>.venv`. An environment is stale when a script
+shebang names an interpreter that does not exist, `bin/activate` names another directory as `VIRTUAL_ENV`,
+`pyvenv.cfg`'s `home` is gone or `bin/python` dangles; a stale one is rebuilt with the target's `env_rebuild`
+from config.json (or `env.rebuild`), one whose target has none is `skipped: no env_rebuild`. The pass never stops
+at an error: one line per item (repaired, pruned, rebuilt, unchanged, skipped, error) and a summary line
+(`--json` for the same as data). Records: `worktree.repaired` and `env.repaired` per changed item as the single
+forms write them, plus one `worktree.repair-all` with the counts. A second run reports everything unchanged.
+`--all` is one command because `--wi` already repairs a worktree and its `.venv` together and the desk after a
+move should not have to list targets; `--no-envs` and `--envs-only` split it when a rebuild needs network or
+time, or when only the environments changed. A running agent's worktree is skipped: stop it first.

@@ -349,7 +349,9 @@ def _claude_md(site: Site) -> str:
               f"6. Findings are records, not work items: `{dureh} ledger add finding --summary ... --evidence-level measured|reviewed|inferred|proposed`.",
               f"7. Before moving or deleting a path, run `{dureh} path-refs <path>`. Delete only through `{dureh} purge`."
               f" If a dispatch or verify reports a broken worktree or a stale `.venv` (for example after the site moved), run `{dureh} worktree repair --wi <WI>`"
-              f" (or `--target <target>` for a main tree's `.venv`); it rebuilds the environment with `env_rebuild` from config.json. Never edit `.git` files or rebuild environments by hand.",
+              f" (or `--target <target>` for a main tree's `.venv`); it rebuilds the environment with `env_rebuild` from config.json."
+              f" After the site moved or was renamed, `{dureh} worktree repair --all` does this for every worktree and environment at once (`--dry-run` first)."
+              " Never edit `.git` files or rebuild environments by hand.",
               f"8. Compute runs only as scheduler jobs through `{dureh} slurm submit`. {SUBJECT_RULE} {_log_rule(site)}"
               f" Jobs end outside agent turns: keep `{dureh} slurm watch` running as a Monitor (one line per tracked job that ends:"
               " run, job, WI, role, agent, state, next step; it records the final state, so a restart reports nothing twice;"
