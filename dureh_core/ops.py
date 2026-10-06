@@ -672,7 +672,7 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
                 Path(array["wrapper"]).write_text(_each_wrapper(path, items, array["items_file"], array["env"]))
                 Path(array["wrapper"]).chmod(0o755)
         try:
-            check = _day_check(site, cmd, path, extra, cfg)
+            check = _day_check(site, cmd, path, extra, cfg, wi=wi)
         except DurehError:
             undo()
             raise
@@ -836,11 +836,12 @@ def _via_level(items: list[str], declared) -> str:
         return "plain"
 
 
-def _via_day_check(site: Site, payload: dict, cfg: dict):
+def _via_day_check(site: Site, payload: dict, cfg: dict, wi: str | None = None):
     """Warn-only start check for a via run (decision 4, 2026-10-06): the job already exists, so after ingest the
     requested --time comes from the recorded script's #SBATCH line (else config slurm.time) and the expected start
-    from `squeue --start`; when the expected end is past today's end the record says `late: true` and the submit
-    warns. None when not in an on-duty workday, "skipped"/"unavailable" as `_day_check`."""
+    from `squeue --start`; when the expected end is past today's end the record says `late: true` (`past_end`
+    likewise) and the submit warns; for a plan item or a fix for one (`workday.in_plan`) the overtime is recorded
+    as for a plain submit. None when not in an on-duty workday, "skipped"/"unavailable" as `_day_check`."""
     from datetime import datetime
 
     from . import cluster, workday
@@ -874,12 +875,21 @@ def _via_day_check(site: Site, payload: dict, cfg: dict):
     ends = start + wall
     out = {"expected_start": start.isoformat(timespec="seconds"), "expected_end": ends.isoformat(timespec="seconds"),
            "day_end": d["end"], "time": requested, "time_source": source, "late": ends > day_end,
-           "note": "warn-only for --via: the module submitted the job before the check"}
+           "past_end": ends > day_end, "note": "warn-only for --via: the module submitted the job before the check"}
     if out["late"]:
-        print(f"warning: workday mode: job {payload['job_id']} is expected to start at {out['expected_start']} and, with "
-              f"--time {requested} (from the {source}), end at {out['expected_end']}, after today's end {d['end']}; "
-              "it was submitted by the module and stays queued: cancel it with `slurm cancel` or let it run",
-              file=sys.stderr)
+        d = workday.plan_open(site, d)
+        if workday.in_plan(site, wi, d):
+            if not site.observe:
+                workday.note_finish_overtime(site, d, wi)
+            out["rule"] = workday.FINISH_RULE
+            print(f"warning: workday: this job ends at {ends:%H:%M}, after today's end {day_end:%H:%M}; allowed as "
+                  "plan work (Director rule 2026-10-06)", file=sys.stderr)
+        else:
+            print(f"warning: workday mode: job {payload['job_id']} is expected to start at {out['expected_start']} and, "
+                  f"with --time {requested} (from the {source}), end at {out['expected_end']}, after today's end "
+                  f"{d['end']}; it was submitted by the module and stays queued: cancel it with `slurm cancel` or let "
+                  "it run." + (" Plan items are allowed past the end time (finish_plan)."
+                               if workday.settings(site)["finish_plan"] else ""), file=sys.stderr)
     return out
 
 
@@ -984,7 +994,7 @@ def slurm_submit_via(site: Site, actor: str, wi: str, via, record: str | None = 
             payload["via"][key] = ingested[key]
     if ingested["extra"]:
         payload["via"]["extra"] = ingested["extra"]
-    check = _via_day_check(site, payload, cfg)
+    check = _via_day_check(site, payload, cfg, wi=wi)
     if check is not None:
         payload["start_check"] = check
     return led.append("run", "slurm", actor, wi, payload)
@@ -1459,10 +1469,12 @@ def _requested_time(script: Path, extra: list[str], cfg: dict) -> tuple[str | No
     return None, None
 
 
-def _day_check(site: Site, cmd: list[str], script: Path, extra: list[str], cfg: dict):
+def _day_check(site: Site, cmd: list[str], script: Path, extra: list[str], cfg: dict, wi: str | None = None):
     """In workday mode, during an on-duty day: refuse a job whose expected start (`sbatch --test-only`)
     plus its requested --time ends after today's end. None when not checked, "unavailable" when the
-    scheduler gave no usable answer (the job is submitted as usual)."""
+    scheduler gave no usable answer (the job is submitted as usual). Finish-plan rule (Director, 2026-10-06):
+    a job for a plan item or a fix for one (`workday.in_plan`) is submitted anyway unless a hard stop holds;
+    the record says `past_end: true` and the overtime is recorded as the gate does (`note_finish_overtime`)."""
     import re
     from datetime import datetime
 
@@ -1492,15 +1504,29 @@ def _day_check(site: Site, cmd: list[str], script: Path, extra: list[str], cfg: 
     ends = start + wall
     array = any(str(w).startswith("--array=") for w in cmd)
     what = "array's first task" if array else "job"
+    out = {"expected_start": start.isoformat(timespec="seconds"), "expected_end": ends.isoformat(timespec="seconds"),
+           "day_end": d["end"], "time": requested, "time_source": source,
+           **({"per_task": True, "note": "one --test-only for the array: its first task's expected start plus the "
+               "per-task --time; tasks that wait for resources start later"} if array else {})}
     if ends > day_end:
-        fail(f"workday mode: this {what} is expected to start at {start.isoformat(timespec='seconds')} and, with "
-             f"--time {requested} (from the {source}{', per task' if array else ''}), end at {ends.isoformat(timespec='seconds')}, after "
-             f"today's end {d['end']}. Nothing was submitted; ask for a shorter --time, or submit it in the next "
-             "approved day.")
-    return {"expected_start": start.isoformat(timespec="seconds"), "expected_end": ends.isoformat(timespec="seconds"),
-            "day_end": d["end"], "time": requested, "time_source": source,
-            **({"per_task": True, "note": "one --test-only for the array: its first task's expected start plus the "
-                "per-task --time; tasks that wait for resources start later"} if array else {})}
+        head = (f"workday mode: this {what} is expected to start at {start.isoformat(timespec='seconds')} and, with "
+                f"--time {requested} (from the {source}{', per task' if array else ''}), end at "
+                f"{ends.isoformat(timespec='seconds')}, after today's end {d['end']}.")
+        plan_rule = workday.settings(site)["finish_plan"]
+        d = workday.plan_open(site, d)
+        if not (plan_rule and workday.in_plan(site, wi, d)):
+            fail(f"{head} Nothing was submitted; ask for a shorter --time, or submit it in the next approved day."
+                 + (" Plan items are allowed past the end time (finish_plan)." if plan_rule else ""))
+        stop = workday.hard_stop(site, d)
+        if stop:
+            fail(f"{head} It is plan work, but a stop holds ({stop['why']}). Nothing was submitted; finish running "
+                 "work and write the end report (`dureh day end`).")
+        if not site.observe:
+            workday.note_finish_overtime(site, d, wi)  # the harness records the overtime itself, once per item
+        print(f"warning: workday: this job ends at {ends:%H:%M}, after today's end {day_end:%H:%M}; allowed as plan "
+              "work (Director rule 2026-10-06)", file=sys.stderr)
+        out.update(past_end=True, rule=workday.FINISH_RULE)
+    return out
 
 
 LOG_DIR_DEFAULT = "logs/slurm"

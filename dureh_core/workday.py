@@ -351,6 +351,31 @@ def _finishing(site: Site, plan_event: dict) -> dict:
     return out
 
 
+def plan_open(site: Site, d: dict) -> dict:
+    """`d` (from `day()`) with the finish-plan fields `open`, `fixes`, `statuses` (plan_progress) filled in when
+    the day has an approved plan and `day()` did not compute them yet (it does so only once the end time passed).
+    Lets a check before the end time, such as a scheduler job that would run past it, ask the same question."""
+    if "open" in d or not d.get("plan") or not d.get("approval"):
+        return d
+    plan = [e for e in _events(site) if e["type"] == "day.planned" and e["id"] == d["plan"]]
+    if not plan:
+        return d
+    pr = plan_progress(site, plan[-1])
+    return {**d, "open": pr["open"], "fixes": pr["fixes"], "statuses": pr["statuses"]}
+
+
+def in_plan(site: Site, wi: str | None, d: dict | None = None) -> bool:
+    """The finish-plan predicate (Director rule 2026-10-06), shared by the gate and the scheduler start check:
+    `wi` (or its parent) is one of the plan's open items or an open fix for one. False with `workday.finish_plan`
+    off, without an approved plan, or for a WI outside the plan. `d` is `day()` when the caller has it."""
+    if not wi or not settings(site)["finish_plan"]:
+        return False
+    d = plan_open(site, d if d is not None else day(site))
+    if not d.get("open"):
+        return False
+    return bool(_wi_family(Ledger(site), wi) & set(d["open"]))
+
+
 def _finishing_reason(d: dict) -> str:
     n = len(d["open"])
     return f"end time passed {d['end'][11:16]}; finishing the plan ({n} item{'s' if n != 1 else ''} open: {', '.join(d['open'])})"
@@ -401,9 +426,10 @@ def wall_left(site: Site, d: dict) -> timedelta | None:
     return cluster.parse_time(q.get("time_left"))
 
 
-def hard_stop(site: Site, d: dict, evs: list[dict], u: dict | None = None) -> dict | None:
+def hard_stop(site: Site, d: dict, evs: list[dict] | None = None, u: dict | None = None) -> dict | None:
     """The stops that end a day being finished past its end time (Director, 2026-10-06): today's usage at the
     daily share, data at risk (a `day urgent` record), the session job's wall time under WALL_WARN."""
+    evs = evs if evs is not None else _events(site)
     if device_on(site, "usage", evs):
         u = u if u is not None else usage(site, evs)
         if u.get("daily_allowance") and u.get("today_units", 0) >= u["daily_allowance"]:
@@ -514,7 +540,7 @@ def gate(site: Site, wi: str | None, checking: bool = False) -> str | None:
     if phase == "past-end":
         if fam & set(d.get("overtime") or []):
             return None  # the Director's accepted overtime is not held back by the budget
-        if d.get("finishing") and fam & set(d["open"]):
+        if d.get("finishing") and in_plan(site, wi, d):
             if not site.observe:
                 note_finish_overtime(site, d, wi)  # the harness records the overtime itself; the stops follow
         elif d.get("finishing"):
@@ -536,7 +562,7 @@ def gate(site: Site, wi: str | None, checking: bool = False) -> str | None:
     else:
         if d.get("hours_exceeded"):
             note_hours_exceeded(site, d, evs)
-        if d.get("finishing") and fam & set(d["open"]) and not site.observe:
+        if d.get("finishing") and in_plan(site, wi, d) and not site.observe:
             note_finish_overtime(site, d, wi)  # development phase: nothing blocks, the overtime is still recorded
     if not device_on(site, "usage"):
         return None  # usage is counted and shown, not gated

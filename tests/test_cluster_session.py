@@ -9,6 +9,7 @@ import subprocess
 import unittest
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 from helpers import SiteCase
 
@@ -340,24 +341,29 @@ class ClusterSession(SiteCase):
         self.assertIn(f"\nexport DUREH_ROOT={HARNESS_ROOT}\n", sessions.plan(self.s))
 
     # ------------------------------------------------------------ submit check against the day
-    def _on_duty(self):
+    def _on_duty(self, items=None, **workday_cfg):
+        """An approved 09:00-17:00 day, the clock at 10:00. `items` are the plan's WIs (`day plan --wi`); the
+        default plan names none, so the day's WIs are outside the plan."""
         os.environ.pop("CLAUDECODE", None)
         os.environ["DUREH_USAGE_CACHE"] = str(self.tmp / "usage-cache.json")
         os.environ["DUREH_FAKE_NOW"] = T0.isoformat()
-        (self.tmp / "transcripts").mkdir()
-        self.config(workday={"transcripts": [str(self.tmp / "transcripts")]})
+        (self.tmp / "transcripts").mkdir(exist_ok=True)
+        self.config(workday={"transcripts": [str(self.tmp / "transcripts")], **workday_cfg})
         workday.switch(self.s, True, "test")
-        workday.plan(self.s, "desk", "goal", "plan")
+        workday.plan(self.s, "desk", "goal", "plan", items)
         workday.approve(self.s, "desk", "ok")  # 09:00-17:00 -04:00
         os.environ["DUREH_FAKE_NOW"] = (T0 + timedelta(hours=1)).isoformat()
 
-    def _job(self):
-        w = wf.wi_new(self.s, "desk", "run", "g", "researcher", "site", ["a"])["id"]
+    def _job(self, fix_for=None):
+        w = wf.wi_new(self.s, "desk", "run", "g", "researcher", "site", ["a"], fix_for=fix_for)["id"]
         wf.wi_approve(self.s, "desk", w, "ok")
         Ledger(self.s).event("wi.dispatched", "desk", w, {"role": "researcher"})
         script = self.tmp / "job.sh"
         script.write_text("#!/bin/sh\necho hi\n")
         return w, str(script)
+
+    def _overtime(self):
+        return [e for e in Ledger(self.s).events() if e["type"] == "day.overtime"]
 
     def _sbatch(self, start):
         self.tool("sbatch", f"echo \"$@\" >> {self.tmp}/sbatch-calls\n"
@@ -442,6 +448,102 @@ class ClusterSession(SiteCase):
 
     def test_submit_not_checked_when_workday_off(self):
         w, script = self._job()
+        self._sbatch("2026-10-03T23:00:00")
+        run = ops.slurm_submit(self.s, "desk", w, script, extra=["--time=10:00:00"])
+        self.assertNotIn("start_check", run["payload"])
+        self.assertNotIn("--test-only", (self.tmp / "sbatch-calls").read_text())
+
+    # ------------------------------------------------------------ finish the plan (Director rule 2026-10-06)
+    RULE_MEMO = "Director rule 2026-10-06: 초과근무로 문제를 모두 해결하고 당일 업무를 마무리"
+
+    def test_submit_of_a_plan_item_past_the_end_is_allowed_and_recorded(self):
+        # the desk's ~2 h pilot array at 15:10 (company, release 35): a plan item is submitted, the overtime recorded
+        w, script = self._job()
+        self._on_duty(items=[w])
+        self._sbatch("2026-10-03T15:10:00")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            run = ops.slurm_submit(self.s, "desk", w, script, extra=["--time=02:00:00"], each="sub-01,sub-02")
+        p = run["payload"]
+        self.assertEqual((p["status"], p["job_id"]), ("submitted", "4242"))
+        chk = p["start_check"]
+        self.assertEqual((chk["past_end"], chk["rule"], chk["day_end"], chk["expected_end"], chk["per_task"]),
+                         (True, "finish-plan", "2026-10-03T17:00:00-04:00", "2026-10-03T17:10:00-04:00", True))
+        self.assertEqual(err.getvalue().count("warning: workday: this job ends at 17:10, after today's end 17:00; "
+                                              "allowed as plan work (Director rule 2026-10-06)"), 1)
+        evs = self._overtime()
+        self.assertEqual(len(evs), 1)
+        self.assertEqual((evs[0]["payload"]["items"], evs[0]["payload"]["memo"], evs[0]["payload"]["rule"],
+                          evs[0]["payload"]["by"], evs[0]["payload"]["work_unit"]),
+                         ([w], self.RULE_MEMO, "finish-plan", "Director (standing rule)", w))
+        self.assertEqual(evs[0]["refs"], [workday.day(self.s)["plan"]])
+        calls = (self.tmp / "sbatch-calls").read_text().splitlines()
+        self.assertEqual([("--test-only" in c) for c in calls], [True, False])
+        # once per day: a second job of the same item adds no record; one that fits the day is not past_end
+        run = ops.slurm_submit(self.s, "desk", w, script, extra=["--time=03:00:00"])
+        self.assertTrue(run["payload"]["start_check"]["past_end"])
+        self.assertEqual(len(self._overtime()), 1, "recorded once")
+        run = ops.slurm_submit(self.s, "desk", w, script, extra=["--time=01:00:00"])
+        self.assertNotIn("past_end", run["payload"]["start_check"])
+        self.assertEqual(workday.day(self.s)["phase"], "on-duty", "the day itself goes on")
+
+    def test_submit_of_a_fix_for_a_plan_item_past_the_end_is_allowed(self):
+        plan_wi, _ = self._job()
+        self._on_duty(items=[plan_wi])
+        fix, script = self._job(fix_for=plan_wi)  # created after the plan, names the plan WI
+        self._sbatch("2026-10-03T16:00:00")
+        with contextlib.redirect_stderr(io.StringIO()):
+            run = ops.slurm_submit(self.s, "desk", fix, script, extra=["--time=02:00:00"])
+        self.assertEqual(run["payload"]["job_id"], "4242")
+        self.assertTrue(run["payload"]["start_check"]["past_end"])
+        evs = self._overtime()
+        self.assertEqual(len(evs), 1)
+        self.assertEqual((evs[0]["payload"]["items"], evs[0]["payload"]["rule"]), ([plan_wi, fix], "finish-plan"))
+
+    def test_submit_outside_the_plan_past_the_end_stays_refused(self):
+        plan_wi, _ = self._job()
+        self._on_duty(items=[plan_wi])
+        other, script = self._job()  # not in the plan, no fix_for
+        self._sbatch("2026-10-03T16:00:00")
+        n = len(Ledger(self.s).load("run"))
+        with self.assertRaisesRegex(DurehError, r"after today's end 2026-10-03T17:00:00-04:00\. Nothing was submitted.*"
+                                                r"Plan items are allowed past the end time \(finish_plan\)\."):
+            ops.slurm_submit(self.s, "desk", other, script, extra=["--time=02:00:00"])
+        self.assertEqual(len(Ledger(self.s).load("run")), n)
+        self.assertEqual(self._overtime(), [])
+        self.assertEqual(len((self.tmp / "sbatch-calls").read_text().splitlines()), 1, "only the --test-only")
+
+    def test_finish_plan_off_refuses_a_plan_item_as_before(self):
+        w, script = self._job()
+        self._on_duty(items=[w], finish_plan=False)
+        self._sbatch("2026-10-03T16:00:00")
+        with self.assertRaisesRegex(DurehError, "after today's end 2026-10-03T17:00:00-04:00") as cm:
+            ops.slurm_submit(self.s, "desk", w, script, extra=["--time=02:00:00"])
+        self.assertNotIn("finish_plan", str(cm.exception))
+        self.assertEqual(self._overtime(), [])
+
+    def test_a_hard_stop_refuses_a_plan_item_past_the_end(self):
+        w, script = self._job()
+        self._on_duty(items=[w])
+        self._sbatch("2026-10-03T16:00:00")
+        share = {"daily_allowance": 10, "today_units": 10, "daily_share": 1 / 7, "today_fraction": 1.0,
+                 "week_percent": 20, "this_site_units": 10}
+        with mock.patch.object(workday, "usage", return_value=share):
+            with self.assertRaisesRegex(DurehError, r"plan work, but a stop holds \(today's Claude usage 10 units "
+                                                    r"reached the daily share 10\)"):
+                ops.slurm_submit(self.s, "desk", w, script, extra=["--time=02:00:00"])
+        self.assertEqual(self._overtime(), [])
+        self.assertEqual(len((self.tmp / "sbatch-calls").read_text().splitlines()), 1, "nothing submitted")
+        with contextlib.redirect_stderr(io.StringIO()):  # the stop lifted: allowed again
+            self.assertTrue(ops.slurm_submit(self.s, "desk", w, script,
+                                             extra=["--time=02:00:00"])["payload"]["start_check"]["past_end"])
+
+    def test_submit_after_the_end_time_is_not_checked(self):
+        # past-end (production clock): the gate governs; the start check applies to on-duty days only, as before
+        w, script = self._job()
+        self._on_duty(items=[w], phase="production", weekdays=["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"])
+        os.environ["DUREH_FAKE_NOW"] = (T0 + timedelta(hours=8, minutes=1)).isoformat()
+        self.assertEqual(workday.day(self.s)["phase"], "past-end")
         self._sbatch("2026-10-03T23:00:00")
         run = ops.slurm_submit(self.s, "desk", w, script, extra=["--time=10:00:00"])
         self.assertNotIn("start_check", run["payload"])

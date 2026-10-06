@@ -397,7 +397,7 @@ class ViaCase(SiteCase):
                 mock.patch("dureh_core.workday.day", return_value=day), contextlib.redirect_stderr(err):
             run = self.submit()
         c = run["payload"]["start_check"]
-        self.assertEqual((c["late"], c["time"], c["time_source"]), (True, "00:30:00", "script"))
+        self.assertEqual((c["late"], c["past_end"], c["time"], c["time_source"]), (True, True, "00:30:00", "script"))
         self.assertEqual(c["expected_end"], "2026-10-06T18:15:00-04:00")
         self.assertEqual(run["payload"]["status"], "submitted", "warn-only: the run is recorded as submitted")
         self.assertIn("warning: workday mode: job 4300", err.getvalue())

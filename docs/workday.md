@@ -62,7 +62,10 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    every WI id the plan text names. The first work unit after the end time records one `day.overtime` event by
    itself (`rule: finish-plan`, memo `Director rule 2026-10-06: 초과근무로 문제를 모두 해결하고 당일 업무를 마무리`,
    `by: Director (standing rule)`, `items`: the plan's unfinished WIs); fixes that appear later are appended by
-   further events. New work outside the plan stays refused after the end time; the Director's explicit
+   further events. The scheduler start check follows the same rule: during the day a job for a plan item or a fix
+   for one that would end after the end time is submitted anyway (the run's `start_check` says `past_end: true`,
+   the same `day.overtime` record is written, the submit warns) unless a stop holds, while a job outside the plan
+   is refused as before. New work outside the plan stays refused after the end time; the Director's explicit
    `dureh day overtime --items <WI>... --memo "..."` still admits it. `dureh day status` shows
    `end time passed HH:MM; finishing the plan (N items open: ...)`, or `the plan is done; write the end report`.
 5. **Stops.** Three stops end a day being finished past its end time, enforced as during the day: today's Claude
