@@ -4,7 +4,9 @@ import io
 import json
 import os
 import shlex
+import shutil
 import subprocess
+import unittest
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
@@ -162,8 +164,79 @@ class ClusterSession(SiteCase):
         self.assertIn("CMD='claude --remote-control site --permission-mode auto'\n", out)
         self.assertIn("# first prompt: none\n", out)
         self.assertNotIn("claude remote-control", out)
-        self.assertTrue(out.rstrip().endswith('while tmux -L "$SOCK" has-session -t "$NAME" 2>/dev/null; do sleep 20; done'))
+        # release 39: the hold loop watches the close marker and ends the session gracefully (no scancel)
+        self.assertIn(f'\nPANE_DIR={self.site_root}/logs/session\nPANE="$PANE_DIR/$NAME.pane.log"\nCLOSE="$PANE_DIR/$NAME.close"', out)
+        self.assertIn("\nGRACE=90  #", out)
+        self.assertIn('\nrm -f "$CLOSE"', out)
+        self.assertIn('echo CLAUDE_REMOTE_EXIT \\$?; if [ -e \\"$CLOSE\\" ]; then sleep 10; else sleep 60; fi" || exit $?\n', out)
+        self.assertIn('while tmux -L "$SOCK" has-session -t "$NAME" 2>/dev/null; do\n', out)
+        self.assertIn('[ -e "$CLOSE" ]', out)
+        self.assertIn('tmux -L "$SOCK" send-keys -t "$NAME" Escape\n      sleep 1\n      tmux -L "$SOCK" send-keys -t "$NAME" "/exit" Enter\n', out)
+        self.assertIn('[ "$waited" -ge "$GRACE" ]', out)
+        self.assertIn('tmux -L "$SOCK" kill-session -t "$NAME"', out)
+        self.assertIn("close marker seen at", out)
+        self.assertIn("killed after grace", out)
+        self.assertIn("graceful exit", out)
+        self.assertNotRegex(out, r"(?m)^\s*scancel\b", "the job ends by itself; the script never cancels")
+        self.assertTrue(out.rstrip().endswith("\ndureh_session_hold"))
         self.assertFalse((self.site_root / "logs").exists(), "a plan creates nothing")
+
+    def test_session_plan_close_grace_from_config(self):
+        self.config(session={"close_grace_seconds": 30})
+        out = sessions.plan(self.s)
+        self.assertIn("\nGRACE=30  #", out)
+        self.assertEqual(sessions.close_grace(self.s), 30)
+        self.config(session={"close_grace_seconds": "soon"})
+        with self.assertRaisesRegex(DurehError, "close_grace_seconds"):
+            sessions.plan(self.s)
+
+    def test_close_marker_is_the_tmux_session_name_next_to_the_pane_log(self):
+        logs = self.site_root / "logs" / "session"
+        self.assertEqual(sessions.close_marker(self.s, "4711"), logs / "cc-site-4711.close")
+        self.assertEqual(sessions.close_marker(self.s, "4712", "overtime"), logs / "cc-site-overtime-4712.close")
+        self.config(session={"name": "camri"})
+        self.assertEqual(sessions.close_marker(self.s, "4711"), logs / "cc-camri-4711.close")
+        self.assertIn("NAME=cc-camri-\"${SLURM_JOB_ID:-local}\"", sessions.plan(self.s))
+
+    @unittest.skipUnless(shutil.which("tmux"), "tmux is not on this machine")
+    def test_hold_loop_ends_a_real_tmux_session_on_the_close_marker(self):
+        """The script's hold function, run for real on a private tmux socket with a 2 s grace: a pane that leaves on
+        Enter ends gracefully; one that ignores /exit (sleep) is killed after the grace. Both return."""
+        d = self.tmp / "hold"
+        d.mkdir()
+        (d / "hold.sh").write_text(sessions.HOLD_FUNCTION + "\n")
+        sock = f"dureh-test-{os.getpid()}"
+        env = {**os.environ, "TMUX_TMPDIR": str(d)}  # the socket lives in the test's tmp, gone at teardown
+
+        def run(name, command, env_grace=2):
+            pane, close = d / f"{name}.pane.log", d / f"{name}.close"
+            command = command.format(close=shlex.quote(str(close)))  # the script expands "$CLOSE" before tmux sees it
+            subprocess.run(["tmux", "-L", sock, "new-session", "-d", "-s", name, "-x", "80", "-y", "20", command], check=True, env=env)
+            subprocess.run(["tmux", "-L", sock, "pipe-pane", "-o", "-t", name, f"cat >> {shlex.quote(str(pane))}"], check=True, env=env)
+            close.write_text("{}\n")
+            script = (f"SOCK={shlex.quote(sock)}; NAME={shlex.quote(name)}; PANE={shlex.quote(str(pane))}; "
+                      f"CLOSE={shlex.quote(str(close))}; GRACE={env_grace}; source {shlex.quote(str(d / 'hold.sh'))}; "
+                      "dureh_session_hold")
+            proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True, timeout=60, env=env)
+            alive = subprocess.run(["tmux", "-L", sock, "has-session", "-t", name], capture_output=True, env=env).returncode == 0
+            return proc, alive, pane.read_text() if pane.exists() else ""
+
+        try:
+            proc, alive, pane = run("t-graceful", "read x; echo CLAUDE_REMOTE_EXIT 0; if [ -e {close} ]; then sleep 1; else sleep 60; fi")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertFalse(alive, "the session ended by itself after /exit")
+            self.assertIn("close marker seen at", proc.stdout)
+            self.assertIn("graceful exit after", proc.stdout)
+            self.assertNotIn("killed after grace", proc.stdout)
+            self.assertIn("/exit", pane)
+            self.assertIn("graceful exit after", pane)
+            proc, alive, pane = run("t-stuck", "sleep 300")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertFalse(alive, "the session was killed after the grace")
+            self.assertIn("killed after grace 2 s", proc.stdout)
+            self.assertIn("killed after grace 2 s", pane)
+        finally:
+            subprocess.run(["tmux", "-L", sock, "kill-server"], capture_output=True, env=env)
 
     def test_session_plan_defaults_without_session_config(self):
         out = sessions.plan(self.s)  # the company config has only `slurm`

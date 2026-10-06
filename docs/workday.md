@@ -54,7 +54,40 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
 4. **End.** When the hours run out, no new agent starts. The desk writes the end report:
    `dureh day end --done ... --problems ... --overtime <WI>...`, and gives it to the Director.
 5. **Overtime.** Only for fixing errors from the day's work and normalization tests, and only for
-   the items the Director accepts: `dureh day overtime --items <WI>... --memo "..."`. Then `dureh day close`.
+   the items the Director accepts: `dureh day overtime --items <WI>... --memo "..."`.
+6. **Close.** In this order: the desk stops every Monitor and background task, writes the handoff
+   (`state/memory/handoff.md`), runs `dureh day close`, and then does nothing more. `day close` checks that no
+   agent runs and the handoff is fresh, records `day.closed`, and releases the session job as described in
+   "Closing the session job" below: the job sends `/exit` to its claude and completes by itself.
+
+### Closing the session job (release 39)
+
+Director, 2026-10-06, after the 10-05 close: an upstream `day close` from outside the job recorded `day.closed`
+but could not release the job (only the caller's own `SLURM_JOB_ID` was ever cancelled), the desk inside was
+still writing its handoff with Monitors running, and a manual `scancel` three minutes later killed it (SIGTERM,
+unclean). The normal path was unclean too: `day close` inside the job scancelled it at once, mid-turn.
+
+- **Close marker.** The job script holds while its tmux session lives and watches
+  `logs/session/<NAME>.close` next to the pane log (`NAME` is the tmux session `cc-<name>[-purpose]-<job id>`;
+  `sessions.close_marker(site, job_id, purpose)` in Python). When the marker appears the script sends
+  `Escape`, then `/exit` + Enter to the pane, waits up to the grace (`session.close_grace_seconds`, default
+  90 s) for claude to leave (its exit prints `CLAUDE_REMOTE_EXIT <rc>`; with the marker present the tmux
+  session holds 10 s after that instead of 60), then kills the tmux session if it still lives, and returns:
+  the job completes normally, no scancel. The job's `.out` and the pane log get `dureh session: close marker
+  seen at <time>; sending /exit, grace N s` and then `graceful exit after N s` or `killed after grace N s`.
+- **`dureh day close`** (default `session.release_on_close` true) writes that marker for the site's running
+  session job: the newest `session.started` record whose job squeue still lists (the last three distinct jobs
+  are asked, newest first; squeue unavailable counts the newest as possibly running). Only a recorded job is
+  ever touched, whether the close runs inside that job (the desk), in another job (the upstream team's own;
+  never touched) or in none. It records `session.released` with `mode: "marker"`, `job_id`, `marker`, `grace`,
+  `from: inside|outside` and prints `session job <id> ends by itself within ~<grace+30> s (close marker written);
+  do nothing more in the session`. The marker's content is `{"actor", "closed_at", "record": <day.closed id>,
+  "job_id"}`. No running recorded job: `released: false, reason: "no running session job"`.
+- **`dureh day close --cancel-now`** is the old immediate `scancel` of the recorded job (`mode: "scancel"`):
+  the fallback when a marker was ignored (claude hung, the script predates release 39). Same ownership rule.
+- **`dureh site session release [--cancel-now]`** writes the marker (or scancels) for the recorded running job
+  without a day close: for a day already closed whose job still runs (the 10-05 situation), recorded the same
+  way (`session.released`, referencing the `session.started` record). It refuses when no recorded job runs.
 
 The desk talks to the Director at the start and at the end of the day; in between only when data is at risk.
 
@@ -140,6 +173,8 @@ bin/dureh site workday black-company on --memo "..."       # off: ... black-comp
 bin/dureh site workday calibrate --weekly-percent 23
 bin/dureh site workday status
 bin/dureh site session plan | start | status               # the day's session job (status is read-only)
+bin/dureh site session release [--cancel-now]              # end the recorded running job: close marker (/exit, grace), or scancel now
+bin/dureh day close [--cancel-now]                         # the desk's close; --cancel-now is the fallback when a marker was ignored
 bin/dureh site session start --force --memo "..."          # a second session today while the first job still runs
 bin/dureh site session start --purpose overtime            # a new session for approved overtime (first prompt "<desk name>, 추가근무 출근")
 bin/dureh site session start --prompt "..." | --no-prompt  # replace or drop the first prompt this time

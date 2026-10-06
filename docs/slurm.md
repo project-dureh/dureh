@@ -38,7 +38,9 @@ Director, 2026-10-05: scheduler stdout/stderr belong in the site's log dir only.
   them (inside the site only).
 - **Agents.** The generated desk and pipeline-runner instructions say: "Do not set --output/--error in job
   scripts; the harness writes scheduler logs to <log_dir>/<WI>/."
-- The session job keeps its own logs under `logs/session/` (absolute `#SBATCH` lines in the generated script).
+- The session job keeps its own logs under `logs/session/` (absolute `#SBATCH` lines in the generated script),
+  with its tmux pane log `<NAME>.pane.log` and, while closing, the close marker `<NAME>.close` that makes the job
+  end itself (`dureh day close`, `dureh site session release`; docs/workday.md "Closing the session job").
 
 ## Jobs end outside agent turns: `dureh slurm watch` (release 30, provisional names)
 

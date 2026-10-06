@@ -104,17 +104,22 @@ class Workday(SiteCase):
         os.environ["DUREH_FAKE_NOW"] = dt.isoformat()
 
     def fake_slurm(self, squeue="RUNNING|7:59:00"):
-        """A site PATH with sbatch (prints a job id), squeue (one line, or nothing) and claude. Never the real ones."""
+        """A site PATH with sbatch (prints a job id), squeue (one line, or nothing), scancel (records its args in
+        `scancel-calls`, never cancels anything) and claude. Never the real ones."""
         fake = self.tmp / "fakebin"
         fake.mkdir(exist_ok=True)
         (fake / "sbatch").write_text(f"#!/bin/sh\necho \"$@\" >> {fake}/sbatch-calls\necho 'Submitted batch job 12345'\n")
         (fake / "squeue").write_text(f"#!/bin/sh\necho \"$@\" >> {fake}/squeue-calls\n"
                                      + (f"echo '{squeue}'\n" if squeue else ""))
+        (fake / "scancel").write_text(f"#!/bin/sh\necho \"$@\" >> {fake}/scancel-calls\n")
         (fake / "claude").write_text("#!/bin/sh\nexit 0\n")
-        for f in ("sbatch", "squeue", "claude"):
+        for f in ("sbatch", "squeue", "scancel", "claude"):
             (fake / f).chmod(0o755)
         self.config(env={"path_prepend": [str(fake)]})
         return fake
+
+    def released(self):
+        return [e for e in Ledger(self.s).events() if e["type"] == "session.released"]
 
     def cli(self, *args):
         import contextlib
@@ -332,57 +337,158 @@ class Workday(SiteCase):
         with self.assertRaisesRegex(DurehError, "still running"):
             workday.close(self.s, "desk", "x")
 
-    def test_close_releases_the_session_job(self):
+    # ------------------------------------------------------------ the close marker (Director, 2026-10-06, release 39)
+    def _closable(self, squeue="RUNNING|7:59:00", job="777"):
+        """A day at its end with a fresh handoff, fake slurm and a recorded session job (ids here are made up;
+        helpers.SiteCase drops the real SLURM_JOB_ID: 2026-10-03 a close() test cancelled the real session)."""
         self.end_day()
         self.write_handoff()
-        fake = self.tmp / "fakebin"
-        fake.mkdir()
-        (fake / "scancel").write_text(f"#!/bin/sh\necho \"$@\" > {fake}/args\n")
-        (fake / "scancel").chmod(0o755)
-        cfg = json.loads((self.site_root / "config.json").read_text())
-        cfg["env"] = {"path_prepend": [str(fake)]}
-        (self.site_root / "config.json").write_text(json.dumps(cfg))
-        self.s = self.site()
-        from dureh_core.records import Ledger
-        Ledger(self.s).event("session.started", "desk", None, {"job_id": "777"})
+        fake = self.fake_slurm(squeue=squeue)
+        if job:
+            Ledger(self.s).event("session.started", "desk", None, {"job_id": job, "purpose": "desk"})
+        return fake
+
+    def assert_marker(self, rec_release, fake, job="777", parent=None):
+        marker = sessions.close_marker(self.s, job)
+        self.assertEqual(rec_release["released"], True)
+        self.assertEqual((rec_release["mode"], rec_release["job_id"], rec_release["marker"], rec_release["grace"]),
+                         ("marker", job, str(marker), 90))
+        self.assertTrue(marker.is_file(), "the close marker is written next to the pane log")
+        body = json.loads(marker.read_text())
+        self.assertEqual((body["actor"], body["record"], body["job_id"]), ("desk", parent, job))
+        self.assertEqual(body["closed_at"], os.environ["DUREH_FAKE_NOW"])
+        self.assertFalse((fake / "scancel-calls").exists(), "a marker close never scancels")
+        self.assertEqual([e["payload"]["mode"] for e in self.released()], ["marker"])
+
+    def test_close_from_outside_the_job_writes_the_marker(self):
+        # yesterday's case: the upstream team closes from its own terminal; the recorded job gets the marker
+        fake = self._closable()
+        os.environ.pop("SLURM_JOB_ID", None)
+        rec = workday.close(self.s, "desk", "done")
+        self.assert_marker(rec["release"], fake, parent=rec["id"])
+        self.assertEqual(rec["release"]["from"], "outside")
+        self.assertIn("-j 777", (fake / "squeue-calls").read_text())
+        self.assertEqual(self.released()[-1]["refs"], [rec["id"]])
+        self.assertEqual(workday.status(self.s)["phase"], "off-duty")
+        self.assertIn("session job 777 ends by itself within ~120 s (close marker written", sessions.render_release(rec["release"]))
+
+    def test_close_inside_the_job_writes_the_marker_and_does_not_scancel(self):
+        fake = self._closable()
         os.environ["SLURM_JOB_ID"] = "777"
         try:
             rec = workday.close(self.s, "desk", "done")
         finally:
             os.environ.pop("SLURM_JOB_ID")
-        self.assertTrue(rec["release"]["released"])
-        self.assertEqual((fake / "args").read_text().strip(), "777")
-        self.assertEqual(workday.status(self.s)["phase"], "off-duty")
+        self.assert_marker(rec["release"], fake, parent=rec["id"])
+        self.assertEqual(rec["release"]["from"], "inside")
 
-    def test_close_never_cancels_a_job_dureh_did_not_start(self):
-        # Director, 2026-10-03: dureh may release only company session jobs it started; tests never
-        # name the real session (helpers.SiteCase drops SLURM_JOB_ID; ids here are made up).
-        self.end_day()
-        self.write_handoff()
-        fake = self.tmp / "fakebin"
-        fake.mkdir()
-        (fake / "scancel").write_text(f"#!/bin/sh\necho \"$@\" > {fake}/args\n")
-        (fake / "scancel").chmod(0o755)
-        cfg = json.loads((self.site_root / "config.json").read_text())
-        cfg["env"] = {"path_prepend": [str(fake)]}
-        (self.site_root / "config.json").write_text(json.dumps(cfg))
-        self.s = self.site()
+    def test_close_never_touches_a_job_dureh_did_not_start(self):
+        # Director, 2026-10-03: dureh may release only company session jobs it started. The caller's own job
+        # (the DUREH team's, say) has no session.started record: no marker for it, no scancel, whatever runs.
+        fake = self._closable(job=None)
         os.environ["SLURM_JOB_ID"] = "424242"
         try:
             rec = workday.close(self.s, "desk", "done")
         finally:
             os.environ.pop("SLURM_JOB_ID")
-        self.assertFalse(rec["release"]["released"])
-        self.assertIn("session.started", rec["release"]["reason"])
-        self.assertFalse((fake / "args").exists())
+        self.assertEqual((rec["release"]["released"], rec["release"]["reason"], rec["release"]["caller_job"]),
+                         (False, "no running session job", "424242"))
+        self.assertFalse((fake / "scancel-calls").exists())
+        self.assertEqual(list((self.site_root / "logs").glob("**/*.close")) if (self.site_root / "logs").exists() else [], [])
         self.assertEqual(workday.status(self.s)["phase"], "off-duty")
+        # with a recorded running job the marker goes to that job only, never to the caller's
+        Ledger(self.s).event("session.started", "desk", None, {"job_id": "777", "purpose": "desk"})
+        os.environ["SLURM_JOB_ID"] = "424242"
+        try:
+            out = sessions.release(self.s, "desk")
+        finally:
+            os.environ.pop("SLURM_JOB_ID")
+        self.assertEqual((out["mode"], out["job_id"], out["from"]), ("marker", "777", "outside"))
+        self.assertTrue(sessions.close_marker(self.s, "777").is_file())
+        self.assertFalse(sessions.close_marker(self.s, "424242").exists())
+        self.assertFalse((fake / "scancel-calls").exists())
+        self.assertNotIn("424242", (fake / "squeue-calls").read_text(), "only recorded jobs are even asked about")
 
-    def test_close_outside_a_job_releases_nothing(self):
-        self.end_day()
-        self.write_handoff()
-        os.environ.pop("SLURM_JOB_ID", None)
+    def test_close_with_the_job_gone_releases_nothing(self):
+        fake = self._closable(squeue="")
         rec = workday.close(self.s, "desk", "done")
-        self.assertFalse(rec["release"]["released"])
+        self.assertEqual((rec["release"]["released"], rec["release"]["reason"]), (False, "no running session job"))
+        self.assertEqual(rec["release"]["asked"][0]["job_id"], "777")
+        self.assertFalse(sessions.close_marker(self.s, "777").exists())
+        self.assertFalse((fake / "scancel-calls").exists())
+
+    def test_close_cancel_now_scancels_the_recorded_job_only(self):
+        fake = self._closable()
+        os.environ["SLURM_JOB_ID"] = "424242"
+        try:
+            rc, out = self.cli("day", "close", "--cancel-now", "--note", "marker ignored")
+        finally:
+            os.environ.pop("SLURM_JOB_ID")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual((fake / "scancel-calls").read_text().split(), ["777"])
+        self.assertFalse(sessions.close_marker(self.s, "777").exists())
+        rel = self.released()[-1]["payload"]
+        self.assertEqual((rel["released"], rel["mode"], rel["job_id"], rel["exit"]), (True, "scancel", "777", 0))
+        self.assertIn("session job 777 cancelled now (scancel exit 0)", out)
+
+    def test_close_release_on_close_off(self):
+        fake = self._closable()
+        self.config(session={"release_on_close": False})
+        rec = workday.close(self.s, "desk", "done")
+        self.assertEqual((rec["release"]["released"], rec["release"]["reason"]), (False, "release_on_close is off"))
+        self.assertFalse(sessions.close_marker(self.s, "777").exists())
+        self.assertFalse((fake / "squeue-calls").exists())
+
+    def test_close_picks_the_newest_recorded_job_still_in_squeue(self):
+        # squeue lists job 778 (the restart) and not 777: the marker goes to 778, named like its tmux session
+        fake = self._closable(squeue=None)
+        (fake / "squeue").write_text(f"#!/bin/sh\necho \"$@\" >> {fake}/squeue-calls\n"
+                                     "case \"$*\" in *778*) echo 'RUNNING|6:00:00';; esac\n")
+        Ledger(self.s).event("session.started", "desk", None, {"job_id": "778", "purpose": "overtime"})
+        rec = workday.close(self.s, "desk", "done")
+        self.assertEqual((rec["release"]["job_id"], rec["release"]["purpose"]), ("778", "overtime"))
+        self.assertEqual(rec["release"]["marker"], str(sessions.close_marker(self.s, "778", "overtime")))
+        self.assertTrue(sessions.close_marker(self.s, "778", "overtime").is_file())
+        self.assertFalse(sessions.close_marker(self.s, "777").exists())
+        calls = (fake / "squeue-calls").read_text()
+        self.assertIn("-j 778", calls)
+        self.assertNotIn("-j 777", calls, "the newest running job is found first; older ones are not asked about")
+
+    def test_session_release_writes_the_marker_after_a_closed_day(self):
+        # the 10-05 situation: the day is closed, the job still runs; no second day close is possible
+        fake = self._closable()
+        rec = workday.close(self.s, "desk", "done")
+        sessions.close_marker(self.s, "777").unlink()  # as if the first marker had been lost
+        rc, out = self.cli("site", "session", "release")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("session job 777 ends by itself within ~120 s (close marker written", out)
+        marker = sessions.close_marker(self.s, "777")
+        self.assertTrue(marker.is_file())
+        self.assertIsNone(json.loads(marker.read_text())["record"])
+        self.assertFalse((fake / "scancel-calls").exists())
+        rel = self.released()[-1]
+        self.assertEqual((rel["payload"]["mode"], rel["payload"]["job_id"]), ("marker", "777"))
+        started = [e for e in Ledger(self.s).events() if e["type"] == "session.started"][-1]["id"]
+        self.assertEqual(rel["refs"], [started])
+        # --cancel-now: the fallback when the marker was ignored
+        rc, out = self.cli("site", "session", "release", "--cancel-now")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual((fake / "scancel-calls").read_text().split(), ["777"])
+        self.assertEqual(self.released()[-1]["payload"]["mode"], "scancel")
+        # nothing runs any more: refused, nothing recorded
+        self.fake_slurm(squeue="")
+        before = len(self.released())
+        with self.assertRaisesRegex(DurehError, r"no running session job to release: job 777 .*not in squeue"):
+            sessions.release(self.s, "desk", must_run=True)
+        self.assertEqual(len(self.released()), before)
+        self.assertEqual(self.cli("site", "session", "release")[0], 2)
+        self.assertEqual(self.cli("--observe", "site", "session", "release")[0], 2, "observe mode is read-only (sets DUREH_OBSERVE: last)")
+
+    def test_session_release_refuses_without_any_recorded_session(self):
+        self.fake_slurm()
+        with self.assertRaisesRegex(DurehError, "no running session job to release: no session.started record"):
+            sessions.release(self.s, "desk", must_run=True)
+        self.assertEqual(self.released(), [])
 
     # ------------------------------------------------------------ the session starts the day (Director, 2026-10-04)
     def test_session_start_submits_and_sets_the_clock(self):

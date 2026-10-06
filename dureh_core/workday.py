@@ -624,24 +624,14 @@ def _handoff_path(site: Site) -> Path:
     return p if p.is_absolute() else site.root / p
 
 
-def _session_started_here(led: Ledger, job: str | None) -> bool:
-    """True when this site's ledger says dureh started session job `job` (`session.started` with that job_id).
-    Director, 2026-10-03: dureh releases only company session jobs it started; a session (or a test) that merely
-    runs inside some Slurm job, the DUREH team's own above all, must never cancel it."""
-    if not job:
-        return False
-    for e in led.events():
-        if e.get("type") != "session.started":
-            continue
-        data = e.get("payload") or e.get("data") or {}
-        if str(data.get("job_id")) == str(job):
-            return True
-    return False
-
-
-def close(site: Site, actor: str, note: str) -> dict:
-    """Close the day: everything idle, the handoff written after today's approval, then leave.
-    Inside a session job (SLURM_JOB_ID) the runtime releases the node (Director, 2026-10-03)."""
+def close(site: Site, actor: str, note: str, cancel_now: bool = False) -> dict:
+    """Close the day: everything idle, the handoff written after today's approval, then leave. Then the site's
+    running session job (the newest `session.started` record still in squeue; never any other job, whoever
+    calls) is released through `sessions.release`: by default the close marker, so the job sends `/exit` to
+    its claude and completes by itself within the grace (Director, 2026-10-06, after the 10-05 close: an
+    outside `day close` could not release and the job was scancelled by hand mid-handoff; an inside close
+    scancelled the desk mid-turn); `cancel_now` is the old immediate scancel. Config `session.release_on_close`
+    false releases nothing (unless `cancel_now` asks for it explicitly)."""
     from .ops import status as site_status
     from .upstream import _live_agents
 
@@ -663,18 +653,12 @@ def close(site: Site, actor: str, note: str) -> dict:
     led = Ledger(site)
     rec = led.event("day.closed", actor, None, {"note": note, "idle": checked or None, "checked": checked,
                                                "handoff": str(handoff)}, [d["plan"]])
-    job = os.environ.get("SLURM_JOB_ID")
-    release_on = (site.config.get("session") or {}).get("release_on_close", True)
-    owned = _session_started_here(led, job)
-    if not job or not release_on or not owned:
-        reason = ("not running in a session job" if not job else
-                  "release_on_close is off" if not release_on else
-                  f"job {job} has no session.started record; dureh cancels only jobs it started")
-        out = {"released": False, "reason": reason, "job_id": job}
-        led.event("session.released", actor, None, out, [rec["id"]])
-        return {**rec, "release": out}
     from . import sessions
 
-    out = {"released": True, **sessions.get(site).release(site, job)}
-    led.event("session.released", actor, None, out, [rec["id"]])
-    return {**rec, "release": out}
+    release_on = (site.config.get("session") or {}).get("release_on_close", True)
+    if not release_on and not cancel_now:
+        out = {"released": False, "reason": "release_on_close is off", "job_id": None,
+               "caller_job": os.environ.get("SLURM_JOB_ID")}
+        led.event(sessions.RELEASED, actor, None, out, [rec["id"]])
+        return {**rec, "release": out}
+    return {**rec, "release": sessions.release(site, actor, cancel_now=cancel_now, parent=rec["id"])}

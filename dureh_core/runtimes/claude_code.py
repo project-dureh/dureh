@@ -398,7 +398,7 @@ def _claude_md(site: Site) -> str:
               " which commits state as a rollback point. If the Director later rolls back to such a point, fix forward from there and reflect every change made since."
               f" When the hours run out (or today's Claude usage reaches the daily share) no new agent starts: write the end report with `{dureh} day end --done ... --problems ... --overtime <WI>...`"
               " and give it to the Director (done, decisions with commits, errors, usage, proposed overtime). Overtime is only for fixing errors from the day's work and normalization tests,"
-              f" and only for the items the Director accepts: `{dureh} day overtime --items <WI>... --memo \"<Director's words>\"`; then `{dureh} day close`."
+              f" and only for the items the Director accepts: `{dureh} day overtime --items <WI>... --memo \"<Director's words>\"`; then the close (item 13)."
               " The plan lists each work item with its expected agent spawns and a rough usage estimate, and the day total against the daily share."
               f" To fix a WI's checks, acceptance, constraints, outputs or stale base, amend it instead of replacing it: `{dureh} wi amend --wi <WI> --memo ... [--check ...] [--rebase]`"
               " (a stopped item re-opens; inside a day plan the plan approval covers it). A different goal, role or target is a new WI."
@@ -410,13 +410,16 @@ def _claude_md(site: Site) -> str:
               " When everything is idle, propose the next work: if it fits the goals the Director set (the plan's goal, the package's purpose, the Director's standing priorities),"
               f" proceed on your own recommendation, record it with `{dureh} day decide`, and report it at the end; otherwise list it for the end report."
               " Where the Director would decide, choose something easy to change, call it provisional in the record, and keep going."
-              f" When everything is idle and nothing more can proceed today (after the end report and any accepted overtime), write the handoff and run `{dureh} day close`:"
-              " it checks that nothing runs and the handoff is fresh, then ends the session job and releases its node when the session runs as a scheduler job."
+              f" When everything is idle and nothing more can proceed today (after the end report and any accepted overtime), close as item 13 says:"
+              f" stop every Monitor and background task, write the handoff, run `{dureh} day close` (it checks that nothing runs and the handoff is fresh), then do nothing."
               " `day plan` and `day end` record the heads of every module and project and of state, so any day's start or end is a rollback point."
               " Talk to the Director at the start and the end of the day; between them only for data at risk. `dureh day status` shows the phase and usage (account total and this site's part);"
               " the usage budget is shared by every company and upstream, so check it before each work item.",
               _slack_rule(site, dureh),
-              f"13. Before the session ends, write a short handoff to `state/memory/handoff.md` (what is open, what the Director decided, what is next).", "",
+              f"13. Ending the day, in this order: first stop every Monitor and background task (TaskStop; nothing may still be running or writing);"
+              " then write a short handoff to `state/memory/handoff.md` (what is open, what the Director decided, what is next);"
+              f" then run `{dureh} day close`. After it, do nothing: the session job sends `/exit` to this session within about 20 s and ends by itself;"
+              " never scancel your own job.", "",
               "Small questions the Director asks may be answered directly. Research that needs many sources goes to `researcher`; long documents go to `doc-writer`.",
               "Reference paths are read-only. Records are append-only: correct history by appending an event, never by editing a record.", "",
               "## Core values", "", values, "",

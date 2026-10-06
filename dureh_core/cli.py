@@ -465,6 +465,11 @@ def cmd_site_session(a):
         print(line)
         for n in p.get("notes") or []:
             print(f"note: {n}")
+    elif a.action == "release":
+        out = sessions.release(site, _actor(a), cancel_now=a.cancel_now, must_run=True)
+        if a.json:
+            _print(out)
+        print(sessions.render_release(out))
     else:
         st = sessions.status(site)
         _print(st if a.json else sessions.render_status(st))
@@ -493,7 +498,11 @@ def cmd_day(a):
     elif c == "overtime":
         _print(workday.overtime(site, actor, a.items, a.memo))
     elif c == "close":
-        _print(workday.close(site, actor, a.note or ""))
+        from . import sessions
+
+        rec = workday.close(site, actor, a.note or "", cancel_now=a.cancel_now)
+        _print(rec)
+        print(sessions.render_release(rec["release"]))
     elif c == "urgent":
         _print(workday.urgent(site, actor, a.wi, a.memo))
 
@@ -904,8 +913,12 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--write", action="store_true", help="detect: save into config.json `cluster` (desk/Director)")
     x.add_argument("--actor")
     x = add(st, "session", cmd_site_session, "the day's session job: plan (print the sbatch script, submit nothing), "
-                                               "start (submit it and record session.started), status (read-only)")
-    x.add_argument("action", choices=["plan", "start", "status"])
+                                               "start (submit it and record session.started), status (read-only), "
+                                               "release (end the recorded running job by close marker; --cancel-now scancels)")
+    x.add_argument("action", choices=["plan", "start", "status", "release"])
+    x.add_argument("--cancel-now", action="store_true",
+                   help="release: scancel the recorded session job at once instead of writing the close marker "
+                        "(the fallback when a marker was ignored)")
     x.add_argument("--purpose", default="desk", choices=list(sessions_purposes()),
                    help="desk: the day's session (default); overtime: a new session for approved overtime")
     x.add_argument("--force", action="store_true", help="start: a second session today although today's job is still "
@@ -918,7 +931,7 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--no-apply-landed", action="store_true",
                    help="start: do not switch the site to a pending landed release checkout (the newest `landed` mailbox "
                         "message) before submitting; plan: do not mention it")
-    x.add_argument("--json", action="store_true", help="status: machine-readable")
+    x.add_argument("--json", action="store_true", help="status/release: machine-readable")
     x.add_argument("--actor")
 
     dy = sub.add_parser("day", help="workday mode: day plan, approval, decisions, end report, overtime"
@@ -946,8 +959,12 @@ def parser() -> argparse.ArgumentParser:
     x = add(dy, "urgent", cmd_day, "data at risk: record the Director's release of WIs from the plan, clock and budget")
     x.add_argument("--wi", nargs="+", required=True)
     x.add_argument("--memo", required=True)
-    x = add(dy, "close", cmd_day, "close the day (no overtime, or overtime finished)")
+    x = add(dy, "close", cmd_day, "close the day (no overtime, or overtime finished); the session job then ends by "
+                                  "itself (close marker: /exit to claude, grace, job completes)")
     x.add_argument("--note")
+    x.add_argument("--cancel-now", action="store_true",
+                   help="scancel the recorded session job at once instead of writing the close marker (fallback "
+                        "when a marker was ignored)")
     for sp in dy.choices.values():
         sp.add_argument("--actor")
 
