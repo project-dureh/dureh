@@ -456,6 +456,44 @@ def inbox(site: Site, actor: str, record: bool = False) -> list[dict]:
     return new
 
 
+LANDED_CHECKOUT = re.compile(r"adapter sync --harness\s+([^\s`'\"]+)")
+
+
+def is_checkout(path: Path) -> bool:
+    """A harness checkout: an executable `dureh` next to a `dureh_core/` package (the same test as adapter sync)."""
+    import os
+
+    return (path / "dureh_core").is_dir() and os.access(path / "dureh", os.X_OK)
+
+
+def pending_landed_checkout(site: Site) -> dict | None:
+    """The release checkout the newest `landed` message in <exchange>/<mailbox>/from-upstream/ names
+    (`adapter sync --harness <checkout>` in its body) when the site does not run it yet: `{"id", "file",
+    "checkout", "created"}`, else None. None when no exchange is configured or reachable, when no landed message
+    names a checkout, when the named path is not a checkout, and when it is already the site's pinned harness
+    (config.json `harness.root`, what `bin/dureh` execs). Only the newest landed message that names a checkout
+    counts: an older landed message never pulls the site back to an older release. Read-only."""
+    raw = (site.config.get("upstream") or {}).get("exchange")
+    if not raw:
+        return None
+    box = Path(site.expand(raw)) / site.mailbox_name / "from-upstream"
+    for p in reversed(_messages(box)):  # names start with the creation time: newest last
+        text = p.read_text(encoding="utf-8", errors="replace")
+        h = _header(text)
+        if (h.get("kind") or "").strip() != "landed":
+            continue
+        m = LANDED_CHECKOUT.search(_body(text))
+        if not m:
+            continue
+        checkout = Path(site.expand(m.group(1)))
+        if not checkout.is_dir() or not is_checkout(checkout):
+            return None
+        if checkout.resolve() == site.pinned_harness_root.resolve():
+            return None
+        return {"id": h.get("id") or p.stem, "file": p.name, "checkout": checkout, "created": h.get("created")}
+    return None
+
+
 def collaboration(site: Site) -> dict:
     """independent | collaborating, open requests, blocked WIs, merge window, unread upstream messages."""
     opened = _open_requests(site)

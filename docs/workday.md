@@ -15,7 +15,15 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    from that submission, whatever the hour. Without such a record (a manual start) the fallback is the
    config window `workday.start`/`workday.end` when set, else the approval time plus the hours. The script
    exports the site's pinned harness (config.json `harness.root`) as `DUREH_ROOT`, whichever tree runs the
-   command. One session a day: a second `session start` on the same local day is refused while today's job
+   command. Pending landed release (Director, 2026-10-06): when the newest `landed` message in the site's
+   mailbox names a release checkout (`adapter sync --harness <checkout>`) that is not the pinned harness,
+   `session start` applies it first, after its refusal checks and before anything is submitted: it runs that
+   checkout's own `dureh --site <site> adapter sync` (the same switch as `bin/dureh adapter sync --harness`),
+   records `harness.switched` (from, to, landed message id, output tail), re-reads the site and builds the
+   job from the new checkout, so the session boots on the new release instead of the desk syncing after
+   clock-in. A failed switch stops the start with the sync output; nothing is submitted. `session plan`
+   prints a `will switch harness to ...` line when one is pending; `--no-apply-landed` boots on the current
+   harness. One session a day: a second `session start` on the same local day is refused while today's job
    is still in squeue (the message names the job id; `--force --memo "why"` overrides and the record carries
    `force`). When that job is gone the start is a restart (`restart: true`, `previous`); either way the
    record's `day_start` keeps the first session's start, so the 8 hours do not begin again. An overtime
@@ -131,6 +139,7 @@ bin/dureh site session plan | start | status               # the day's session j
 bin/dureh site session start --force --memo "..."          # a second session today while the first job still runs
 bin/dureh site session start --purpose overtime            # a new session for approved overtime (first prompt "<desk name>, 추가근무 출근")
 bin/dureh site session start --prompt "..." | --no-prompt  # replace or drop the first prompt this time
+bin/dureh site session start --no-apply-landed             # boot on the current harness even if a landed release is pending
 ```
 
 `dureh status` and the session start show a `Workday:` line while the mode is on (phase, start-end and the

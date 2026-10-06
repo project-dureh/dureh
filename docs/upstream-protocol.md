@@ -148,6 +148,10 @@ When a UR's `Status` reaches `landed <rev>`:
    arrives as a release checkout (below); the Director switches the site to it with
    `bin/dureh adapter sync --harness <releases>/dureh-<tag>`, which runs that checkout's own `dureh`
    so `bin/dureh` and the hooks exec it from then on.
+   When the landed message arrives outside company hours, nobody needs to run the switch by hand:
+   the next `dureh site session start` (run by upstream at clock-in) applies the newest `landed`
+   message's checkout before it submits the session job, records `harness.switched`, and prints
+   `switched harness <old> -> <new> (landed <id>)`; `--no-apply-landed` skips it (docs/workday.md).
 2. Run `dureh verify --self` to self-test the harness and this site against that revision.
 3. Only after both succeed, resume or re-open any WI that was waiting on the change, citing the
    landed rev and the `verify --self` result as evidence.

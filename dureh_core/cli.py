@@ -10,7 +10,7 @@ from pathlib import Path
 from .util import DurehError, dumps, fail
 
 
-RESERVED_EVENT_PREFIXES = ("workday.", "day.", "session.", "hours.", "slack.")
+RESERVED_EVENT_PREFIXES = ("workday.", "day.", "session.", "hours.", "slack.", "harness.")  # harness.switched: session start only
 
 
 def _percent(value: str) -> float:
@@ -431,12 +431,26 @@ def cmd_site_session(a):
     site = _site(a)
     if a.action == "plan":
         print(sessions.plan(site, a.purpose, prompt=a.prompt, no_prompt=a.no_prompt), end="")
+        if not a.no_apply_landed:
+            from . import upstream
+            from .util import harness_label
+
+            pending = upstream.pending_landed_checkout(site)
+            if pending:
+                print(f"will switch harness to {harness_label(pending['checkout'])} at {pending['checkout']} "
+                      f"(landed {pending['id']}) before submitting; the script above still names the current harness")
     elif a.action == "start":
-        rec = sessions.start(site, _actor(a), a.purpose, force=a.force, memo=a.memo, prompt=a.prompt, no_prompt=a.no_prompt)
+        rec = sessions.start(site, _actor(a), a.purpose, force=a.force, memo=a.memo, prompt=a.prompt, no_prompt=a.no_prompt,
+                             apply_landed=not a.no_apply_landed)
         p = rec["payload"]
-        line = (f"Submitted session job {p['job_id']} at {p['submitted_at']} (wall time {p['wall_time']}, purpose "
-                f"{p['purpose']}, " + (f"first prompt {p['prompt']!r}" if p.get("prompt") else "no first prompt")
-                + f"); recorded {rec['id']} (session.started).")
+        line = ""
+        if p.get("harness_switch"):
+            hs = p["harness_switch"]
+            line = (f"switched harness {hs['from_label']} -> {hs['to_label']} (landed {hs['landed']}); recorded "
+                    f"{hs['record']} ({sessions.SWITCHED}). ")
+        line += (f"Submitted session job {p['job_id']} at {p['submitted_at']} (wall time {p['wall_time']}, purpose "
+                 f"{p['purpose']}, " + (f"first prompt {p['prompt']!r}" if p.get("prompt") else "no first prompt")
+                 + f"); recorded {rec['id']} (session.started).")
         if p.get("restart"):
             line += (f" Restart: today's job {p['previous']['job_id']} ({p['previous']['record']}) is gone from squeue;"
                      f" the working day still runs from {p['day_start']}.")
@@ -899,6 +913,9 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--prompt", help="plan/start: the session's first prompt, replacing the default (desk: none; "
                                     "overtime: \"<desk name>, 추가근무 출근\" from state/persona; config session.prompts.<purpose>)")
     g.add_argument("--no-prompt", action="store_true", help="plan/start: no first prompt this time")
+    x.add_argument("--no-apply-landed", action="store_true",
+                   help="start: do not switch the site to a pending landed release checkout (the newest `landed` mailbox "
+                        "message) before submitting; plan: do not mention it")
     x.add_argument("--json", action="store_true", help="status: machine-readable")
     x.add_argument("--actor")
 

@@ -97,17 +97,27 @@ def plan(site: Site, purpose: str = "desk", prompt: str | None = None, no_prompt
 
 
 def start(site: Site, actor: str, purpose: str = "desk", force: bool = False, memo: str | None = None,
-          prompt: str | None = None, no_prompt: bool = False) -> dict:
+          prompt: str | None = None, no_prompt: bool = False, apply_landed: bool = True) -> dict:
     """Submit the planned session job and record `session.started` (job_id, submitted_at, wall_time, purpose,
     prompt): the company's working day runs 8 hours from this moment (Director, 2026-10-04); `day close`
     releases only a job with this record. One session per purpose a day: a second start on the same local day
     is refused while today's job of that purpose is still in squeue (`force` with a `memo` overrides and
     records why); when that job is gone the start is a restart (`restart: true`). An `overtime` session after
-    the day's session is simply a second session. Either way the day's clock keeps the first session's start."""
+    the day's session is simply a second session. Either way the day's clock keeps the first session's start.
+    A pending landed release (the newest `landed` mailbox message names a checkout the site does not run yet)
+    is applied first unless `apply_landed` is False: that checkout's own `dureh --site <root> adapter sync`
+    runs as a subprocess, `harness.switched` is recorded and the job is built from the re-read site, so the
+    session boots on the new release (Director, 2026-10-06: the release goes on before the start, not by the
+    desk after it). A failed switch stops the start; nothing is submitted."""
     b = _build(site, purpose, prompt, no_prompt)
     if b["problems"] and workday.device_on(site, "session"):
         fail("the session cannot start here: " + "; ".join(b["problems"]))
     again = _second_start(site, workday.todays_session(Ledger(site).events()), purpose, force, memo)
+    switched = _apply_landed(site, actor) if apply_landed else None
+    if switched:
+        site = Site(site.root)  # config.json harness.root changed: the script must export the new checkout
+        b = _build(site, purpose, prompt, no_prompt)
+        again = {**again, "harness_switch": switched}
     now = workday._now()
     b["logs"].mkdir(parents=True, exist_ok=True)  # Slurm opens the logs before the job runs
     script = b["logs"] / f"{b['name']}-{now.strftime('%Y%m%d-%H%M%S')}.sbatch"
@@ -124,6 +134,42 @@ def start(site: Site, actor: str, purpose: str = "desk", force: bool = False, me
                "runtime": b["runtime"], "script": str(script), "command": cmd, "notes": b["notes"],
                "prompt": b["prompt"], **again}
     return Ledger(site).event(workday.SESSION, actor, None, payload)
+
+
+SWITCHED = "harness.switched"
+SWITCH_TIMEOUT = 900  # adapter sync regenerates the adapter files and project guidance; measured minutes, not hours
+
+
+def _apply_landed(site: Site, actor: str) -> dict | None:
+    """Switch the site to the pending landed checkout (upstream.pending_landed_checkout) by running that
+    checkout's own `dureh --site <root> adapter sync` (exactly what `bin/dureh adapter sync --harness <checkout>`
+    execs), then record `harness.switched`. Returns the switch for the session record, None when nothing is
+    pending. A non-zero exit fails with the output; the start stops there."""
+    from .. import upstream
+    from ..util import harness_label
+
+    pending = upstream.pending_landed_checkout(site)
+    if not pending:
+        return None
+    old_root = site.pinned_harness_root
+    checkout = pending["checkout"]
+    cmd = [str(checkout / "dureh"), "--site", str(site.root), "adapter", "sync"]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=SWITCH_TIMEOUT, env=site.env())
+    except (OSError, subprocess.SubprocessError) as exc:
+        fail(f"the landed release {checkout} (landed {pending['id']}) could not be applied: {' '.join(cmd)} did not run: "
+             f"{exc}; nothing was submitted")
+    output = ((proc.stdout or "") + (proc.stderr or "")).strip()
+    if proc.returncode != 0:
+        fail(f"the landed release {checkout} (landed {pending['id']}) could not be applied: {' '.join(cmd)} exited "
+             f"{proc.returncode}:\n{output[-2000:]}\nnothing was submitted; fix the switch (or start with "
+             f"--no-apply-landed) and start again")
+    tail = output.splitlines()[-5:]
+    payload = {"from": str(old_root), "to": str(checkout), "via": "session start", "landed": pending["id"],
+               "landed_file": pending["file"], "command": cmd, "output_tail": tail}
+    rec = Ledger(site).event(SWITCHED, actor, None, payload)
+    return {"from": str(old_root), "from_label": harness_label(old_root), "to": str(checkout),
+            "to_label": harness_label(checkout), "landed": pending["id"], "record": rec["id"]}
 
 
 def _second_start(site: Site, prev: dict | None, purpose: str, force: bool, memo: str | None) -> dict:
