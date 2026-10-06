@@ -8,7 +8,7 @@ from helpers import SiteCase, denied, hook
 
 from pathlib import Path
 
-from dureh_core import claude_usage, sessions, workday
+from dureh_core import claude_usage, sessions, slack, workday
 from dureh_core import workflow as wf
 from dureh_core.cli import main
 from dureh_core.ops import render_status, status
@@ -860,6 +860,13 @@ class Workday(SiteCase):
         self.assertIn("records the overtime itself", text)
         self.assertIn("wi new --fix-for", text)
         self.assertIn("Write the end report when the plan is done", text)
+        # overtime pre-approval (UR-20261006-01) and the overtime plan (Director, 2026-10-06)
+        self.assertIn("may be recorded while on-duty as soon as the Director approves", text)
+        self.assertIn("day overtime-plan --file <plan>", text)
+        # the job report at day end and the file-level loop rule (Director, 2026-10-06)
+        self.assertIn("jobs today: N runs, M tasks, K failed", text)
+        self.assertIn("Every workflow step loops at file level", text)
+        self.assertIn("--each-from-bids <dataset> --level file --suffix", text)
 
     # ------------------------------------------------------------ finish the plan (Director, 2026-10-06)
     def overtime_events(self):
@@ -874,6 +881,106 @@ class Workday(SiteCase):
         other = wf.wi_new(self.s, "desk", title, "g", "pm-modules", "modules/demo", ["ok"])["id"]
         wf.wi_approve(self.s, "desk", other, "ok")
         return other
+
+    def plan_overtime(self, text="overtime: finish the open items in order, 1 spawn each"):
+        return workday.overtime_plan(self.s, "desk", text)
+
+    # ------------------------------------------------------------ overtime pre-approval (UR-20261006-01) and plan
+    def test_overtime_pre_approved_while_on_duty(self):
+        self.start_day(f"1. {self.wi}")
+        other, third = self.other_wi(), self.other_wi("Y")
+        self.at(T0 + timedelta(hours=6))
+        self.assertIsNone(self.spawn())  # the plan item, during the day
+        rec = workday.overtime(self.s, "desk", [other], "X도 오늘 끝내세요")
+        p = rec["payload"]
+        self.assertEqual((p["items"], p["memo"], p["by"], p["pre_approved"], p["phase"], p["end"], p["at"]),
+                         ([other], "X도 오늘 끝내세요", "Director", True, "on-duty", (T0 + timedelta(hours=8)).isoformat(),
+                          (T0 + timedelta(hours=6)).isoformat()))
+        self.assertNotIn("rule", p)
+        st = workday.status(self.s)
+        self.assertEqual((st["phase"], st["overtime"], st["overtime_started"], st["overtime_plan"]),
+                         ("on-duty", [other], True, None))
+        self.assertNotIn("overtime_plan_missing", st, "no nagging before the end time")
+        self.assertIn(f"; overtime: 1 item ({other}), plan missing", render_status(status(self.s)))
+        # the shared predicate's reasons
+        fix = wf.wi_new(self.s, "desk", "fix X", "g", "pm-modules", "modules/demo", ["ok"], fix_for=other)["id"]
+        wf.wi_approve(self.s, "desk", fix, "ok")
+        pfix = wf.wi_new(self.s, "desk", "fix W", "g", "pm-modules", "modules/demo", ["ok"], fix_for=self.wi)["id"]
+        wf.wi_approve(self.s, "desk", pfix, "ok")
+        self.assertEqual(workday.allowed_past_end(self.s, other), "Director overtime (X도 오늘 끝내세요)")
+        self.assertEqual(workday.allowed_past_end(self.s, fix), f"Director overtime (X도 오늘 끝내세요, as a fix for {other})")
+        self.assertEqual(workday.allowed_past_end(self.s, self.wi), "plan item")
+        self.assertEqual(workday.allowed_past_end(self.s, pfix), f"fix for {self.wi}")
+        self.assertIsNone(workday.allowed_past_end(self.s, third))
+        self.assertIsNone(workday.allowed_past_end(self.s, None))
+        self.assertEqual(workday.past_end_rule(self.s, other)[0], "director-overtime")
+        self.assertEqual(workday.past_end_rule(self.s, pfix)[0], "finish-plan")
+        # past the end time: the pre-approved item and its fix pass the gate; no automatic record is added for them
+        self.at(T0 + timedelta(hours=8, minutes=1))
+        self.assertEqual(workday.status(self.s)["phase"], "past-end")
+        self.assertIsNone(workday.gate(self.s, other))
+        self.assertIsNone(workday.gate(self.s, fix))
+        self.assertIsNone(self.spawn(other))
+        self.assertEqual(len(self.overtime_events()), 1, "the Director's record stands alone")
+        # the first overtime unit is in flight; the next waits for the overtime plan
+        self.assertEqual(workday.gate(self.s, fix), "workday mode: " + workday.PLAN_MISSING)
+        self.assertTrue(workday.status(self.s)["overtime_plan_missing"])
+        workday.overtime_plan(self.s, "desk", f"1. {other} then {fix}")
+        self.assertIsNone(workday.gate(self.s, fix))
+        # a WI neither in the plan nor approved: the refusal names the way out with the exact command
+        why = workday.gate(self.s, third)
+        self.assertIn("only the plan's open items", why)
+        self.assertIn(f"{third} is not in today's plan and has no overtime record: either record the Director's approval "
+                      f"with `dureh day overtime --items {third} --memo \"<Director's words>\"` (allowed while on-duty) or "
+                      "add it to the plan's bundle (`dureh wi new --fix-for <plan WI>` or `--parent <plan WI>`).", why)
+        self.assertNotIn("shorten --time", why)
+        self.assertTrue(denied(self.spawn(third)))
+        # a second `day overtime` appends; accepted while finishing too
+        rec2 = workday.overtime(self.s, "desk", [third], "Y도")
+        self.assertEqual((rec2["payload"]["pre_approved"], rec2["payload"]["phase"]), (True, "past-end"))
+        self.assertEqual(workday.status(self.s)["overtime"], sorted([other, third]))
+        self.assertIsNone(workday.gate(self.s, third))
+        self.assertIn(f"; overtime: 2 items ({', '.join(sorted([other, third]))}), plan recorded 17:01",
+                      render_status(status(self.s)))
+        # the end report lists the Director's items with their outcomes and the overtime plan
+        self.verify(self.wi)
+        rec = workday.end(self.s, "desk", "done", "", [], early="fix W는 내일")  # pfix stays open: the Director ends it
+        past = rec["payload"]["past_end"]
+        self.assertEqual(([x["wi"] for x in past["items"]], past["early"]), ([pfix], "fix W는 내일"))
+        self.assertEqual([(x["wi"], x["outcome"], x["finished"]) for x in past["director"]],
+                         [(other, "dispatched", False), (third, "approved", False)])
+        self.assertEqual(past["director_memos"], {other: "X도 오늘 끝내세요", third: "Y도"})
+        self.assertEqual(past["overtime_plan"]["plan"], f"1. {other} then {fix}")
+        self.assertEqual(workday.status(self.s)["phase"], "overtime")
+
+    def test_overtime_plan_with_the_record_and_by_its_own_command(self):
+        self.start_day(f"1. {self.wi}")
+        other = self.other_wi()
+        with self.assertRaisesRegex(DurehError, "no overtime started"):
+            workday.overtime_plan(self.s, "desk", "nothing yet")
+        self.at(T0 + timedelta(hours=7))
+        f1 = self.tmp / "ot1.md"
+        f1.write_text(f"| {other} | 1 spawn | ~1 unit |\n")
+        rc, out = self.cli("day", "overtime", "--items", other, "--memo", "X도 오늘", "--plan", str(f1), "--goal", "X done")
+        self.assertEqual(rc, 0, out)
+        st = workday.status(self.s)
+        self.assertEqual((st["overtime_plan"]["plan"], st["overtime_plan"]["goal"], st["overtime_plan"]["at"][11:16]),
+                         (f1.read_text(), "X done", "16:00"))
+        self.assertIn(f"; overtime: 1 item ({other}), plan recorded 16:00", render_status(status(self.s)))
+        self.at(T0 + timedelta(hours=8, minutes=1))
+        self.assertIsNone(self.spawn(other))
+        self.assertIsNone(workday.gate(self.s, other), "the plan came with the approval: nothing waits")
+        f2 = self.tmp / "ot2.md"
+        f2.write_text(f"| {other} | 2 spawns | ~2 units |\n")
+        rc, out = self.cli("day", "overtime-plan", "--file", str(f2), "--usage", "2 units")
+        self.assertEqual(rc, 0, out)
+        st = workday.status(self.s)
+        self.assertEqual((st["overtime_plan"]["plan"], st["overtime_plan"]["items"]), (f2.read_text(), [other]))
+        plans = [e for e in Ledger(self.s).events() if e["type"] == "day.overtime-plan"]
+        self.assertEqual((len(plans), plans[0]["payload"]["expected_usage"], plans[0]["payload"]["updates"]),
+                         (1, "2 units", self.overtime_events()[0]["id"]))
+        rc, out = self.cli("day", "status")
+        self.assertIn("plan recorded 17:01", out)
 
     def test_finish_plan_continues_plan_items_after_the_end_time(self):
         # production, blocking clock; the plan names W (by id, as real plans do); X is outside the plan
@@ -895,9 +1002,28 @@ class Workday(SiteCase):
                          ([self.wi], "Director rule 2026-10-06: 초과근무로 문제를 모두 해결하고 당일 업무를 마무리",
                           "Director (standing rule)", "finish-plan", st["plan"], True))
         self.assertEqual(evs[0]["refs"], [st["plan"]])
+        # overtime plan (Director, 2026-10-06): the first overtime work unit is in flight; the next waits for the plan
+        self.assertEqual(workday.gate(self.s, self.wi), "workday mode: " + workday.PLAN_MISSING)
+        st = workday.status(self.s)
+        self.assertTrue(st["overtime_plan_missing"])
+        self.assertIn("overtime plan missing", st["warning"])
+        self.assertIn(f"; overtime: 1 item ({self.wi}), plan missing", render_status(status(self.s)))
+        with self.assertRaisesRegex(DurehError, "required"):
+            workday.overtime_plan(self.s, "desk", " ")
+        self.at(T0 + timedelta(hours=8, minutes=5))
+        plan_rec = workday.overtime_plan(self.s, "desk", f"1. {self.wi} rerun verify (1 spawn, ~1 unit)", goal="finish W",
+                                         usage="1 unit")
+        pp = plan_rec["payload"]
+        self.assertEqual((pp["items"], pp["goal"], pp["expected_usage"], pp["updates"], pp["at"][11:16]),
+                         ([self.wi], "finish W", "1 unit", None, "17:05"))
+        self.assertEqual(plan_rec["refs"], [st["plan"]])
         self.assertIsNone(workday.gate(self.s, self.wi))  # (a second dispatch_brief waits for the start grace)
         self.assertIsNone(workday.gate(self.s, self.wi, checking=True))
         self.assertEqual(len(self.overtime_events()), 1, "recorded once")
+        st = workday.status(self.s)
+        self.assertNotIn("overtime_plan_missing", st)
+        self.assertEqual(st["overtime_plan"]["record"], plan_rec["id"])
+        self.assertIn(f"; overtime: 1 item ({self.wi}), plan recorded 17:05", render_status(status(self.s)))
         # new work outside the plan is still refused; the Director's explicit overtime admits it
         out = self.spawn(other)
         self.assertTrue(denied(out))
@@ -921,6 +1047,9 @@ class Workday(SiteCase):
         self.assertEqual((past["rule"], past["by"], past["from"], past["stop"], past["open"]),
                          ("finish-plan", "Director (standing rule)", (T0 + timedelta(hours=8)).isoformat(), None, []))
         self.assertEqual(past["items"], [{"wi": self.wi, "title": "W", "outcome": "verified", "finished": True}])
+        self.assertEqual(past["director"], [{"wi": other, "title": "X", "outcome": "dispatched", "finished": False}])
+        self.assertEqual((past["director_memos"], past["overtime_plan"]["record"], past["overtime_plan"]["goal"]),
+                         ({other: "X도 오늘"}, plan_rec["id"], "finish W"))
         self.assertEqual(workday.status(self.s)["phase"], "overtime", "the Director's own item still stands")
         self.assertEqual(workday.status(self.s)["overtime"], [other])
         self.write_handoff()
@@ -931,6 +1060,7 @@ class Workday(SiteCase):
         self.start_day(f"1. {self.wi}")
         self.at(T0 + timedelta(hours=8, minutes=1))
         self.assertIsNone(self.spawn())
+        self.plan_overtime()
         # a fix created after the plan: --fix-for a plan WI (or --parent, the bundle's child)
         fix = wf.wi_new(self.s, "desk", "fix W", "g", "pm-modules", "modules/demo", ["ok"], fix_for=self.wi)["id"]
         wf.wi_approve(self.s, "desk", fix, "plan approval covers the fix")
@@ -979,6 +1109,7 @@ class Workday(SiteCase):
         workday.calibrate(self.s, 10)  # weekly 70, daily 10
         self.at(T0 + timedelta(hours=8, minutes=1))
         self.assertIsNone(self.spawn())
+        self.plan_overtime()
         self.spend(3)
         self.assertIn("daily share", workday.gate(self.s, self.wi) or "")
         fix = wf.wi_new(self.s, "desk", "fix W", "g", "pm-modules", "modules/demo", ["ok"], fix_for=self.wi)["id"]
@@ -1076,6 +1207,68 @@ class Workday(SiteCase):
         self.at(T0 + timedelta(days=1))
         rc, out = self.cli("day", "plan", "--goal", "g", "--file", str(self.write_plan(f"1. {other}")), "--wi", other)
         self.assertEqual(rc, 0, out)
+
+    # ------------------------------------------------------------ job report at day end (Director, 2026-10-06)
+    def test_end_report_lists_every_job_of_the_day(self):
+        led = Ledger(self.s)
+        before = led.append("run", "slurm", "desk", self.wi, {"run_type": "slurm", "status": "submitted", "job_id": "4000",
+                                                               "command": ["sbatch", "old.sh"], "script": "/x/old.sh"})
+        self.start_day()
+        self.at(T0 + timedelta(hours=2))
+        arr = led.append("run", "slurm", "desk", self.wi, {
+            "run_type": "slurm", "status": "submitted", "job_id": "4300", "level": "file", "logs": "/x/logs/WI",
+            "command": ["sbatch", "--parsable", f"--job-name=dureh-{self.wi}", "--array=0-2", "/x/logs/WI/each-1.sbatch"],
+            "script": "/x/step1.sh", "array": {"job_id": "4300", "items": ["a_bold", "b_bold", "c d_bold"], "count": 3,
+                                                "level": "file"}})
+        led.event("run.status", "desk", self.wi, {"run": arr["id"], "job_id": "4300", "scheduler_state": "FAILED",
+                                                   "counts": {"COMPLETED": 2, "FAILED": 1}, "final": True}, [arr["id"]])
+        single = led.append("run", "slurm", "desk", self.wi, {
+            "run_type": "slurm", "status": "submitted", "job_id": "4301", "level": "single", "reason": "merge",
+            "command": ["sbatch", "--parsable", "/x/merge.sh"], "script": "/x/merge.sh", "logs": "/x/logs/WI"})
+        led.event("run.status", "desk", self.wi, {"run": single["id"], "job_id": "4301", "scheduler_state": "COMPLETED",
+                                                   "raw": "COMPLETED|0:0|00:01:00"}, [single["id"]])
+        led.event("run.status", "desk", self.wi, {"run": single["id"], "job_id": "4301", "scheduler_state": "CANCELLED by 1",
+                                                   "raw": "CANCELLED by 1|0:0|00:01:00"}, [single["id"]])
+        via = led.append("run", "slurm", "desk", self.wi, {
+            "run_type": "slurm", "status": "submitted", "job_id": "5000", "level": "file", "logs": "/x/logs/WI",
+            "command": ["camri", "run", "pipe", "step", "--level", "file", "--submit", "--detach", "--record", "/x/r.json"],
+            "via": {"text": "camri run pipe step --level file --submit --detach", "command": ["camri", "run", "pipe", "step"]},
+            "jobs": [{"job_id": "5000", "kind": "array", "count": 2, "items": ["s1", "s2"], "level": "file"},
+                     {"job_id": "5001", "kind": "single"}],
+            "array": {"job_id": "5000", "items": ["s1", "s2"], "count": 2, "level": "file"}})
+        verify = led.append("run", "verify", "desk", self.wi, {
+            "run_type": "verify", "status": "submitted", "runner": "slurm", "job_id": "4302", "script": "/x/checks.sh",
+            "command": "sbatch --parsable --time=00:30:00 /x/checks.sh"})
+        led.append("run", "slurm", "desk", self.wi, {"run_type": "slurm", "status": "not-run", "command": ["sbatch", "dry.sh"]})
+        led.append("run", "agent", "desk", self.wi, {"run_type": "agent", "status": "completed"})
+        self.at(T0 + timedelta(hours=8, minutes=1))
+        rec = workday.end(self.s, "desk", "ran the pipeline", "", [])
+        jobs = rec["payload"]["jobs"]
+        self.assertEqual((jobs["count"], jobs["tasks"], jobs["jobs"], jobs["failed"], jobs["line"]),
+                         (4, 8, 5, 1, "jobs today: 4 runs, 8 tasks, 1 failed"))
+        self.assertEqual([j["run"] for j in jobs["runs"]], [arr["id"], single["id"], via["id"], verify["id"]],
+                         "runs before the plan, dry runs and agent runs are not jobs of the day")
+        a, s, v, c = jobs["runs"]
+        self.assertEqual((a["wi"], a["kind"], a["step"], a["level"], a["tasks"], a["jobs"], a["logs"]),
+                         (self.wi, "slurm", "step1.sh", "file", 3, 1, "/x/logs/WI"))
+        self.assertEqual(a["job_ids"], ["4300_[0-2]", "4300_0", "4300_1", "4300_2"])
+        self.assertEqual(a["command"], f"sbatch --parsable --job-name=dureh-{self.wi} --array=0-2 /x/logs/WI/each-1.sbatch")
+        self.assertEqual((a["state"], a["states"]), ("FAILED", {"completed": 2, "failed": 1, "cancelled": 0, "other": 0}))
+        self.assertEqual((s["level"], s["reason"], s["job_ids"], s["state"], s["states"]),
+                         ("single", "merge", ["4301"], "CANCELLED by 1", {"completed": 0, "failed": 0, "cancelled": 1, "other": 0}))
+        self.assertEqual((v["kind"], v["step"], v["tasks"], v["jobs"], v["job_ids"], v["state"], v["states"]["other"]),
+                         ("via", "camri run pipe step --level file --submit --detach", 3, 2,
+                          ["5000_[0-1]", "5000_0", "5000_1", "5001"], "no state recorded", 3))
+        self.assertEqual(v["command"], "camri run pipe step --level file --submit --detach --record /x/r.json")
+        self.assertEqual((c["kind"], c["step"], c["command"], c["level"]),
+                         ("verify", "checks.sh", "sbatch --parsable --time=00:30:00 /x/checks.sh", "single"))
+        # the Slack end-report summary (first paragraph) carries the jobs line, once
+        self.assertEqual(slack.jobs_line(self.s), "jobs today: 4 runs, 8 tasks, 1 failed")
+        self.assertEqual(slack.end_report_summary(self.s, "오늘 요약 한 문단\n\n자세한 내용"),
+                         "오늘 요약 한 문단\njobs today: 4 runs, 8 tasks, 1 failed")
+        self.assertEqual(slack.end_report_summary(self.s, "요약 (jobs today: 4 runs, 8 tasks, 1 failed)\n\n본문"),
+                         "요약 (jobs today: 4 runs, 8 tasks, 1 failed)")
+        self.assertEqual(before["payload"]["job_id"], "4000")
 
     def write_plan(self, text):
         p = self.tmp / "plan.md"

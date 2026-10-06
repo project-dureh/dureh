@@ -857,6 +857,23 @@ def summary(text: str) -> str:
     return text.strip().split("\n\n", 1)[0].strip()
 
 
+def jobs_line(site: Site) -> str | None:
+    """The newest end report's `jobs today: N runs, M tasks, K failed` line (`day end`, Director 2026-10-06)."""
+    from .records import Ledger
+
+    for e in reversed(Ledger(site).events()):
+        if e["type"] == "day.ended":
+            return (e["payload"].get("jobs") or {}).get("line")
+    return None
+
+
+def end_report_summary(site: Site, text: str) -> str:
+    """The Slack part of an end report: its first paragraph plus the day's jobs line (once)."""
+    head = summary(text)
+    line = jobs_line(site)
+    return f"{head}\n{line}" if line and "jobs today:" not in text else head
+
+
 def report(site: Site, actor: str, kind: str, text: str, wait: float = CONSULT_WAIT) -> dict:
     """Send a report along route(kind). `session` in the result means the desk delivers it in its reply."""
     _require_desk(site, actor)
@@ -874,7 +891,7 @@ def report(site: Site, actor: str, kind: str, text: str, wait: float = CONSULT_W
         elif d == "slack":
             out["slack"] = post(site, actor, body)
         elif d == "slack-summary":
-            out["slack"] = post(site, actor, summary(text))
+            out["slack"] = post(site, actor, end_report_summary(site, text) if kind == "end-report" else summary(text))
         elif d == "slack-pointer":
             first = text.splitlines()[0][:200] if text else kind
             out["slack"] = post(site, actor, f"[승인 대기] {first} (세션에서 Director 승인 요청 중)")

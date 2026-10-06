@@ -65,7 +65,8 @@ class ConfigDefaults(SiteCase):
                          "the preset's keys win; the package adds the ones it lacks")
         self.assertEqual(c["modules"], [{"id": "camri", "submit": {"record_arg": "--submission-record", "log_arg": "--log-dir",
                                                                    "after_arg": "--after", "items_arg": "--items"}}])
-        self.assertEqual(c["slurm"], {"account": "acct-x", "partition": "general"}, "untouched keys as before")
+        self.assertEqual(c["slurm"], {"account": "acct-x", "partition": "general", "each_level": "any"},
+                         "untouched keys as before (each_level any is the test preset's)")
         s = self.site()
         self.assertEqual(s.project_manifest(), "camri-manifest.yaml")
         self.assertEqual(containers.manifest_globs(s), ["camri-manifest.yaml", "*manifest*.yaml", "*manifest*.yml", "*manifest*.json"])

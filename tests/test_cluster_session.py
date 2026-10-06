@@ -3,6 +3,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -388,7 +389,7 @@ class ClusterSession(SiteCase):
         self._on_duty()
         w, script = self._job()
         self._sbatch("2026-10-03T14:00:00")
-        self.config(slurm={"account": "acct-x", "partition": "general", "time": "02:30:00"})
+        self.config(slurm={"account": "acct-x", "partition": "general", "time": "02:30:00", "each_level": "any"})
         run = ops.slurm_submit(self.s, "desk", w, script)
         self.assertEqual(run["payload"]["job_id"], "4242")
         self.assertEqual(run["payload"]["start_check"]["expected_end"], "2026-10-03T16:30:00-04:00")
@@ -403,7 +404,7 @@ class ClusterSession(SiteCase):
         self._on_duty()
         w, script = self._job()
         self._sbatch("2026-10-03T14:00:00")
-        self.config(slurm={"account": "acct-x", "partition": "general", "time": "01:00:00"})
+        self.config(slurm={"account": "acct-x", "partition": "general", "time": "01:00:00", "each_level": "any"})
         Path(script).write_text("#!/bin/sh\n#SBATCH --time=04:00:00\necho hi\n")
         with self.assertRaisesRegex(DurehError, r"--time 04:00:00 \(from the script\).*after today's end"):
             ops.slurm_submit(self.s, "desk", w, script)
@@ -506,8 +507,13 @@ class ClusterSession(SiteCase):
         other, script = self._job()  # not in the plan, no fix_for
         self._sbatch("2026-10-03T16:00:00")
         n = len(Ledger(self.s).load("run"))
-        with self.assertRaisesRegex(DurehError, r"after today's end 2026-10-03T17:00:00-04:00\. Nothing was submitted.*"
-                                                r"Plan items are allowed past the end time \(finish_plan\)\."):
+        # UR-20261006-01: the refusal names the way out, with the exact `day overtime` command for this WI
+        with self.assertRaisesRegex(DurehError, r"after today's end 2026-10-03T17:00:00-04:00\. Nothing was submitted; "
+                                                + re.escape(f"{other} is not in today's plan and has no overtime record: either "
+                                                            f"record the Director's approval with `dureh day overtime --items {other} "
+                                                            "--memo \"<Director's words>\"` (allowed while on-duty), add it to the "
+                                                            "plan's bundle (`dureh wi new --fix-for <plan WI>` or `--parent <plan WI>`), "
+                                                            "or shorten --time to end before 17:00.")):
             ops.slurm_submit(self.s, "desk", other, script, extra=["--time=02:00:00"])
         self.assertEqual(len(Ledger(self.s).load("run")), n)
         self.assertEqual(self._overtime(), [])
@@ -537,6 +543,30 @@ class ClusterSession(SiteCase):
         with contextlib.redirect_stderr(io.StringIO()):  # the stop lifted: allowed again
             self.assertTrue(ops.slurm_submit(self.s, "desk", w, script,
                                              extra=["--time=02:00:00"])["payload"]["start_check"]["past_end"])
+
+    def test_submit_of_a_director_pre_approved_item_past_the_end_is_allowed(self):
+        # UR-20261006-01: `day overtime` recorded while on duty takes effect at once in the start check too
+        plan_wi, _ = self._job()
+        self._on_duty(items=[plan_wi])
+        other, script = self._job()
+        fix, _ = self._job(fix_for=other)
+        self.assertTrue(workday.overtime(self.s, "desk", [other], "오늘 끝내세요")["payload"]["pre_approved"])
+        self._sbatch("2026-10-03T16:00:00")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            run = ops.slurm_submit(self.s, "desk", other, script, extra=["--time=02:00:00"])
+        chk = run["payload"]["start_check"]
+        self.assertEqual((run["payload"]["job_id"], chk["past_end"], chk["rule"], chk["allowed"]),
+                         ("4242", True, "director-overtime", "Director overtime (오늘 끝내세요)"))
+        self.assertIn("after today's end 17:00; allowed as Director overtime (오늘 끝내세요)", err.getvalue())
+        self.assertEqual(len(self._overtime()), 1, "no automatic record for a Director item")
+        # its fix follows, and a stop does not hold the Director's item (the gate's budget treatment)
+        share = {"daily_allowance": 10, "today_units": 10, "daily_share": 1 / 7, "today_fraction": 1.0,
+                 "week_percent": 20, "this_site_units": 10}
+        with mock.patch.object(workday, "usage", return_value=share), contextlib.redirect_stderr(io.StringIO()):
+            run = ops.slurm_submit(self.s, "desk", fix, script, extra=["--time=02:00:00"])
+        self.assertEqual(run["payload"]["start_check"]["allowed"], f"Director overtime (오늘 끝내세요, as a fix for {other})")
+        self.assertEqual(len(self._overtime()), 1)
 
     def test_submit_after_the_end_time_is_not_checked(self):
         # past-end (production clock): the gate governs; the start check applies to on-duty days only, as before

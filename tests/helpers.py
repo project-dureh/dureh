@@ -53,7 +53,8 @@ class SiteCase(unittest.TestCase):
     def preset(self, **extra) -> Path:
         data = {"name": "test-site", "persona": {"name": "Tester"},
                 "references": [{"path": str(self.ref), "name": "old-org"}],
-                "slurm": {"account": "acct-x", "partition": "general"},
+                # each_level any: the suites submit single plumbing jobs; the file-level loop rule has its own tests
+                "slurm": {"account": "acct-x", "partition": "general", "each_level": "any"},
                 "checks": {"runner": "local"}}  # never a real sbatch from a test; test_verify_slurm fakes it
         data.update(extra)
         p = self.tmp / "preset.json"

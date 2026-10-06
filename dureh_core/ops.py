@@ -1,6 +1,7 @@
 """Operational tools: status, slurm, push, path-refs, usage."""
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
@@ -344,7 +345,80 @@ ITEM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
-def validate_items(items: list[str]) -> list[str]:
+LEVELS = ("file", "session", "subject")  # finest first; config `slurm.each_level` (default file) is the loop rule's level
+BIDS_SKIP = {"derivatives", "sourcedata", "code", "stimuli", "phenotype", ".git", ".datalad", ".heudiconv"}
+SIDECAR_EXT = (".json", ".tsv", ".bval", ".bvec")
+FILE_ENTITY_RE = re.compile(r"(?:^|_)(sub|ses)-([A-Za-z0-9]+)")
+LOOP_RULE = ("workflows loop at file level (Director 2026-10-06): use --each-from-bids <dataset> --level file --suffix <s>, "
+             "or --single --reason '<why one job>'")
+
+
+def each_level(site: Site) -> str:
+    """Config `slurm.each_level`: the level workflow steps loop at (default `file`; Director 2026-10-06: 모든 workflow는
+    file 기준으로 loop). A coarser `--level` needs `--reason`, a bare single job `--single --reason`; `any` switches the
+    rule off."""
+    lv = str((site.config.get("slurm") or {}).get("each_level") or "file")
+    if lv not in (*LEVELS, "any"):
+        fail(f"config slurm.each_level must be one of {', '.join(LEVELS)} or any: {lv!r}")
+    return lv
+
+
+def file_entities(stem: str) -> dict:
+    """{sub, ses} labels of a BIDS file stem (`sub-01_ses-1_task-rest_run-01_bold`)."""
+    return {m.group(1): m.group(2) for m in FILE_ENTITY_RE.finditer(stem)}
+
+
+def _labels(raw, prefix: str) -> set[str] | None:
+    if not raw:
+        return None
+    out = {x[len(prefix):] if x.startswith(prefix) else x for r in raw for x in re.split(r"[,\s]+", str(r)) if x}
+    return out or None
+
+
+def bids_files(root: Path, suffix: str, datatype: str | None = None, match: str | None = None,
+               subs: set[str] | None = None, sess: set[str] | None = None) -> tuple[list[dict], int]:
+    """File-level items of a BIDS dataset from a names-only walk of its `sub-*` trees (nothing is opened, stat'ed
+    for content or fetched; a dangling git-annex symlink is a name like any other): the files whose BIDS suffix (the
+    last `_` part of the stem, the name before its first `.`) is `suffix`, optionally inside `datatype` directories
+    (func, anat, ...), matching `match` (a glob on the path relative to the dataset), of the `subs`/`sess` labels.
+    One item per stem: a sidecar (.json, .tsv, .bval, .bvec) never stands for the data file beside it. Returns the
+    rows {index, item, sub, ses, path} sorted by stem and the number of BIDS file names seen."""
+    rows: dict[str, dict] = {}
+    seen = 0
+    for sub in sorted(d.name for d in root.iterdir() if d.name.startswith("sub-") and d.is_dir()):
+        for dirpath, dirnames, filenames in os.walk(root / sub):
+            dirnames[:] = sorted(d for d in dirnames if d not in BIDS_SKIP and not d.startswith("."))
+            for name in sorted(filenames):
+                stem = name.split(".", 1)[0]
+                if name.startswith(".") or not stem.startswith("sub-") or "_" not in stem:
+                    continue
+                seen += 1
+                if stem.rsplit("_", 1)[-1] != suffix:
+                    continue
+                if datatype and os.path.basename(dirpath) != datatype:
+                    continue
+                rel = os.path.relpath(os.path.join(dirpath, name), root)
+                if match and not fnmatch.fnmatch(rel, match):
+                    continue
+                ents = file_entities(stem)
+                if subs is not None and ents.get("sub") not in subs:
+                    continue
+                if sess is not None and ents.get("ses") not in sess:
+                    continue
+                prev = rows.get(stem)
+                if prev is None or (prev["path"].endswith(SIDECAR_EXT) and not rel.endswith(SIDECAR_EXT)):
+                    rows[stem] = {"item": stem, "sub": ents.get("sub"), "ses": ents.get("ses"), "path": rel}
+    return [{"index": i, **rows[s]} for i, s in enumerate(sorted(rows))], seen
+
+
+def item_table(files: list[dict]) -> str:
+    """The file-level item table (the `.tsv` beside the item list; printed by `--dry-run`)."""
+    cols = ("index", "item", "sub", "ses", "path")
+    return "".join("\t".join(str(r.get(c) if r.get(c) is not None else "") for c in cols) + "\n"
+                   for r in ({c: c for c in cols}, *files))
+
+
+def validate_items(items: list[str], level: str | None = None) -> list[str]:
     if not items:
         fail("--each needs at least one item")
     bad = [i for i in items if not ITEM_RE.match(i)]
@@ -357,7 +431,7 @@ def validate_items(items: list[str]) -> list[str]:
         seen.add(i)
     if dup:
         fail(f"duplicate --each item(s): {', '.join(dup[:5])}")
-    items_level(items)
+    items_level(items, level)
     return items
 
 
@@ -391,20 +465,34 @@ def _inside_site(site: Site, raw: str, what: str) -> Path:
     return p
 
 
-def items_from_bids(site: Site, dataset: str, level: str = "subject") -> tuple[list[str], str]:
-    """Items from a BIDS dataset's directory names (inside the site; directory listing only): `sub-*` for
-    level subject, `sub-*/ses-*` as `sub-X_ses-Y` for level session. Returns (items, resolved dataset)."""
-    if level not in ("subject", "session"):
-        fail("--level must be subject or session")
+def items_from_bids(site: Site, dataset: str, level: str = "subject", suffix: str | None = None,
+                    datatype: str | None = None, match: str | None = None, subs=None, sess=None
+                    ) -> tuple[list[str], str, list[dict] | None]:
+    """Items from a BIDS dataset (inside the site; names only, nothing read): level `file` (Director 2026-10-06)
+    enumerates the files of BIDS suffix `suffix` (`bids_files`), item = the file stem; `subject` the `sub-*`
+    directories; `session` `sub-*/ses-*` as `sub-X_ses-Y`. Returns (items, resolved dataset, file rows | None)."""
+    if level not in LEVELS:
+        fail(f"--level must be one of {', '.join(LEVELS)}")
     root = _inside_site(site, dataset, "--each-from-bids")
     if not root.is_dir():
         fail(f"--each-from-bids: not a directory: {root}")
+    if level == "file":
+        if not suffix or not re.match(r"^[A-Za-z0-9]+$", suffix):
+            fail("--level file needs --suffix <BIDS suffix> (letters and digits, e.g. bold, T1w)")
+        files, seen = bids_files(root, suffix, datatype, match, _labels(subs, "sub-"), _labels(sess, "ses-"))
+        if not files:
+            filt = ", ".join(f"{k} {v}" for k, v in (("datatype", datatype), ("match", match), ("sub", subs), ("ses", sess)) if v)
+            fail(f"--each-from-bids --level file: no *_{suffix} file under {root}" + (f" ({filt})" if filt else "")
+                 + f"; {seen} BIDS file name(s) seen")
+        return validate_items([f["item"] for f in files], "file"), str(root), files
+    if any(x for x in (suffix, datatype, match, subs, sess)):
+        fail("--suffix, --datatype, --match, --sub and --ses go with --level file")
     subs = sorted(d.name for d in root.iterdir() if d.name.startswith("sub-") and d.is_dir())
     items = subs if level == "subject" else [f"{s}_{d.name}" for s in subs for d in sorted((root / s).iterdir())
                                              if d.name.startswith("ses-") and d.is_dir()]
     if not items:
         fail(f"--each-from-bids: no {'sub-*' if level == 'subject' else 'sub-*/ses-*'} directories in {root}")
-    return validate_items(items), str(root)
+    return validate_items(items), str(root), None
 
 
 def _get_run(led: Ledger, run_id: str) -> dict:
@@ -456,7 +544,8 @@ def _dep_job_ids(deps: list[dict]) -> list[str]:
 
 
 DEFAULT_ITEM_ENV = {"item": "DUREH_ITER", "by": "DUREH_ITER_BY", "index": "DUREH_ITER_INDEX",
-                    "sub": "DUREH_ITER_SUB", "ses": "DUREH_ITER_SES"}
+                    "sub": "DUREH_ITER_SUB", "ses": "DUREH_ITER_SES",
+                    "path": "DUREH_ITER_PATH", "root": "DUREH_ITER_ROOT"}  # path, root: file-level arrays only
 VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 SUBJECT_ITEM_RE = re.compile(r"^sub-([A-Za-z0-9]+)(?:_ses-([A-Za-z0-9]+))?$")
 
@@ -475,8 +564,10 @@ def item_entities(item: str) -> tuple[str, dict]:
                                                       else {"sub": m.group(1)})
 
 
-def items_level(items: list[str]) -> str:
-    """subject, session or plain; one array holds one level only."""
+def items_level(items: list[str], level: str | None = None) -> str:
+    """file (given: items are BIDS file stems, not parsed), subject, session or plain; one array holds one level only."""
+    if level == "file":
+        return "file"
     levels = {item_entities(i)[0] for i in items}
     if len(levels) > 1:
         fail(f"--each mixes {' and '.join(sorted(levels))} items in one array; submit one level per array")
@@ -485,9 +576,10 @@ def items_level(items: list[str]) -> str:
 
 def item_env(site: Site) -> dict:
     """Names the --each job gets the item, its index and its subject/session labels under: config
-    `slurm.each_env` {"item", "index", ["by"], ["sub"], ["ses"]} (the company's own names, e.g. CAMRI_SUBJECT;
-    an unmapped by/sub/ses is not exported), else DUREH_ITER, DUREH_ITER_BY, DUREH_ITER_INDEX, DUREH_ITER_SUB,
-    DUREH_ITER_SES (Director 2026-10-04). `by` is the array level: subject, session or plain."""
+    `slurm.each_env` {"item", "index", ["by"], ["sub"], ["ses"], ["path"], ["root"]} (the company's own names, e.g. CAMRI_SUBJECT;
+    an unmapped by/sub/ses/path/root is not exported), else DUREH_ITER, DUREH_ITER_BY, DUREH_ITER_INDEX,
+    DUREH_ITER_SUB, DUREH_ITER_SES, DUREH_ITER_PATH, DUREH_ITER_ROOT (Director 2026-10-04; path and root for file-level
+    arrays, 2026-10-06). `by` is the array level: file, subject, session or plain."""
     cfg = (site.config.get("slurm") or {}).get("each_env")
     if not cfg:
         return dict(DEFAULT_ITEM_ENV)
@@ -496,17 +588,21 @@ def item_env(site: Site) -> dict:
           and len(set(cfg.values())) == len(cfg))
     if not ok:
         fail('config slurm.each_env must be {"item": <NAME>, "by": <NAME>, "index": <NAME>, "sub": <NAME>, '
-             f'"ses": <NAME>}} (by, sub and ses optional) with different variable names: {cfg!r}')
+             f'"ses": <NAME>, "path": <NAME>, "root": <NAME>}} (by, sub, ses, path and root optional) with different '
+             f'variable names: {cfg!r}')
     return {k: cfg[k] for k in DEFAULT_ITEM_ENV if k in cfg}
 
 
-def item_lines(items: list[str], items_file: str | None, env: dict | None = None) -> list[str]:
+def item_lines(items: list[str], items_file: str | None, env: dict | None = None, level: str | None = None,
+               files: list[dict] | None = None, root: str | None = None) -> list[str]:
     """Shell lines that map $SLURM_ARRAY_TASK_ID to the item and export the item, the array level (`by`), its
-    index and its subject and session labels (empty when the item has none) under the configured names."""
+    index and its subject and session labels (empty when the item has none) under the configured names; a
+    file-level array (`level` file, `files` rows, dataset `root`) also exports the file's path relative to the
+    dataset and the dataset root."""
     import shlex
 
     env = env or DEFAULT_ITEM_ENV
-    ents = [item_entities(i)[1] for i in items]
+    ents = [file_entities(i) for i in items] if level == "file" else [item_entities(i)[1] for i in items]
     it, ix = env["item"], env["index"]
     arr = lambda vals: "(" + " ".join(shlex.quote(v) if v else "''" for v in vals) + ")"  # noqa: E731
     out = [f"# --each: {len(items)} item(s), array task i runs item i" + (f" (list: {items_file})" if items_file else ""),
@@ -516,17 +612,26 @@ def item_lines(items: list[str], items_file: str | None, env: dict | None = None
            f'export {it}="${{_DUREH_ITERS[$SLURM_ARRAY_TASK_ID]:-}}"',
            f'[ -n "${it}" ] || {{ echo "dureh: no item for array task $SLURM_ARRAY_TASK_ID" >&2; exit 98; }}']
     if env.get("by"):
-        out.append(f"export {env['by']}={items_level(items)}")
+        out.append(f"export {env['by']}={items_level(items, level)}")
     for key in ("sub", "ses"):
         if env.get(key):
-            out += [f"_DUREH_{key.upper()}=" + arr([e.get(key, "") for e in ents]),
+            out += [f"_DUREH_{key.upper()}=" + arr([e.get(key) or "" for e in ents]),
                     f'export {env[key]}="${{_DUREH_{key.upper()}[$SLURM_ARRAY_TASK_ID]}}"']
-    names = ", ".join(f"{env[k]}=${env[k]}" for k in DEFAULT_ITEM_ENV if env.get(k))
+    shown = [k for k in ("item", "by", "index", "sub", "ses") if env.get(k)]
+    if files is not None and env.get("path"):
+        out += ["_DUREH_PATH=" + arr([f["path"] for f in files]),
+                f'export {env["path"]}="${{_DUREH_PATH[$SLURM_ARRAY_TASK_ID]}}"']
+        shown.append("path")
+    if root and env.get("root"):
+        out.append(f"export {env['root']}={shlex.quote(str(root))}")
+        shown.append("root")
+    names = ", ".join(f"{env[k]}=${env[k]}" for k in shown)
     out.append(f'echo "dureh: array task: {names}" >&2')
     return out
 
 
-def _each_wrapper(script: Path, items: list[str], items_file: str, env: dict | None = None) -> str:
+def _each_wrapper(script: Path, items: list[str], items_file: str, env: dict | None = None, level: str | None = None,
+                  files: list[dict] | None = None, root: str | None = None) -> str:
     import shlex
 
     lines = script.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -535,7 +640,7 @@ def _each_wrapper(script: Path, items: list[str], items_file: str, env: dict | N
     directives = [ln for ln in lines if ln.strip().startswith("#SBATCH")]
     out = ["#!/bin/bash", *directives,
            f"# Generated by `dureh slurm submit --each`: runs {script} once per item (one array task each).",
-           *item_lines(items, items_file, env),
+           *item_lines(items, items_file, env, level, files, root),
            # absolute: the job runs in its --chdir, not where the script path was given
            "exec " + " ".join(shlex.quote(w) for w in interp) + f" {shlex.quote(os.path.abspath(script))} \"$@\""]
     return "\n".join(out) + "\n"
@@ -558,7 +663,13 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
                  module: str | None = None, rev: str | None = None, each: str | None = None,
                  after: list[str] | None = None, max_parallel: int | None = None,
                  items: list[str] | None = None, each_from_bids: str | None = None,
-                 level: str | None = None) -> dict:
+                 level: str | None = None, suffix: str | None = None, datatype: str | None = None,
+                 match: str | None = None, subs: list[str] | None = None, sess: list[str] | None = None,
+                 single: bool = False, reason: str | None = None) -> dict:
+    """Submit one scheduler job (or one array, `--each*`) for a dispatched WI and record the run. File-level loop
+    rule (Director 2026-10-06, config `slurm.each_level`, default file): a workflow step loops over files
+    (`--each-from-bids <dataset> --level file --suffix <s>`); a coarser `--level` needs `--reason`, a bare single
+    job `--single --reason`, a group step goes `--after` an array. `level`, `reason` and `single` are recorded."""
     from datetime import datetime, timezone
 
     led = Ledger(site)
@@ -571,17 +682,32 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
     if rev is not None and module is None:
         fail("--rev needs --module")
     extra = list(extra or [])
-    each_file = bids = None
+    each_file = bids = files = None
+    rule_level = each_level(site)
     if each is not None and each_from_bids is not None:
         fail("--each and --each-from-bids exclude each other")
     if level is not None and each_from_bids is None:
         fail("--level goes with --each-from-bids")
+    if any(x for x in (suffix, datatype, match, subs, sess)) and each_from_bids is None:
+        fail("--suffix, --datatype, --match, --sub and --ses go with --each-from-bids --level file")
     if each is not None:
         items, each_file = parse_items(site, each)
     elif each_from_bids is not None:
-        items, bids = items_from_bids(site, each_from_bids, level or "subject")
+        level = level or (rule_level if rule_level != "any" else "subject")
+        items, bids, files = items_from_bids(site, each_from_bids, level, suffix, datatype, match, subs, sess)
     elif items is not None:
         validate_items(items)
+    reason = (reason or "").strip() or None
+    if single and items is not None:
+        fail("--single is for a job without --each")
+    if single and not reason:
+        fail("--single needs --reason '<why one job>'")
+    if rule_level != "any":  # the file-level loop rule (Director 2026-10-06)
+        if items is None and not after and not single:
+            fail(LOOP_RULE)
+        if each_from_bids is not None and LEVELS.index(level) > LEVELS.index(rule_level) and not reason:
+            fail(f"--level {level} is coarser than the loop rule's level {rule_level} (config slurm.each_level; Director "
+                 f"2026-10-06: workflows loop at file level): add --reason '<why {level} level>'")
     if max_parallel is not None:
         if items is None:
             fail("--max-parallel needs --each")
@@ -622,14 +748,17 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         items_file = site_logs / f"each-{stamp}.items"
         array = {"job_id": None, "items": list(items), "count": len(items), "items_file": str(items_file),
-                 "env": item_env(site), "level": items_level(items)}
+                 "env": item_env(site), "level": items_level(items, "file" if files is not None else None)}
+        if files is not None:
+            array.update(table=str(items_file.with_suffix(".tsv")), files=len(files), root=bids)
     mod = None
     if module is not None:  # UR-20261004-04: the job runs against a pinned, read-only tree of modules/<m>
         from . import exectree
 
         mod = exectree.prepare(site, wi, rec["payload"].get("target"), module, rev, path, dry_run,
                                items=items, items_file=array["items_file"] if array else None,
-                               item_env=array["env"] if array else None)
+                               item_env=array["env"] if array else None, item_level=array["level"] if array else None,
+                               item_files=files, item_root=bids)
         warnings += mod["warnings"]
     for w in warnings:
         print(f"warning: {w}", file=sys.stderr)
@@ -640,7 +769,12 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
     cmd += extra + log_args + [job_file]
     payload = {"run_type": "slurm", "status": "not-run" if dry_run else "submitted", "command": cmd,
                "script_sha256": sha256_file(path), "script": str(path), "logs": str(logs),
-               "chdir": chdir, "log_out": log_out, "log_err": log_err, "sbatch_args": extra, **(extra_payload or {})}
+               "chdir": chdir, "log_out": log_out, "log_err": log_err, "sbatch_args": extra,
+               "level": array["level"] if array else ("group" if deps else "single"), **(extra_payload or {})}
+    if reason:
+        payload["reason"] = reason
+    if single:
+        payload["single"] = True
     if array is not None:
         payload["array"] = array
         if max_parallel:
@@ -648,7 +782,12 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
         if each_file:
             payload["each_file"] = each_file
         if bids:
-            payload["each_from_bids"] = {"dataset": bids, "level": level or "subject"}
+            payload["each_from_bids"] = {"dataset": bids, "level": level or "subject",
+                                         **{k: v for k, v in (("suffix", suffix), ("datatype", datatype), ("match", match),
+                                                              ("sub", subs), ("ses", sess)) if v},
+                                         **({"files": len(files)} if files is not None else {})}
+    if dry_run and files is not None:
+        print(item_table(files), end="", file=sys.stderr)  # the item table a --dry-run shows
     if deps:
         payload["after"] = deps
     if mod:
@@ -660,7 +799,7 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
         if mod:
             exectree.cleanup(Path(mod["module"]["tree"]))
         if array is not None:
-            for f in (array["items_file"], array.get("wrapper")):
+            for f in (array["items_file"], array.get("wrapper"), array.get("table")):
                 if f and os.path.isfile(f):
                     os.unlink(f)
 
@@ -668,8 +807,11 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
         if array is not None:
             site_logs.mkdir(parents=True, exist_ok=True)
             Path(array["items_file"]).write_text("".join(f"{i}\n" for i in items), encoding="utf-8")
+            if files is not None:
+                Path(array["table"]).write_text(item_table(files), encoding="utf-8")
             if array.get("wrapper"):
-                Path(array["wrapper"]).write_text(_each_wrapper(path, items, array["items_file"], array["env"]))
+                Path(array["wrapper"]).write_text(_each_wrapper(path, items, array["items_file"], array["env"],
+                                                                array["level"], files, bids))
                 Path(array["wrapper"]).chmod(0o755)
         try:
             check = _day_check(site, cmd, path, extra, cfg, wi=wi)
@@ -815,7 +957,8 @@ def ingest_submission(path: Path, root: Path, site: Site) -> dict:
             count = j.get("count")
             if count is not None and (not isinstance(count, int) or count != len(items)):
                 fail(f"submission record {path}: {where}.count {count!r} differs from its {len(items)} items")
-            job.update(items=items, count=len(items), level=_via_level(items, level or declared))
+            job.update(items=items, count=len(items), level=_via_level(items, level or declared),
+                       level_declared=bool(level or declared))
         jobs.append(job)
     known = {"schema_version", "schema", "tool", "tool_version", "submitted_at", "jobs", "items", "cwd", "manifest",
              "selection", "records", "level"}
@@ -840,8 +983,9 @@ def _via_day_check(site: Site, payload: dict, cfg: dict, wi: str | None = None):
     """Warn-only start check for a via run (decision 4, 2026-10-06): the job already exists, so after ingest the
     requested --time comes from the recorded script's #SBATCH line (else config slurm.time) and the expected start
     from `squeue --start`; when the expected end is past today's end the record says `late: true` (`past_end`
-    likewise) and the submit warns; for a plan item or a fix for one (`workday.in_plan`) the overtime is recorded
-    as for a plain submit. None when not in an on-duty workday, "skipped"/"unavailable" as `_day_check`."""
+    likewise) and the submit warns; for a plan item, a fix for one, or a WI in a Director overtime record
+    (`workday.past_end_rule`) the record says why and, for plan work, the overtime is recorded as for a plain
+    submit. None when not in an on-duty workday, "skipped"/"unavailable" as `_day_check`."""
     from datetime import datetime
 
     from . import cluster, workday
@@ -878,18 +1022,19 @@ def _via_day_check(site: Site, payload: dict, cfg: dict, wi: str | None = None):
            "past_end": ends > day_end, "note": "warn-only for --via: the module submitted the job before the check"}
     if out["late"]:
         d = workday.plan_open(site, d)
-        if workday.in_plan(site, wi, d):
-            if not site.observe:
+        rule = workday.past_end_rule(site, wi, d)
+        if rule:
+            name, reason = rule
+            if name == workday.FINISH_RULE and not site.observe:
                 workday.note_finish_overtime(site, d, wi)
-            out["rule"] = workday.FINISH_RULE
+            out.update(rule=name, allowed=reason)
             print(f"warning: workday: this job ends at {ends:%H:%M}, after today's end {day_end:%H:%M}; allowed as "
-                  "plan work (Director rule 2026-10-06)", file=sys.stderr)
+                  + ("plan work (Director rule 2026-10-06)" if name == workday.FINISH_RULE else reason), file=sys.stderr)
         else:
             print(f"warning: workday mode: job {payload['job_id']} is expected to start at {out['expected_start']} and, "
                   f"with --time {requested} (from the {source}), end at {out['expected_end']}, after today's end "
                   f"{d['end']}; it was submitted by the module and stays queued: cancel it with `slurm cancel` or let "
-                  "it run." + (" Plan items are allowed past the end time (finish_plan)."
-                               if workday.settings(site)["finish_plan"] else ""), file=sys.stderr)
+                  f"it run. {workday.way_out(site, wi, d, time_hint=f'{day_end:%H:%M}')}", file=sys.stderr)
     return out
 
 
@@ -986,6 +1131,12 @@ def slurm_submit_via(site: Site, actor: str, wi: str, via, record: str | None = 
                             "items_file": None}
         if a.get("max_parallel"):
             payload["max_parallel"] = a["max_parallel"]
+        if not a.get("level_declared"):  # the module owns the loop: not refused, but its level should be declared
+            note = (f"via: the submission record declares no item level for array job {a['job_id']} (recorded as "
+                    f"{a['level']}); the module should say `level: file` (workflows loop at file level, Director 2026-10-06)")
+            payload.setdefault("warnings", []).append(note)
+            print(f"warning: {note}", file=sys.stderr)
+    payload["level"] = payload["array"]["level"] if arrays else ("group" if deps else "single")
     payload["via"].update(record=record_path, schema_version=ingested["schema_version"], tool=ingested["tool"],
                           tool_version=ingested["tool_version"], submitted_at=ingested["submitted_at"],
                           cwd=ingested["cwd"], stdout_tail=(out or "")[-1000:])
@@ -1473,8 +1624,11 @@ def _day_check(site: Site, cmd: list[str], script: Path, extra: list[str], cfg: 
     """In workday mode, during an on-duty day: refuse a job whose expected start (`sbatch --test-only`)
     plus its requested --time ends after today's end. None when not checked, "unavailable" when the
     scheduler gave no usable answer (the job is submitted as usual). Finish-plan rule (Director, 2026-10-06):
-    a job for a plan item or a fix for one (`workday.in_plan`) is submitted anyway unless a hard stop holds;
-    the record says `past_end: true` and the overtime is recorded as the gate does (`note_finish_overtime`)."""
+    a job for a plan item or a fix for one is submitted anyway unless a hard stop holds; the record says
+    `past_end: true`, `rule: finish-plan`, and the overtime is recorded as the gate does (`note_finish_overtime`).
+    A WI in a Director overtime record of today (`day overtime`, pre-approved on duty or after the report;
+    UR-20261006-01) is submitted too, `rule: director-overtime`, with no automatic record and no stop (its
+    budget treatment is the gate's). One predicate decides for both, `workday.past_end_rule`."""
     import re
     from datetime import datetime
 
@@ -1512,21 +1666,85 @@ def _day_check(site: Site, cmd: list[str], script: Path, extra: list[str], cfg: 
         head = (f"workday mode: this {what} is expected to start at {start.isoformat(timespec='seconds')} and, with "
                 f"--time {requested} (from the {source}{', per task' if array else ''}), end at "
                 f"{ends.isoformat(timespec='seconds')}, after today's end {d['end']}.")
-        plan_rule = workday.settings(site)["finish_plan"]
         d = workday.plan_open(site, d)
-        if not (plan_rule and workday.in_plan(site, wi, d)):
-            fail(f"{head} Nothing was submitted; ask for a shorter --time, or submit it in the next approved day."
-                 + (" Plan items are allowed past the end time (finish_plan)." if plan_rule else ""))
-        stop = workday.hard_stop(site, d)
-        if stop:
-            fail(f"{head} It is plan work, but a stop holds ({stop['why']}). Nothing was submitted; finish running "
-                 "work and write the end report (`dureh day end`).")
-        if not site.observe:
-            workday.note_finish_overtime(site, d, wi)  # the harness records the overtime itself, once per item
-        print(f"warning: workday: this job ends at {ends:%H:%M}, after today's end {day_end:%H:%M}; allowed as plan "
-              "work (Director rule 2026-10-06)", file=sys.stderr)
-        out.update(past_end=True, rule=workday.FINISH_RULE)
+        rule = workday.past_end_rule(site, wi, d)
+        if not rule:
+            fail(f"{head} Nothing was submitted; {workday.way_out(site, wi, d, time_hint=f'{day_end:%H:%M}')}")
+        name, reason = rule
+        if name == workday.FINISH_RULE:
+            stop = workday.hard_stop(site, d)
+            if stop:
+                fail(f"{head} It is plan work, but a stop holds ({stop['why']}). Nothing was submitted; finish running "
+                     "work and write the end report (`dureh day end`).")
+            if not site.observe:
+                workday.note_finish_overtime(site, d, wi)  # the harness records the overtime itself, once per item
+        print(f"warning: workday: this job ends at {ends:%H:%M}, after today's end {day_end:%H:%M}; allowed as "
+              + ("plan work (Director rule 2026-10-06)" if name == workday.FINISH_RULE else reason), file=sys.stderr)
+        out.update(past_end=True, rule=name, allowed=reason)
     return out
+
+
+def day_jobs(site: Site, since: tuple[str, str] | None = None) -> dict:
+    """The end report's `jobs` section (Director 2026-10-06: 각 job에 대해 몇 개의 job으로 수행했는지, 각 job ID와 수행 command):
+    every scheduler run recorded for the day (after the day plan's record `since` = (ts, id), in ledger order; all
+    runs without it): `slurm submit` jobs and arrays, `--via` submissions, `verify --submit` jobs. Per run: WI,
+    kind, step (script) or via command, level, tasks and jobs, every job id (an array as its id with the task range
+    plus each task id), the exact command recorded at submit time, the state summary from the recorded states
+    (`slurm watch|status|wait`; the scheduler is not asked here), log dir. `line` is the Slack summary line."""
+    import shlex
+
+    led = Ledger(site)
+    runs = [r for r in led.load("run") if r["payload"].get("run_type") in ("slurm", "verify") and r["payload"].get("job_id")
+            and (since is None or (r["ts"], r["id"]) > tuple(since))]
+    latest: dict[str, dict] = {}
+    for e in led.events():
+        if e["type"] == "run.status" and e["payload"].get("run"):
+            latest[e["payload"]["run"]] = e["payload"]
+    out, t_tasks, t_jobs, t_failed = [], 0, 0, 0
+    for r in runs:
+        p, st = r["payload"], latest.get(r["id"]) or {}
+        via, arr, jobs = p.get("via"), p.get("array"), p.get("jobs") or []
+        if via:
+            kind, step = "via", via.get("text") or " ".join(via.get("command") or [])
+        else:
+            kind = "verify" if p["run_type"] == "verify" else "slurm"
+            step = os.path.basename(p["script"]) if p.get("script") else None
+        cmd = p.get("command")
+        command = shlex.join(str(c) for c in cmd) if isinstance(cmd, list) else cmd
+        ids: list[str] = []
+        if jobs:
+            for j in jobs:
+                jid = str(j["job_id"])
+                if j.get("kind") == "array" and j.get("count"):
+                    ids += [f"{jid}_[0-{j['count'] - 1}]", *(f"{jid}_{i}" for i in range(j["count"]))]
+                else:
+                    ids.append(jid)
+            n_jobs, tasks = len(jobs), sum(j.get("count") or 1 for j in jobs)
+        elif arr:
+            jid, n = str(p["job_id"]), int(arr.get("count") or len(arr.get("items") or []))
+            ids = [f"{jid}_[0-{n - 1}]", *(f"{jid}_{i}" for i in range(n))]
+            n_jobs, tasks = 1, n
+        else:
+            ids, n_jobs, tasks = [str(p["job_id"])], 1, 1
+        counts: dict[str, int] = {}
+        if st.get("counts"):
+            for k, v in st["counts"].items():
+                k = str(k).split()[0] if k else "UNKNOWN"
+                counts[k] = counts.get(k, 0) + int(v)
+        elif st.get("scheduler_state"):
+            counts[str(st["scheduler_state"]).split()[0]] = tasks
+        completed, cancelled = counts.get("COMPLETED", 0), counts.get("CANCELLED", 0)
+        failed = sum(v for k, v in counts.items() if k in TERMINAL_STATES and k not in ("COMPLETED", "CANCELLED"))
+        other = tasks - completed - cancelled - failed
+        level = p.get("level") or (arr or {}).get("level") or ("group" if p.get("after") else "single")
+        out.append({"run": r["id"], "wi": r["wi"], "kind": kind, "step": step, "level": level, "reason": p.get("reason"),
+                    "tasks": tasks, "jobs": n_jobs, "job_ids": ids, "command": command,
+                    "state": st.get("scheduler_state") or ("not-run" if p.get("status") == "not-run" else "no state recorded"),
+                    "states": {"completed": completed, "failed": failed, "cancelled": cancelled, "other": max(other, 0)},
+                    "logs": p.get("logs"), "submitted": r["ts"]})
+        t_tasks, t_jobs, t_failed = t_tasks + tasks, t_jobs + n_jobs, t_failed + failed
+    return {"runs": out, "count": len(out), "tasks": t_tasks, "jobs": t_jobs, "failed": t_failed,
+            "line": f"jobs today: {len(out)} runs, {t_tasks} tasks, {t_failed} failed"}
 
 
 LOG_DIR_DEFAULT = "logs/slurm"

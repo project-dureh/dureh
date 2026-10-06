@@ -269,7 +269,8 @@ def build(site: Site, actor: str, wi: str, recipe: str | None, module: str, rev:
                       encoding="utf-8")
     script.chmod(0o755)
     extra = {"container": {**static, "script_dir": str(work)}}
-    return slurm_submit(site, actor, wi, str(script), dry_run, None, extra_payload=extra)
+    return slurm_submit(site, actor, wi, str(script), dry_run, None, extra_payload=extra, single=True,
+                        reason="container image build: one job per image, not a workflow step")
 
 
 def _job_script(site: Site, work: Path, recipe_copy: Path | None, build_from: str, mod: Path, rev: str, cache: Path,

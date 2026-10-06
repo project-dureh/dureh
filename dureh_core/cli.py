@@ -337,7 +337,9 @@ def cmd_slurm(a):
                                  "drop --module/--rev or submit a plain script with --script --module")
             for flag, value in (("--script", a.script), ("--each", a.each), ("--each-from-bids", a.each_from_bids),
                                 ("--level", a.level), ("--max-parallel", a.max_parallel), ("--sbatch-arg", a.sbatch_arg),
-                                ("--resubmit-failed", a.resubmit_failed)):
+                                ("--resubmit-failed", a.resubmit_failed), ("--suffix", a.suffix), ("--datatype", a.datatype),
+                                ("--match", a.match), ("--sub", a.sub), ("--ses", a.ses), ("--single", a.single or None),
+                                ("--reason", a.reason)):
                 if value not in (None, []):
                     raise DurehError(f"{flag} does not go with --via: the module command renders and submits the job itself")
             _print(ops.slurm_submit_via(site, _actor(a), a.wi, a.via, record=a.record, after=a.after, dry_run=a.dry_run,
@@ -352,7 +354,9 @@ def cmd_slurm(a):
         else:
             _print(ops.slurm_submit(site, _actor(a), a.wi, a.script, a.dry_run, a.sbatch_arg, module=a.module,
                                     rev=a.rev, each=" ".join(a.each) if a.each else None, after=a.after,
-                                    max_parallel=a.max_parallel, each_from_bids=a.each_from_bids, level=a.level))
+                                    max_parallel=a.max_parallel, each_from_bids=a.each_from_bids, level=a.level,
+                                    suffix=a.suffix, datatype=a.datatype, match=a.match, subs=a.sub, sess=a.ses,
+                                    single=a.single, reason=a.reason))
     elif a.slurm_command == "status":
         _print(ops.slurm_status(site, _actor(a), a.run))
     elif a.slurm_command == "wait":
@@ -519,7 +523,10 @@ def cmd_day(a):
     elif c == "end":
         _print(workday.end(site, actor, a.done, a.problems or "", a.overtime or [], a.early or ""))
     elif c == "overtime":
-        _print(workday.overtime(site, actor, a.items, a.memo))
+        text = Path(a.plan).read_text(encoding="utf-8") if a.plan else None
+        _print(workday.overtime(site, actor, a.items, a.memo, plan_text=text, goal=a.goal))
+    elif c == "overtime-plan":
+        _print(workday.overtime_plan(site, actor, Path(a.file).read_text(encoding="utf-8"), a.goal, a.usage))
     elif c == "close":
         from . import sessions
 
@@ -878,9 +885,20 @@ def parser() -> argparse.ArgumentParser:
                         "the item, level, index, subject and session under config slurm.each_env names, default "
                         "DUREH_ITER, DUREH_ITER_BY, DUREH_ITER_INDEX, DUREH_ITER_SUB, DUREH_ITER_SES")
     x.add_argument("--each-from-bids", metavar="DATASET",
-                   help="items from a BIDS dataset inside the site: its sub-* directories (or sub-*/ses-* with "
-                        "--level session)")
-    x.add_argument("--level", choices=["subject", "session"], help="with --each-from-bids (default subject)")
+                   help="items from a BIDS dataset inside the site: with --level file (the default, Director 2026-10-06) "
+                        "one task per file of --suffix (names only, nothing read; the task gets the file's path and the "
+                        "dataset root under slurm.each_env path/root names, default DUREH_ITER_PATH, DUREH_ITER_ROOT); "
+                        "--level subject its sub-* directories, --level session sub-*/ses-* (both need --reason)")
+    x.add_argument("--level", choices=["file", "subject", "session"],
+                   help="with --each-from-bids (default: config slurm.each_level, file)")
+    x.add_argument("--suffix", help="with --level file: the BIDS suffix of the files to loop over (e.g. bold, T1w)")
+    x.add_argument("--datatype", help="with --level file: only files in this datatype directory (func, anat, dwi, ...)")
+    x.add_argument("--match", metavar="GLOB", help="with --level file: only files whose path relative to the dataset matches")
+    x.add_argument("--sub", nargs="+", metavar="LABEL", help="with --level file: only these subjects")
+    x.add_argument("--ses", nargs="+", metavar="LABEL", help="with --level file: only these sessions")
+    x.add_argument("--single", action="store_true",
+                   help="one job that is not a workflow step (needs --reason); workflow steps loop at file level")
+    x.add_argument("--reason", help="why one job (--single) or a level coarser than file (--level subject|session)")
     x.add_argument("--after", action="append", metavar="RUN",
                    help="start only after these runs completed (afterok on their job; an array waits for all tasks); "
                         "comma list or repeated")
@@ -1030,9 +1048,17 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--problems")
     x.add_argument("--overtime", nargs="*", help="WIs proposed for overtime (fixes and normalization tests only)")
     x.add_argument("--early", help="end before the end time, or with plan items still open: the Director's words")
-    x = add(dy, "overtime", cmd_day, "record the overtime items the Director accepted")
+    x = add(dy, "overtime", cmd_day, "record the overtime items the Director accepted (after the end report, or while "
+                                     "on-duty as soon as the Director approves: it takes effect at once)")
     x.add_argument("--items", nargs="+", required=True)
     x.add_argument("--memo", required=True)
+    x.add_argument("--plan", help="file with the overtime portion's plan (items, order, expected spawns, usage)")
+    x.add_argument("--goal", help="the overtime portion's goal")
+    x = add(dy, "overtime-plan", cmd_day, "record or update the overtime portion's plan once overtime started "
+                                          "(Director, 2026-10-06); the overtime approval covers it")
+    x.add_argument("--file", required=True, help="plan text: overtime items, order, expected agent spawns, rough usage")
+    x.add_argument("--goal")
+    x.add_argument("--usage", help="expected usage of the overtime portion (free text)")
     x = add(dy, "urgent", cmd_day, "data at risk: record the Director's release of WIs from the plan, clock and budget")
     x.add_argument("--wi", nargs="+", required=True)
     x.add_argument("--memo", required=True)

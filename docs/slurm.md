@@ -2,8 +2,10 @@
 
 ```
 dureh slurm submit --wi <WI> --script <job.sh> [--sbatch-arg ARG ...] [--module <m> [--rev <rev>]] [--dry-run]
-                   [--each <items> | --each-from-bids <dataset> [--level subject|session] | --resubmit-failed <run>]
-                   [--after <run>[,<run>...]] [--max-parallel N]
+                   [--each <items> | --each-from-bids <dataset> [--level file|subject|session] [--suffix S] [--datatype D]
+                                                                 [--match GLOB] [--sub L ...] [--ses L ...]
+                    | --resubmit-failed <run> | --single --reason '<why>']
+                   [--after <run>[,<run>...]] [--max-parallel N] [--reason '<why a coarser level>']
 dureh slurm submit --wi <WI> --via '<module command ...>' [--record <path>] [--via-module <m>]
                    [--after <run>[,<run>...]] [--dry-run]            # a module's own submit command (release 42)
 dureh slurm submit --wi <WI> --resubmit-failed <via run>             # re-runs the module command over the failed items
@@ -188,13 +190,51 @@ dureh verify --wi <WI> --collect [RUN]   # checker, re-dispatched: record the ve
   (which covers the desk-written part) and capped at 4 KB.
 - The synchronous `verify --wi` stays for the local runner and small checks. Never run verify in the background.
 
+## Workflows loop at file level: `--each-from-bids --level file` (release 42, Director 2026-10-06)
+
+Director, 2026-10-06: "회사가 아직 slurm의 병렬실행을 충분히 활용 못하고 있는 것 같습니다. 모든 workflow는 file 기준으로 loop를
+돌리라고 하고". Every workflow step is submitted as one array with one task per file, all files at once:
+
+```
+dureh slurm submit --wi <WI> --script <step.sh> --each-from-bids <dataset> --level file --suffix bold [--datatype func]
+                   [--match 'sub-01/*'] [--sub 01 02] [--ses 1] [--dry-run]
+```
+
+- **Enumeration is by name only.** The harness walks the dataset's `sub-*` trees (skipping `derivatives/`,
+  `sourcedata/`, `code/`, `stimuli/`, `phenotype/` and dot directories) and lists the files whose BIDS suffix (the
+  last `_` part of the stem, the name before its first `.`) is `--suffix`. Nothing is opened or fetched: a
+  git-annex file that is not fetched is a dangling symlink, which is a name like any other. Filters: `--datatype`
+  (the file's directory: `func`, `anat`, `dwi`...), `--match GLOB` on the path relative to the dataset, `--sub`
+  and `--ses` labels (with or without `sub-`/`ses-`). One item per stem: a sidecar (`.json`, `.tsv`, `.bval`,
+  `.bvec`) never stands for the data file beside it.
+- **Items** are the file stems (`sub-01_ses-1_task-rest_run-01_bold`), `array.level` = `file`. The task gets, under
+  the configured names (`slurm.each_env`; defaults `DUREH_ITER`, `DUREH_ITER_BY`, `DUREH_ITER_INDEX`,
+  `DUREH_ITER_SUB`, `DUREH_ITER_SES`), the stem, `file`, its index and the labels parsed from the stem, plus two
+  names for file-level arrays: `path` (default `DUREH_ITER_PATH`, the file's path relative to the dataset) and
+  `root` (default `DUREH_ITER_ROOT`, the absolute dataset root). A configured `each_env` exports `path`/`root`
+  only when it maps them.
+- **Files.** The item list `each-<ts>.items` and the table `each-<ts>.tsv` (`index item sub ses path`) are written
+  next to the wrapper in `logs/slurm/<WI>/`; `--dry-run` prints the table (stderr) and writes nothing. The record
+  keeps `array: {..., level: file, files, table, root}` and `each_from_bids: {dataset, level, suffix, datatype?,
+  match?, sub?, ses?, files}`.
+- **The loop rule** (config `slurm.each_level`, default `file`). A `slurm submit` for a step that is not
+  file-level is refused unless justified: a bare single job (no `--each*`, no `--after`) is refused with
+  "workflows loop at file level (Director 2026-10-06): use --each-from-bids <dataset> --level file --suffix <s>, or
+  --single --reason '<why one job>'"; `--level subject|session` needs `--reason '<why>'`; a group step `--after`
+  an array is allowed as a single job; a hand-picked `--each <items>` list is allowed. `--via` runs are not
+  refused (the module owns the loop): the module's declared level is recorded and a missing one is warned.
+  Container builds are single jobs by nature (recorded with their reason). The run record says `level`
+  (`file|session|subject|plain|group|single`), `reason` and `single`. `slurm.each_level: subject` makes subject
+  the norm (file stays allowed); `any` switches the rule off (the test suites' plumbing jobs).
+
 ## One job per subject: `--each`, `--after`, `--resubmit-failed` (release 26)
 
 Director's rule (2026-10-04): the unit of submission is one job per subject, all subjects submitted at once, and
 Slurm schedules them (no concurrency cap, no default `%N`). During development each step is submitted per
 subject and the next step starts only after every subject job of that step has finished; a workflow that chains
 several steps is also one job per subject; group-level steps start after all subject jobs finish. Never loop
-`slurm submit` by hand.
+`slurm submit` by hand. Since release 42 the unit is the file (above); subject and session arrays stay available
+with `--reason`.
 
 - **`--each <items>`** submits ONE Slurm array `--array=0-(N-1)`, one task per item. Items are a comma or space
   list (`--each sub-01,sub-02` or `--each sub-01 sub-02`) or `@file` (one item per line; blank lines and `#`
@@ -206,15 +246,17 @@ several steps is also one job per subject; group-level steps start after all sub
   (`sub-01_run-1`, `sub-01_ses-1_acq-x`). Every other item is plain and not parsed (`dim-20`, `SIGMA`,
   `JDRS001LNA`); its subject and session variables are exported empty. One level per array: mixing is refused.
   Recorded as `array.level` = `subject|session|plain`.
-- **`--each-from-bids <dataset> [--level subject|session]`** takes the items from the directory names of a BIDS
-  dataset inside the site: `sub-*/` (default) or `sub-*/ses-*/` as `sub-X_ses-Y`. Only the listing is read; it produces subject or session items only.
-  Recorded as `each_from_bids: {dataset, level}`.
+- **`--each-from-bids <dataset> --level subject|session`** takes the items from the directory names of a BIDS
+  dataset inside the site: `sub-*/` or `sub-*/ses-*/` as `sub-X_ses-Y`. Only the listing is read. The default
+  level is config `slurm.each_level` (`file`, above); these two need `--reason`. Recorded as
+  `each_from_bids: {dataset, level}`.
 - **Item mapping and names.** The job script runs once per task with five variables exported: the item, the
   array level (`by`: `subject|session|plain`, as `array.level`), its 0-based index in this run's list, and its
   subject and session labels without `sub-`/`ses-` (empty when the item has none). The names are the company's:
-  config `slurm.each_env` = `{"item": NAME, "by": NAME, "index": NAME, "sub": NAME, "ses": NAME}` (`by`, `sub`,
-  `ses` optional; only the configured names are exported). Without it the defaults are `DUREH_ITER`,
-  `DUREH_ITER_BY`, `DUREH_ITER_INDEX`, `DUREH_ITER_SUB`, `DUREH_ITER_SES`. The record keeps the names as
+  config `slurm.each_env` = `{"item": NAME, "by": NAME, "index": NAME, "sub": NAME, "ses": NAME, "path": NAME,
+  "root": NAME}` (`by`, `sub`, `ses`, `path`, `root` optional; only the configured names are exported; `path` and
+  `root` are set for file-level arrays). Without it the defaults are `DUREH_ITER`, `DUREH_ITER_BY`,
+  `DUREH_ITER_INDEX`, `DUREH_ITER_SUB`, `DUREH_ITER_SES`, `DUREH_ITER_PATH`, `DUREH_ITER_ROOT`. The record keeps the names as
   `array.env`. For camri-org: `"each_env": {"item": "CAMRI_ITER", "by": "CAMRI_ITER_BY", "index":
   "CAMRI_ITER_INDEX", "sub": "CAMRI_SUBJECT", "ses": "CAMRI_SESSION"}`. The harness writes the list to
   `logs/slurm/<WI>/each-<utc ts>.items` (fixed for the run) and a wrapper `each-<utc ts>.sbatch` next to it that

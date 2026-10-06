@@ -162,9 +162,9 @@ def _agent_file(site: Site, role, project: str | None = None) -> str:
                                 f" re-dispatches you when `dureh slurm watch` reports the job, and `{dureh} slurm status --run <run-id>`"
                                 f" then shows its final state (per item for `--each`). `{dureh} slurm wait --run <run-id>` only for"
                                 " a job expected to end within a few minutes.",
-                                f"- {SUBJECT_RULE} Items are `sub-<label>` (or `sub-<label>_ses-<label>` for session-level jobs);"
+                                f"- {SUBJECT_RULE} File-level items are BIDS file stems; subject/session items are `sub-<label>` (or `sub-<label>_ses-<label>`);"
                                 f" the script reads them from the environment: {_item_names_text(site)};"
-                                f" rerun only the failed subjects with `{dureh} slurm submit --wi <WI> --resubmit-failed <run> [--script <fixed.sh>]`.",
+                                f" rerun only the failed items with `{dureh} slurm submit --wi <WI> --resubmit-failed <run> [--script <fixed.sh>]`.",
                                 f"- Build a container image only with `{dureh} container build --wi <WI> --module <m> --rev <rev> [--name <name>]`"
                                 " (the recipe is the module's own `containers/<name or m>.def` at that rev; add"
                                 " `--recipe projects/<p>/code/containers/<name>.def` only for a project-local image);"
@@ -212,7 +212,8 @@ def _log_rule(site: Site) -> str:
 
 def _item_names_text(site: Site) -> str:
     n = _item_names(site)
-    what = {"item": "item", "by": "level", "index": "index", "sub": "subject label", "ses": "session label"}
+    what = {"item": "item", "by": "level", "index": "index", "sub": "subject label", "ses": "session label",
+            "path": "file path relative to the dataset (file level)", "root": "dataset root (file level)"}
     return ", ".join(f"`${v}` ({what[k]})" for k, v in n.items())
 
 
@@ -220,11 +221,16 @@ TESTS_RULE = ("- Test suites are scheduler work too: never run `pytest`, `python
               " suite in the session (one session hit its memory limit this way). The WI's declared checks run as one"
               " scheduler job when the checker runs `dureh verify --wi <WI>`; other computation goes through"
               " `dureh slurm submit`. Commit, stage, and let the check job report.")
-SUBJECT_RULE = ("A module with its own submit command is submitted through it: `slurm submit --wi <WI> --via '<module command>"
-                " ... --submit --detach'` (for example `camri run <pipeline> <step> --workflow <w> --level subject|session|file"
-                " [filters] --submit --detach`), one submission per step, the next step `--after <run>`; the module makes the"
-                " array and the item list, the harness records it. Plain scripts use `--each <items>` (one job per subject,"
-                " all at once, no cap). Group steps go `--after` the array. Never loop submits by hand.")
+SUBJECT_RULE = ("Every workflow step loops at file level (Director 2026-10-06): one array task per file, all files at once:"
+                " `slurm submit --wi <WI> --script <step.sh> --each-from-bids <dataset> --level file --suffix <bids suffix>"
+                " [--datatype <d>] [--match <glob>] [--sub ...]`; the task reads its file under the configured path name"
+                " (default `$DUREH_ITER_PATH`, relative to `$DUREH_ITER_ROOT`) and its stem under the item name. Subject or"
+                " session level only with `--reason '<why>'`; a single job only with `--single --reason`; group steps go"
+                " `--after <run>` of the array. A module with its own submit command is submitted through it: `slurm submit"
+                " --wi <WI> --via '<module command> ... --level file --submit --detach'` (for example `camri run <pipeline> <step>"
+                " --workflow <w> --level file [filters] --submit --detach`), one submission per step, the next step"
+                " `--after <run>`; the module makes the array and the item list, the harness records its level."
+                " Plain item lists (`--each <items>`) are for hand-picked items. Never loop submits by hand.")
 
 
 REPORT_RULE = (" Report with `{0} report --kind status|question|approval-exec|approval-light|alert|end-report --file <msg>`;"
@@ -407,8 +413,16 @@ def _claude_md(site: Site) -> str:
               " The stops are today's Claude usage at the daily share, data at risk, and the session job's wall time (status warns under 1 h): at a stop finish running work and write the end report."
               f" Write the end report when the plan is done (or a stop hit): `{dureh} day end --done ... --problems ... --overtime <WI>...`"
               " and give it to the Director (done, decisions with commits, errors, usage, what finished past the end time and how, proposed overtime)."
+              " The report lists every scheduler job of the day (`jobs`: per run the WI, step or via command, level, how many tasks and jobs, every job id,"
+              " the exact command, the recorded states, the log dir; Director 2026-10-06), and the Slack summary carries its `jobs today: N runs, M tasks, K failed` line."
               " Work outside the plan after the end time is refused unless the Director accepts it; proposed overtime beyond the plan is only for fixing errors from the day's work and normalization tests,"
-              f" and only for the items the Director accepts: `{dureh} day overtime --items <WI>... --memo \"<Director's words>\"`; then the close (item 13)."
+              f" and only for the items the Director accepts: `{dureh} day overtime --items <WI>... --memo \"<Director's words>\"`"
+              " (`day overtime` may be recorded while on-duty as soon as the Director approves an item outside the plan; it takes effect at once:"
+              " the item and its fixes pass the gate after the end time and the scheduler's end-time check); then the close (item 13)."
+              " At the start of overtime (the Director's approval, an early end, or the finish-plan rule's own record at the first work unit after the end time)"
+              " write a new plan for the overtime portion only (its items, order, expected agent spawns and rough usage) and record it with"
+              f" `{dureh} day overtime-plan --file <plan>` (or `day overtime --plan <plan>` with the approval), then carry it out;"
+              " the Director's overtime approval covers that plan (no second approval). The first overtime work unit may already be in flight; the next is refused until the plan is recorded."
               " The plan lists each work item with its expected agent spawns and a rough usage estimate, and the day total against the daily share."
               f" To fix a WI's checks, acceptance, constraints, outputs or stale base, amend it instead of replacing it: `{dureh} wi amend --wi <WI> --memo ... [--check ...] [--rebase]`"
               " (a stopped item re-opens; inside a day plan the plan approval covers it). A different goal, role or target is a new WI."

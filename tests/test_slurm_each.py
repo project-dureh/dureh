@@ -326,13 +326,165 @@ class Each(SiteCase):
             with self.assertRaisesRegex(DurehError, "slurm.each_env"):
                 self.submit(each="sub-01")
 
+    # ------------------------------------------------ file-level loop rule (Director 2026-10-06)
+    def loop_rule(self, level="file", **slurm):
+        cfg = json.loads((self.site_root / "config.json").read_text())
+        cfg["slurm"] = {**(cfg.get("slurm") or {}), "each_level": level, **slurm}
+        (self.site_root / "config.json").write_text(json.dumps(cfg))
+        self.s = self.site()
+
+    def bids_tree(self):
+        ds = self.proj / "rawbids"
+        files = ["sub-01/ses-1/func/sub-01_ses-1_task-rest_run-01_bold.nii.gz",
+                 "sub-01/ses-1/func/sub-01_ses-1_task-rest_run-01_bold.json",  # the sidecar shares the stem
+                 "sub-01/ses-1/anat/sub-01_ses-1_T1w.nii.gz",
+                 "sub-02/func/sub-02_task-rest_bold.nii.gz", "sub-02/func/sub-02_task-rest_events.tsv",
+                 "sub-02/anat/sub-02_T1w.nii.gz", "dataset_description.json", "participants.tsv",
+                 "derivatives/fmriprep/sub-01/func/sub-01_task-rest_desc-preproc_bold.nii.gz"]
+        for f in files:
+            (ds / f).parent.mkdir(parents=True, exist_ok=True)
+            (ds / f).write_text("")
+        # a git-annex file not fetched: a dangling symlink, a name like any other (nothing is read or stat'ed)
+        annex = ds / "sub-01/ses-2/func"
+        annex.mkdir(parents=True)
+        os.symlink("../../../.git/annex/objects/xx/yy/MD5-nothing.nii.gz", annex / "sub-01_ses-2_task-rest_run-01_bold.nii.gz")
+        (ds / ".datalad").mkdir()
+        return ds
+
+    def test_file_level_enumerates_bids_files_by_name(self):
+        self.loop_rule("file")
+        ds = self.bids_tree()
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            run = self.submit(each_from_bids=str(ds), level="file", suffix="bold")
+        p = run["payload"]
+        stems = ["sub-01_ses-1_task-rest_run-01_bold", "sub-01_ses-2_task-rest_run-01_bold", "sub-02_task-rest_bold"]
+        self.assertEqual((p["array"]["items"], p["array"]["level"], p["array"]["count"], p["array"]["files"], p["level"]),
+                         (stems, "file", 3, 3, "file"))
+        self.assertEqual(p["each_from_bids"], {"dataset": str(ds), "level": "file", "suffix": "bold", "files": 3})
+        self.assertIn("--array=0-2", self.calls()[-1])
+        items_file, table = Path(p["array"]["items_file"]), Path(p["array"]["table"])
+        self.assertEqual(items_file.read_text().split(), stems)
+        self.assertEqual(table.parent, items_file.parent)
+        rows = [ln.split("\t") for ln in table.read_text().splitlines()]
+        self.assertEqual(rows[0], ["index", "item", "sub", "ses", "path"])
+        self.assertEqual(rows[1], ["0", stems[0], "01", "1", "sub-01/ses-1/func/sub-01_ses-1_task-rest_run-01_bold.nii.gz"],
+                         "the data file, not its sidecar")
+        self.assertEqual(rows[3], ["2", stems[2], "02", "", "sub-02/func/sub-02_task-rest_bold.nii.gz"])
+        wrapper = Path(p["array"]["wrapper"]).read_text()
+        self.assertIn("export DUREH_ITER_BY=file", wrapper)
+        self.assertIn("_DUREH_PATH=(sub-01/ses-1/func/sub-01_ses-1_task-rest_run-01_bold.nii.gz "
+                      "sub-01/ses-2/func/sub-01_ses-2_task-rest_run-01_bold.nii.gz sub-02/func/sub-02_task-rest_bold.nii.gz)",
+                      wrapper)
+        self.assertIn('export DUREH_ITER_PATH="${_DUREH_PATH[$SLURM_ARRAY_TASK_ID]}"', wrapper)
+        self.assertIn(f"export DUREH_ITER_ROOT={ds}", wrapper)
+        self.assertIn("_DUREH_SUB=(01 01 02)", wrapper)
+        self.assertIn("_DUREH_SES=(1 2 '')", wrapper)
+        self.assertIn("DUREH_ITER_PATH=$DUREH_ITER_PATH, DUREH_ITER_ROOT=$DUREH_ITER_ROOT", wrapper)
+        self.assertEqual(err.getvalue(), "", "no table outside --dry-run")
+        # filters: datatype, match, subject and session labels (with or without their prefix)
+        self.assertEqual(self.submit(each_from_bids=str(ds), level="file", suffix="T1w", datatype="anat")["payload"]["array"]["items"],
+                         ["sub-01_ses-1_T1w", "sub-02_T1w"])
+        self.assertEqual(self.submit(each_from_bids=str(ds), level="file", suffix="bold", match="sub-01/*")["payload"]["array"]["items"],
+                         stems[:2])
+        self.assertEqual(self.submit(each_from_bids=str(ds), level="file", suffix="bold", subs=["sub-02"])["payload"]["array"]["items"],
+                         [stems[2]])
+        run = self.submit(each_from_bids=str(ds), level="file", suffix="bold", sess=["2"])
+        self.assertEqual((run["payload"]["array"]["items"], run["payload"]["each_from_bids"]["ses"]), ([stems[1]], ["2"]))
+        self.assertEqual(self.submit(each_from_bids=str(ds), level="file", suffix="events")["payload"]["array"]["items"],
+                         ["sub-02_task-rest_events"])
+        for kw, msg in (({"suffix": "dwi"}, r"no \*_dwi file under .*; 7 BIDS file name\(s\) seen"),
+                        ({"suffix": "bold", "datatype": "anat"}, r"no \*_bold file .*\(datatype anat\)"),
+                        ({}, "needs --suffix"), ({"suffix": "bo ld"}, "needs --suffix")):
+            with self.assertRaisesRegex(DurehError, msg):
+                self.submit(each_from_bids=str(ds), level="file", **kw)
+        with self.assertRaisesRegex(DurehError, "go with --level file"):
+            self.submit(each_from_bids=str(ds), level="subject", suffix="bold", reason="x")
+        with self.assertRaisesRegex(DurehError, "go with --each-from-bids"):
+            self.submit(each="sub-01", suffix="bold")
+        # the company's own names: path and root are exported only when mapped
+        self.loop_rule("file", each_env={"item": "CAMRI_ITEM", "index": "CAMRI_IDX", "path": "CAMRI_FILE", "root": "CAMRI_ROOT"})
+        run = self.submit(each_from_bids=str(ds), level="file", suffix="bold")
+        wrapper = Path(run["payload"]["array"]["wrapper"]).read_text()
+        self.assertIn('export CAMRI_FILE="${_DUREH_PATH[$SLURM_ARRAY_TASK_ID]}"', wrapper)
+        self.assertIn(f"export CAMRI_ROOT={ds}", wrapper)
+        self.assertNotIn("DUREH_ITER_", wrapper)
+        self.loop_rule("file", each_env={"item": "CAMRI_ITEM", "index": "CAMRI_IDX"})
+        wrapper = Path(self.submit(each_from_bids=str(ds), level="file", suffix="bold")["payload"]["array"]["wrapper"]).read_text()
+        self.assertNotIn("_DUREH_PATH", wrapper)
+        # --dry-run prints the item table (stderr) and submits nothing
+        before = len(self.calls())
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            run = self.submit(each_from_bids=str(ds), level="file", suffix="bold", dry_run=True)
+        self.assertEqual(run["payload"]["status"], "not-run")
+        self.assertEqual(err.getvalue().splitlines()[0], "index\titem\tsub\tses\tpath")
+        self.assertIn(f"2\t{stems[2]}\t02\t\tsub-02/func/sub-02_task-rest_bold.nii.gz", err.getvalue())
+        self.assertEqual(len(self.calls()), before)
+        self.assertFalse(Path(run["payload"]["array"]["table"]).exists())
+
+    def test_loop_rule_refuses_bare_single_jobs_and_coarser_levels(self):
+        import re
+
+        self.loop_rule("file")
+        ds = self.bids_tree()
+        with self.assertRaisesRegex(DurehError, "^" + re.escape(ops.LOOP_RULE) + "$"):
+            self.submit()
+        self.assertFalse((self.fake / "sbatch.args").exists(), "nothing submitted")
+        with self.assertRaisesRegex(DurehError, "--single needs --reason"):
+            self.submit(single=True)
+        run = self.submit(single=True, reason="one merge job over every subject's output")
+        self.assertEqual((run["payload"]["level"], run["payload"]["reason"], run["payload"]["single"]),
+                         ("single", "one merge job over every subject's output", True))
+        with self.assertRaisesRegex(DurehError, "--single is for a job without --each"):
+            self.submit(each="sub-01", single=True, reason="x")
+        # the default level of --each-from-bids is the rule's level; coarser levels need a reason
+        self.assertEqual(self.submit(each_from_bids=str(ds), suffix="bold")["payload"]["array"]["level"], "file")
+        with self.assertRaisesRegex(DurehError, r"--level subject is coarser than the loop rule's level file .*--reason"):
+            self.submit(each_from_bids=str(ds), level="subject")
+        with self.assertRaisesRegex(DurehError, "--level session is coarser"):
+            self.submit(each_from_bids=str(ds), level="session")
+        run = self.submit(each_from_bids=str(ds), level="subject", reason="the step is per-subject registration")
+        self.assertEqual((run["payload"]["array"]["items"], run["payload"]["level"], run["payload"]["reason"]),
+                         (["sub-01", "sub-02"], "subject", "the step is per-subject registration"))
+        # a hand-picked --each list and a group step --after an array are allowed
+        arr = self.submit(each="sub-01,sub-02")
+        self.assertEqual(arr["payload"]["level"], "subject")
+        group = self.submit(after=[arr["id"]])
+        self.assertEqual((group["payload"]["level"], group["payload"].get("single")), ("group", None))
+        # config slurm.each_level: subject makes subject the norm (file stays finer, allowed); any switches the rule off
+        self.loop_rule("subject")
+        self.assertEqual(self.submit(each_from_bids=str(ds))["payload"]["array"]["level"], "subject")
+        self.assertEqual(self.submit(each_from_bids=str(ds), level="file", suffix="bold")["payload"]["level"], "file")
+        with self.assertRaisesRegex(DurehError, re.escape(ops.LOOP_RULE)):
+            self.submit()
+        self.loop_rule("any")
+        self.assertEqual(self.submit()["payload"]["level"], "single")
+        self.loop_rule("nope")
+        with self.assertRaisesRegex(DurehError, "slurm.each_level must be one of"):
+            self.submit()
+        # the CLI: --level file --suffix, --single --reason
+        from dureh_core import cli
+
+        self.loop_rule("file")
+        base = ["--site", str(self.site_root), "slurm", "submit", "--wi", self.w, "--actor", "pipeline-runner",
+                "--script", str(self.script)]
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(cli.main([*base, "--each-from-bids", str(ds), "--level", "file", "--suffix", "bold",
+                                       "--datatype", "func", "--sub", "sub-01", "--dry-run"]), 0)
+            self.assertEqual(cli.main([*base, "--single", "--reason", "one job"]), 0)
+            self.assertNotEqual(cli.main([*base]), 0)
+        runs = [r["payload"] for r in self.led.load("run") if r["wi"] == self.w][-2:]
+        self.assertEqual((runs[0]["each_from_bids"]["sub"], runs[0]["array"]["count"], runs[1]["level"], runs[1]["reason"]),
+                         (["sub-01"], 2, "single", "one job"))
+
     def test_each_from_bids_lists_subject_or_session_directories(self):
         ds = self.proj / "rawbids"
         for d in ("sub-01/ses-1", "sub-01/ses-2", "sub-02/ses-1", "sub-03"):
             (ds / d).mkdir(parents=True)
         (ds / "sub-04.txt").write_text("not a directory")
         (ds / "derivatives").mkdir()
-        run = self.submit(each_from_bids=str(ds))
+        run = self.submit(each_from_bids=str(ds))  # slurm.each_level any (tests): the old default, subject
         self.assertEqual(run["payload"]["array"]["items"], ["sub-01", "sub-02", "sub-03"])
         self.assertEqual(run["payload"]["each_from_bids"], {"dataset": str(ds), "level": "subject"})
         run = self.submit(each_from_bids=str(ds), level="session")

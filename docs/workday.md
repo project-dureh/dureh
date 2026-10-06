@@ -66,8 +66,35 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    for one that would end after the end time is submitted anyway (the run's `start_check` says `past_end: true`,
    the same `day.overtime` record is written, the submit warns) unless a stop holds, while a job outside the plan
    is refused as before. New work outside the plan stays refused after the end time; the Director's explicit
-   `dureh day overtime --items <WI>... --memo "..."` still admits it. `dureh day status` shows
+   `dureh day overtime --items <WI>... --memo "..."` admits it. `dureh day status` shows
    `end time passed HH:MM; finishing the plan (N items open: ...)`, or `the plan is done; write the end report`.
+   **Overtime pre-approval (release 42, UR-20261006-01).** Director, 2026-10-06: "초과근무 조건을 퇴근 직후 진행하는데
+   문제가 있어 보이네요." `day overtime` no longer waits for the end report: while on duty, or while finishing the plan,
+   the desk records the Director's approval of an item outside the plan at once (`day.overtime` with
+   `pre_approved: true`, the Director's memo, `at`, `phase`); a second call appends items. It takes effect at once:
+   the item and its fixes (`--fix-for`/`--parent`) pass the gate after the end time and the scheduler start check
+   while on duty, like plan items; a Director item is not held by the budget or a stop, as before. One predicate
+   decides for the gate and the start check, `workday.past_end_rule(site, wi)` / `allowed_past_end` (reason
+   "plan item", "fix for WI-x" or "Director overtime (<memo>)"), so they cannot disagree; the automatic
+   `day.overtime` record is written for plan items only (Director items have their record; a start check past the
+   end says `rule: director-overtime`). A refusal names the way out: "WI-0128 is not in today's plan and has no
+   overtime record: either record the Director's approval with `dureh day overtime --items WI-0128 --memo
+   "<Director's words>"` (allowed while on-duty), add it to the plan's bundle, or shorten --time to end before
+   HH:MM." With the day ended and its plan done, overtime is still agreed in the end report.
+   **Overtime plan (release 42).** Director, 2026-10-06: "회사는 새로 오늘 초과근무분의 근무계획을 새로 작성하고, 초과근무를
+   수행하라고 하세요." When overtime starts (the Director's approval, an early end, or the finish-plan rule's own
+   record at the first work unit after the end time) the desk writes a new plan for the overtime portion only:
+   its items, their order, the expected agent spawns and rough usage. It is recorded with the approval
+   (`day overtime ... --plan <file> [--goal G]`, kept as `overtime_plan`/`goal` in the record) or afterwards with
+   `dureh day overtime-plan --file <plan> [--goal G] [--usage U]` (`day.overtime-plan` {plan, goal, items: the
+   current overtime items, Director and automatic, expected_usage, updates}); the newest counts. The Director's
+   overtime approval covers that plan; there is no second approval. The gate: once overtime started and no
+   overtime plan exists, the first overtime work unit is admitted (the gate marks it, `day.overtime-started`) and
+   the next are refused with "overtime plan missing: write the overtime portion's plan and record it with
+   `dureh day overtime-plan --file <plan>` (Director, 2026-10-06), then continue." Status shows
+   `overtime: N items (...), plan recorded HH:MM` or `plan missing` with that warning; the end report's `past_end`
+   section carries the overtime plan (`overtime_plan`), the plan-rule items with outcomes (`items`) and the
+   Director's items with outcomes and memos (`director`, `director_memos`).
 5. **Stops.** Three stops end a day being finished past its end time, enforced as during the day: today's Claude
    usage at the daily share (no new agent), data at risk (`day urgent`: tell the Director at once), and the session
    job's wall time (status warns and the stop applies under 1 h left; the gate does not refuse on it, there is no
@@ -78,7 +105,15 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    anyway). At the end time with the plan done it is written as before. The report gains a `past_end` section
    ("finished past the end time"): the items the rule carried past the end time with their outcomes, the stop if
    one hit. Overtime beyond the plan is only for fixing errors from the day's work and normalization tests, and only
-   for the items the Director accepts: `dureh day overtime --items <WI>... --memo "..."`.
+   for the items the Director accepts: `dureh day overtime --items <WI>... --memo "..."` (recorded while on duty as
+   soon as the Director approves, or after the report). **Jobs of the day (release 42).** Director, 2026-10-06:
+   "일과가 끝날 때 각 job에 대해 몇 개의 job으로 수행했는지, 각 job ID와 수행 command를 보고서에 작성하라고 해주세요." The report
+   gains a `jobs` section: every scheduler run recorded since the day plan (`slurm submit` jobs and arrays, `--via`
+   submissions, `verify --submit` jobs), each with its WI, step (script) or via command, level, the number of
+   tasks and of jobs, every job id (an array as `<id>_[0-N]` plus each task id), the exact command recorded at
+   submit time, the state summary from the recorded states (`slurm watch|status|wait`; the scheduler is not asked
+   at day end) and the log dir, plus the totals and the line `jobs today: N runs, M tasks, K failed`. The Slack
+   end-report summary (`dureh slack report --kind end-report`: the first paragraph) carries that line.
 7. **Close.** In this order: the desk stops every Monitor and background task, writes the handoff
    (`state/memory/handoff.md`), runs `dureh day close`, and then does nothing more. `day close` checks that no
    agent runs and the handoff is fresh, records `day.closed`, and releases the session job as described in
@@ -187,8 +222,9 @@ usage against the daily share, by default 1/7 of the weekly allowance (`workday.
   calibration is written to `<exchange>/usage-budget.json` and every site and upstream read it.
 - Limits: sessions on other machines (web, app) leave no local transcript and are not counted;
   the rolling seven days differ from the provider's weekly reset. Recalibrate now and then.
-- Overtime items the Director accepted (`day overtime`) are not held back by the budget; plan items finished past
-  the end time under the finish-plan rule are (the usage share is a stop). The end report shows the usage.
+- Overtime items the Director accepted (`day overtime`, before or after the end report) are not held back by the
+  budget; plan items finished past the end time under the finish-plan rule are (the usage share is a stop). The
+  end report shows the usage.
 - `dureh day status` shows the account total and this site's part (sessions whose working directory is
   inside the site), so one site cannot silently use up the day for the others.
 
