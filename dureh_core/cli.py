@@ -69,6 +69,11 @@ def cmd_adapter_sync(a):
             os.execv(str(exe), [str(exe), "--site", str(site.root), "adapter", "sync"])
     old_root = (site.config.get("harness") or {}).get("root")
     stored_site_root = site.stored_root
+    from .install import apply_config_defaults
+
+    added = apply_config_defaults(site)  # UP-0069: package config_defaults the site's config.json lacks (added once)
+    if added:
+        print(f"config.json: added from the package's config_defaults: {', '.join(added)}")
     m = claude_code.generate(site)
     print(f"generated {len(m['files'])} files for claude-code")
     from .projectgen import generate_projects
@@ -326,7 +331,20 @@ def cmd_slurm(a):
 
     site = _site(a)
     if a.slurm_command == "submit":
-        if a.resubmit_failed:
+        if a.via is not None:
+            if a.module or a.rev:
+                raise DurehError("--module with --via is phase 2 (not yet): the module's own jobs run its live checkout; "
+                                 "drop --module/--rev or submit a plain script with --script --module")
+            for flag, value in (("--script", a.script), ("--each", a.each), ("--each-from-bids", a.each_from_bids),
+                                ("--level", a.level), ("--max-parallel", a.max_parallel), ("--sbatch-arg", a.sbatch_arg),
+                                ("--resubmit-failed", a.resubmit_failed)):
+                if value not in (None, []):
+                    raise DurehError(f"{flag} does not go with --via: the module command renders and submits the job itself")
+            _print(ops.slurm_submit_via(site, _actor(a), a.wi, a.via, record=a.record, after=a.after, dry_run=a.dry_run,
+                                        via_module=a.via_module))
+        elif a.record is not None or a.via_module is not None:
+            raise DurehError("--record and --via-module go with --via")
+        elif a.resubmit_failed:
             if a.each or a.each_from_bids:
                 raise DurehError("--resubmit-failed takes the items from the run; drop --each")
             _print(ops.slurm_resubmit_failed(site, _actor(a), a.resubmit_failed, a.script, a.dry_run, a.sbatch_arg,
@@ -838,9 +856,20 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--json", action="store_true")
 
     sl = sub.add_parser("slurm", help="scheduler jobs").add_subparsers(dest="slurm_command", required=True)
-    x = add(sl, "submit", cmd_slurm, "submit and record a job for a dispatched WI (one job per subject: --each)")
+    x = add(sl, "submit", cmd_slurm, "submit and record a job for a dispatched WI (one job per subject: --each; "
+                                      "a module's own submit command: --via)")
     x.add_argument("--wi", required=True)
     x.add_argument("--script", help="job script (required, except with --resubmit-failed: default the run's script)")
+    x.add_argument("--via", metavar="COMMAND",
+                   help="run this module submit command (one quoted string) in the WI's job root with the site environment "
+                        "and ingest the submission record it writes (docs/slurm.md \"via\"); the record path comes from "
+                        "--record, else config modules[<m>].submit.record_arg, else the last stdout line "
+                        "`submission-record: <path>`. Not with --script/--each/--module (--module + --via is phase 2)")
+    x.add_argument("--record", metavar="PATH", help="with --via: the submission record the command writes (relative to "
+                                                    "the job root); passed to the module when record_arg is configured")
+    x.add_argument("--via-module", metavar="MODULE",
+                   help="with --via: the config modules[] entry whose `submit` options the harness may add (default: "
+                        "the entry whose cli/id is the command's first word; needed for wrapped commands such as `uv run`)")
     x.add_argument("--each", nargs="+", metavar="ITEMS",
                    help="one array task per item (all at once, no cap): `sub-01,sub-02`, `sub-01 sub-02` or @file "
                         "(one per line, # comments; inside the site); items are sub-<l>, sub-<l>_ses-<l> or plain labels, one level per array; the job gets "
@@ -854,7 +883,8 @@ def parser() -> argparse.ArgumentParser:
                    help="start only after these runs completed (afterok on their job; an array waits for all tasks); "
                         "comma list or repeated")
     x.add_argument("--resubmit-failed", metavar="RUN",
-                   help="a new array over the items of an --each run whose task did not complete")
+                   help="a new array over the items of an --each run whose task did not complete; for a --via run the "
+                        "module command runs again with its configured items_arg @<failed items file>")
     x.add_argument("--max-parallel", type=int, metavar="N",
                    help="with --each: at most N tasks at once (default: none; Slurm schedules)")
     x.add_argument("--sbatch-arg", action="append")
@@ -900,7 +930,7 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--actor")
     x = add(co, "retire", cmd_container, "delete an image no project manifest pins (desk or data-steward); its provenance "
             "moves to <cache>/retired/ and container.retired is recorded")
-    x.add_argument("--sif", required=True, help="image file name in the cache, e.g. camri_2.0.0a1-2396359.sif")
+    x.add_argument("--sif", required=True, help="image file name in the cache, e.g. <module>_<version>-<rev7>.sif")
     x.add_argument("--reason", required=True)
     x.add_argument("--wi", help="the data-steward's dispatched WI to record it on (optional)")
     x.add_argument("--dry-run", action="store_true", help="list pinning manifests and what would be removed")

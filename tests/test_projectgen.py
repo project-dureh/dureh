@@ -77,6 +77,11 @@ class ProjectGen(SiteCase):
         git(self.proj, "add", "-A")
         git(self.proj, "commit", "-qm", "init")
         _config_add(self.s, "projects", {"id": "lna", "path": "projects/lna"})
+        _config_add(self.s, "modules", {"id": "camri", "path": "modules/camri"})
+        cfg = json.loads((self.site_root / "config.json").read_text())
+        cfg["project"] = {"manifest": "camri-manifest.yaml", "pipeline_version_key": "camri_version",
+                          "derivative_entry": "{family}_camri_{species}_{suffix}"}  # UP-0069: company values are config
+        (self.site_root / "config.json").write_text(json.dumps(cfg))
         self.s = self.site()
 
     def test_generates_agents_for_project_roles_and_commits(self):

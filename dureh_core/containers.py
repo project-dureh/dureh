@@ -36,13 +36,25 @@ def _cfg(site: Site) -> dict:
     return site.config.get("containers") or {}
 
 
+def cache_env(site: Site) -> str | None:
+    """The env var that names the cache when `containers.cache` is unset: config `containers.cache_env`
+    (default DUREH_CONTAINER_CACHE; null = no env lookup). UP-0069: the company's name is config, not code."""
+    name = site.container_setting("cache_env")
+    return str(name) if name else None
+
+
+def _no_cache_hint(site: Site) -> str:
+    var = cache_env(site)
+    return "no container cache configured: set config.json `containers.cache`" + (f" (or env.vars {var})" if var else "")
+
+
 def cache_dir(site: Site) -> Path | None:
-    """The container cache: config `containers.cache`, else the site env var CAMRI_CONTAINER_CACHE
+    """The container cache: config `containers.cache`, else the site env var named by `containers.cache_env`
     (config `env.vars` or the process environment); relative paths are under the site. None when unset."""
     raw = _cfg(site).get("cache")
-    if not raw:
-        raw = ((site.config.get("env") or {}).get("vars") or {}).get("CAMRI_CONTAINER_CACHE") \
-            or os.environ.get("CAMRI_CONTAINER_CACHE")
+    var = cache_env(site)
+    if not raw and var:
+        raw = ((site.config.get("env") or {}).get("vars") or {}).get(var) or os.environ.get(var)
     if not raw:
         return None
     p = Path(site.expand(str(raw)))
@@ -209,7 +221,7 @@ def build(site: Site, actor: str, wi: str, recipe: str | None, module: str, rev:
         fail(f"invalid version {version!r}: letters, digits and . _ + - only")
     cache = cache_dir(site)
     if cache is None:
-        fail("no container cache configured: set config.json `containers.cache` (or env.vars CAMRI_CONTAINER_CACHE)")
+        fail(_no_cache_hint(site))
     if not cache.is_dir():
         fail(f"container cache directory does not exist: {cache}")
     sif = f"{name}_{version}-{full[:7]}.sif"
@@ -394,18 +406,24 @@ def status(site: Site, actor: str, wi: str) -> dict:
 
 # ------------------------------------------------------------------ retire (UR-20261004-03 item 3)
 
-MANIFEST_GLOBS = ("camri-manifest.yaml", "*manifest*.yaml", "*manifest*.yml", "*manifest*.json")
+def manifest_globs(site: Site) -> list[str]:
+    """Top-level project files an image may be pinned in: config `project.manifest` first (the one manifest the
+    harness reads, see projectgen), then config `containers.manifest_globs` (default `*manifest*.{yaml,yml,json}`)."""
+    globs = site.container_setting("manifest_globs")
+    if not isinstance(globs, list) or not all(isinstance(g, str) and g and "/" not in g for g in globs):
+        fail(f"config containers.manifest_globs must be a list of file name patterns: {globs!r}")
+    name = site.project_manifest()
+    return ([name] if name else []) + [g for g in globs if g != name]
 
 
 def _manifests(site: Site) -> list[Path]:
-    """The project manifests an image may be pinned in: each `projects/<p>/camri-manifest.yaml` (the one manifest
-    the harness reads, see projectgen) and any other top-level `*manifest*.{yaml,yml,json}` of a project."""
+    """The project manifests an image may be pinned in (see `manifest_globs`), one path once."""
     root = site.root / "projects"
     found: list[Path] = []
     if not root.is_dir():
         return found
     for proj in sorted(p for p in root.iterdir() if p.is_dir()):
-        for pattern in MANIFEST_GLOBS:
+        for pattern in manifest_globs(site):
             for f in sorted(proj.glob(pattern)):
                 if f.is_file() and f not in found:
                     found.append(f)
@@ -446,10 +464,10 @@ def retire(site: Site, actor: str, sif_name: str, reason: str, dry_run: bool = F
         if actor != "desk" and led.wi_status(wi)["status"] not in ("dispatched", "rework"):
             fail(f"{wi} is not dispatched")
     if "/" in sif_name or os.sep in sif_name or not NAME_RE.match(sif_name) or not sif_name.endswith(".sif"):
-        fail(f"--sif takes an image file name in the cache, such as camri_2.0.0a1-2396359.sif (no paths): {sif_name!r}")
+        fail(f"--sif takes an image file name in the cache, such as <module>_<version>-<rev7>.sif (no paths): {sif_name!r}")
     cache = cache_dir(site)
     if cache is None:
-        fail("no container cache configured: set config.json `containers.cache` (or env.vars CAMRI_CONTAINER_CACHE)")
+        fail(_no_cache_hint(site))
     if not cache.is_dir():
         fail(f"container cache directory does not exist: {cache}")
     sif = cache / sif_name

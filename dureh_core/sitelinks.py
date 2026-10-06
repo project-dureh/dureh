@@ -19,9 +19,12 @@ NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$")
 
 
 def _config_add(site: Site, key: str, entry: dict) -> None:
+    """Add or replace the `key` entry with this id; keys an existing entry has and the new one lacks are kept
+    (for example a module's `submit` block seeded by the package's config_defaults before the module was linked)."""
     cfg = json.loads(site.config_path.read_text(encoding="utf-8"))
+    old = next((e for e in cfg.get(key) or [] if e.get("id") == entry["id"]), None)
     items = [e for e in cfg.get(key) or [] if e.get("id") != entry["id"]]
-    items.append(entry)
+    items.append({**old, **entry} if isinstance(old, dict) else entry)
     cfg[key] = items
     site.config_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 

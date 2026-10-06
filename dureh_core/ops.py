@@ -94,6 +94,9 @@ def _probe_run(site: Site, run: dict) -> dict | None:
     """Ask the scheduler for one run's state: {state, final, raw | array}; None when it cannot be asked.
     Used for a single run; rounds over many runs use `_probe_runs` (one `sacct` call)."""
     try:
+        if run["payload"].get("jobs"):
+            st = _via_status(site, run)
+            return {"state": st["scheduler_state"], "final": st["final"], "multi": st, **({"array": st} if st["items"] else {})}
         if run["payload"].get("array"):
             st = _array_status(site, run)
             return {"state": st["scheduler_state"], "final": st["final"], "array": st}
@@ -133,13 +136,21 @@ def _probe_runs(site: Site, runs: list[dict]) -> dict[str, dict | None]:
     states are parsed as by `array_states`; a single job's `raw` is `State|ExitCode|Elapsed` as by `job_state`."""
     if not runs:
         return {}
+    ids: list[str] = []
+    for r in runs:
+        ids += [str(j["job_id"]) for j in r["payload"].get("jobs") or []] or [str(r["payload"]["job_id"])]
     try:
-        lines = sacct_lines(site, [str(r["payload"]["job_id"]) for r in runs])
+        lines = sacct_lines(site, ids)
     except (OSError, subprocess.SubprocessError):
         return {r["id"]: None for r in runs}
     out: dict[str, dict | None] = {}
     for run in runs:
         job = str(run["payload"]["job_id"])
+        if run["payload"].get("jobs"):  # a via submission: several jobs, waited for together
+            st = _via_summary(run, lines)
+            out[run["id"]] = {"state": st["scheduler_state"], "final": st["final"], "multi": st,
+                              **({"array": st} if st["items"] else {})}
+            continue
         if run["payload"].get("array"):
             arr = run["payload"]["array"]
             st = _array_summary(run, _parse_array_lines(job, lines.get(job, []), arr["count"]))
@@ -170,6 +181,8 @@ def _no_state(seen: dict | None) -> bool:
     """sacct answered and has no state at all for the run (no line, UNKNOWN; an array: no task known)."""
     if seen is None:
         return False
+    if seen.get("multi"):
+        return all(v == "UNKNOWN" for v in seen["multi"]["jobs"].values())
     if seen.get("array"):
         return all(v == "UNKNOWN" for v in seen["array"]["items"].values())
     return seen["state"] == "UNKNOWN"
@@ -424,9 +437,21 @@ def _after_deps(led: Ledger, refs: list[str]) -> list[dict]:
                     f"; resubmit its failed items with --resubmit-failed {rid}" if p.get("array") else ""
                 fail(f"--after {rid}: job {p['job_id']} is known {state}, so a dependent job would never start{hint}")
             if rid not in [d["run"] for d in out]:
-                out.append({"run": rid, "job_id": str(p["job_id"]).split(";")[0].strip()})
+                ids = [str(j.get("job_id")).split(";")[0].strip() for j in p.get("jobs") or [] if j.get("job_id")] \
+                    or [str(p["job_id"]).split(";")[0].strip()]
+                out.append({"run": rid, "job_id": ids[0], **({"job_ids": ids} if len(ids) > 1 else {})})
     if not out:
         fail("--after needs at least one run id")
+    return out
+
+
+def _dep_job_ids(deps: list[dict]) -> list[str]:
+    """Every job id an `--after` list waits for (a via submission may hold several jobs)."""
+    out: list[str] = []
+    for d in deps:
+        for jid in d.get("job_ids") or [d["job_id"]]:
+            if jid not in out:
+                out.append(jid)
     return out
 
 
@@ -516,6 +541,18 @@ def _each_wrapper(script: Path, items: list[str], items_file: str, env: dict | N
     return "\n".join(out) + "\n"
 
 
+def _submit_guards(led: Ledger, actor: str, wi: str) -> dict:
+    """Who may submit for which WI: pipeline-runner (or the desk), on a dispatched WI of that role."""
+    rec = led.get("work-item", wi)
+    if actor not in ("pipeline-runner", "desk"):
+        fail("only pipeline-runner (or the desk) submits scheduler jobs")
+    if actor != "desk" and rec["payload"]["role"] != actor:
+        fail(f"{wi} is not a {actor} work item")
+    if led.wi_status(wi)["status"] not in ("dispatched", "rework"):
+        fail(f"{wi} is not dispatched")
+    return rec
+
+
 def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: bool = False,
                  extra: list[str] | None = None, extra_payload: dict | None = None,
                  module: str | None = None, rev: str | None = None, each: str | None = None,
@@ -525,13 +562,7 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
     from datetime import datetime, timezone
 
     led = Ledger(site)
-    rec = led.get("work-item", wi)
-    if actor not in ("pipeline-runner", "desk"):
-        fail("only pipeline-runner (or the desk) submits scheduler jobs")
-    if actor != "desk" and rec["payload"]["role"] != actor:
-        fail(f"{wi} is not a {actor} work item")
-    if led.wi_status(wi)["status"] not in ("dispatched", "rework"):
-        fail(f"{wi} is not dispatched")
+    rec = _submit_guards(led, actor, wi)
     if not script:
         fail("--script is required")
     path = Path(script)
@@ -570,7 +601,7 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
     if items is not None:
         cmd.append(f"--array=0-{len(items) - 1}" + (f"%{max_parallel}" if max_parallel else ""))
     if deps:
-        cmd.append("--dependency=afterok:" + ":".join(d["job_id"] for d in deps))
+        cmd.append("--dependency=afterok:" + ":".join(_dep_job_ids(deps)))
     # the job runs in the WI target, not the agent's shell cwd (its scheduler logs never do: see job_log_paths)
     chdir = _sbatch_opt(path, extra, "-D", "--chdir")
     if chdir is None:
@@ -662,6 +693,340 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
     return run
 
 
+# ------------------------------------------------------------ slurm --via
+# A module with a submit command of its own (proposals/module-submit-contract.md, Director 2026-10-06): the harness
+# runs that command inside the WI context and ingests the submission record it writes. No module name in code: what
+# the harness may add to the command comes from config `modules[<m>].submit` {record_arg, log_arg, after_arg, items_arg}.
+VIA_RECORD_LINE = re.compile(r"^submission-record:[ \t]*(.+?)[ \t]*$", re.M)
+VIA_SUBMIT_KEYS = ("record_arg", "log_arg", "after_arg", "items_arg")
+VIA_TIMEOUT_DEFAULT = 600
+JOB_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+
+
+def _via_text(argv: list[str]) -> str:
+    import shlex
+
+    return " ".join(shlex.quote(w) for w in argv)
+
+
+def via_module_config(site: Site, argv: list[str], via_module: str | None = None) -> tuple[str | None, dict]:
+    """(module id, its `submit` block) for a via command: the `modules[]` entry named by `--via-module`, else the one
+    whose `cli` (or `id`) is the command's first word (basename). (None, {}) when no entry matches: the harness then
+    adds nothing to the command."""
+    entries = [e for e in site.config.get("modules") or [] if isinstance(e, dict) and e.get("id")]
+    if via_module is not None:
+        entry = next((e for e in entries if e["id"] == via_module), None)
+        if entry is None:
+            fail(f"--via-module {via_module}: config.json modules has no entry with that id")
+    else:
+        first = os.path.basename(argv[0]) if argv else ""
+        entry = next((e for e in entries if first and first == str(e.get("cli") or e["id"])), None)
+    if entry is None:
+        return None, {}
+    sub = entry.get("submit") or {}
+    ok = (isinstance(sub, dict) and set(sub) <= set(VIA_SUBMIT_KEYS)
+          and all(isinstance(v, str) and v.startswith("-") and " " not in v for v in sub.values()))
+    if not ok:
+        fail(f"config modules[{entry['id']}].submit must map {', '.join(VIA_SUBMIT_KEYS)} (each optional) to one "
+             f"option name of the module's command, such as \"--submission-record\": {sub!r}")
+    return str(entry["id"]), dict(sub)
+
+
+def _via_path(base: Path, value, site: Site) -> str | None:
+    if value in (None, ""):
+        return None
+    v = site.expand(str(value))
+    return v if os.path.isabs(v) else os.path.normpath(os.path.join(base, v))
+
+
+def ingest_submission(path: Path, root: Path, site: Site) -> dict:
+    """Read and check a module's submission record (minimal schema; a module's own `<tool>.submission.v1` may be a superset):
+    `schema_version` (or `schema`), `jobs: [{job_id, kind: array|single, count?, max_parallel?, script?, logs: {stdout,
+    stderr}? (or log_out/log_err), dependency?, name?, items?}]`; `items[]` (top level, for the array jobs that carry
+    none of their own) as strings or {index, item, level, sub, ses, path}; optional tool, tool_version, submitted_at,
+    cwd, manifest, selection, level, records. Relative paths resolve against the record's `cwd`, else the job root.
+    Unknown top-level keys are kept under `extra`."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        fail(f"submission record {path} is not readable JSON: {exc}")
+    if not isinstance(data, dict):
+        fail(f"submission record {path} must be a JSON object")
+    schema = data.get("schema_version") or data.get("schema")
+    if not isinstance(schema, str) or not schema.strip():
+        fail(f"submission record {path} has no schema_version")
+    base = Path(_via_path(root, data.get("cwd"), site) or root)
+    jobs_raw = data.get("jobs")
+    if not isinstance(jobs_raw, list) or not jobs_raw:
+        fail(f"submission record {path} has no jobs[]")
+
+    def items_of(raw, where: str) -> tuple[list[str], str | None]:
+        if not isinstance(raw, list) or not raw:
+            fail(f"submission record {path}: {where} needs a non-empty items list (an array job names its items)")
+        entries = [{"item": x} if isinstance(x, str) else x for x in raw]
+        if not all(isinstance(e, dict) and isinstance(e.get("item"), str) for e in entries):
+            fail(f"submission record {path}: {where} items must be strings or objects with an `item` string")
+        if all(isinstance(e.get("index"), int) for e in entries):
+            entries = sorted(entries, key=lambda e: e["index"])
+        names = [e["item"] for e in entries]
+        bad = [n for n in names if not ITEM_RE.match(n)]
+        if bad:
+            fail(f"submission record {path}: {where} item(s) {', '.join(repr(b) for b in bad[:5])} do not match "
+                 f"{ITEM_RE.pattern}")
+        if len(set(names)) != len(names):
+            fail(f"submission record {path}: {where} has duplicate items")
+        levels = {str(e["level"]) for e in entries if e.get("level")}
+        if len(levels) > 1:
+            fail(f"submission record {path}: {where} mixes item levels {', '.join(sorted(levels))}")
+        return names, (levels.pop() if levels else None)
+
+    top_items = top_level = None
+    if data.get("items") is not None:
+        top_items, top_level = items_of(data.get("items"), "items")
+    declared = (data.get("selection") or {}).get("level") if isinstance(data.get("selection"), dict) else None
+    declared = declared or data.get("level") or top_level
+    jobs = []
+    for i, j in enumerate(jobs_raw):
+        where = f"jobs[{i}]"
+        if not isinstance(j, dict):
+            fail(f"submission record {path}: {where} must be an object")
+        jid = str(j.get("job_id") if j.get("job_id") is not None else "").strip()
+        if not jid or not JOB_ID_RE.match(jid):
+            fail(f"submission record {path}: {where} has no usable job_id ({j.get('job_id')!r})")
+        kind = j.get("kind")
+        if kind not in ("array", "single"):
+            fail(f"submission record {path}: {where}.kind must be array or single ({kind!r})")
+        logs = j.get("logs") if isinstance(j.get("logs"), dict) else {}
+        job = {"job_id": jid, "kind": kind,
+               "script": _via_path(base, j.get("script"), site),
+               "log_out": _via_path(base, logs.get("stdout") or j.get("log_out"), site),
+               "log_err": _via_path(base, logs.get("stderr") or j.get("log_err"), site)}
+        if j.get("name"):
+            job["name"] = str(j["name"])
+        if isinstance(j.get("dependency"), list) and j["dependency"]:
+            job["dependency"] = [str(d) for d in j["dependency"]]
+        if isinstance(j.get("max_parallel"), int):
+            job["max_parallel"] = j["max_parallel"]
+        if kind == "array":
+            items, level = (items_of(j["items"], f"{where}.items") if j.get("items") is not None
+                            else (top_items, top_level))
+            if items is None:
+                fail(f"submission record {path}: {where} is an array job but neither it nor the record lists items")
+            count = j.get("count")
+            if count is not None and (not isinstance(count, int) or count != len(items)):
+                fail(f"submission record {path}: {where}.count {count!r} differs from its {len(items)} items")
+            job.update(items=items, count=len(items), level=_via_level(items, level or declared))
+        jobs.append(job)
+    known = {"schema_version", "schema", "tool", "tool_version", "submitted_at", "jobs", "items", "cwd", "manifest",
+             "selection", "records", "level"}
+    return {"schema_version": schema.strip(), "tool": data.get("tool"), "tool_version": data.get("tool_version"),
+            "submitted_at": data.get("submitted_at"), "jobs": jobs, "cwd": str(base),
+            "manifest": data.get("manifest"), "selection": data.get("selection"), "records": data.get("records"),
+            "extra": {k: v for k, v in data.items() if k not in known}}
+
+
+def _via_level(items: list[str], declared) -> str:
+    """The array's item level: what the record declares (any word), else subject/session/plain by the item grammar
+    when every item fits it, else plain (a module's own item grammar, e.g. BIDS file stems, is not parsed)."""
+    if declared:
+        return str(declared)
+    try:
+        return items_level(items)
+    except DurehError:
+        return "plain"
+
+
+def _via_day_check(site: Site, payload: dict, cfg: dict):
+    """Warn-only start check for a via run (decision 4, 2026-10-06): the job already exists, so after ingest the
+    requested --time comes from the recorded script's #SBATCH line (else config slurm.time) and the expected start
+    from `squeue --start`; when the expected end is past today's end the record says `late: true` and the submit
+    warns. None when not in an on-duty workday, "skipped"/"unavailable" as `_day_check`."""
+    from datetime import datetime
+
+    from . import cluster, workday
+
+    if not workday.enabled(site):
+        return None
+    d = workday.day(site)
+    if d["phase"] != "on-duty":
+        return None
+    script = payload.get("script")
+    requested = source = None
+    if script and os.path.isfile(script):
+        requested, source = _script_opt(Path(script), "-t", "--time"), "script"
+    if not requested and cfg.get("time"):
+        requested, source = str(cfg["time"]), "config"
+    wall = cluster.parse_time(requested)
+    if wall is None:
+        return "skipped: no --time in the recorded script"
+    try:
+        proc = subprocess.run(["squeue", "-h", "-j", str(payload["job_id"]), "--start", "-o", "%S"],
+                              capture_output=True, text=True, timeout=60, env=site.env())
+        m = re.search(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)", proc.stdout)
+    except (OSError, subprocess.SubprocessError):
+        m = None
+    if not m:
+        return "unavailable"
+    day_end = datetime.fromisoformat(d["end"])
+    start = datetime.fromisoformat(m.group(1))
+    if start.tzinfo is None:
+        start = start.replace(tzinfo=day_end.tzinfo)
+    ends = start + wall
+    out = {"expected_start": start.isoformat(timespec="seconds"), "expected_end": ends.isoformat(timespec="seconds"),
+           "day_end": d["end"], "time": requested, "time_source": source, "late": ends > day_end,
+           "note": "warn-only for --via: the module submitted the job before the check"}
+    if out["late"]:
+        print(f"warning: workday mode: job {payload['job_id']} is expected to start at {out['expected_start']} and, with "
+              f"--time {requested} (from the {source}), end at {out['expected_end']}, after today's end {d['end']}; "
+              "it was submitted by the module and stays queued: cancel it with `slurm cancel` or let it run",
+              file=sys.stderr)
+    return out
+
+
+def slurm_submit_via(site: Site, actor: str, wi: str, via, record: str | None = None,
+                     after: list[str] | None = None, dry_run: bool = False, via_module: str | None = None,
+                     extra_payload: dict | None = None, argv_extra: list[str] | None = None) -> dict:
+    """`slurm submit --wi WI --via '<module command ...>'`: run the module's own submit command in the WI's job root
+    with the site environment, then ingest the submission record it wrote and record the usual `slurm` run so
+    status/wait/watch/resubmit-failed/purge and `promote --run` work as for a plain submit. Record path: `--record`,
+    else the path the harness passed through `modules[<m>].submit.record_arg`, else the last stdout line
+    `submission-record: <path>`. A non-zero exit records only a `slurm.via-failed` event."""
+    import shlex
+    from datetime import datetime, timezone
+
+    led = Ledger(site)
+    rec = _submit_guards(led, actor, wi)
+    argv = shlex.split(via) if isinstance(via, str) else [str(w) for w in via]
+    if not argv:
+        fail("--via needs a command")
+    mod_id, sub = via_module_config(site, argv, via_module)
+    deps = _after_deps(led, after) if after else []
+    if deps and not sub.get("after_arg"):
+        fail("--after with --via needs config modules[<m>].submit.after_arg (the option the module takes a job-id "
+             "dependency with); without it put the dependency in the module command yourself"
+             + (f" (modules[{mod_id}].submit has no after_arg)" if mod_id else " (no modules[] entry matches "
+                f"{argv[0]!r}; name one with --via-module)"))
+    cfg = site.config.get("slurm") or {}
+    root = _job_root(site, rec["payload"].get("target"))
+    site_logs = wi_log_dir(site, wi)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    cmd = list(argv) + list(argv_extra or [])
+    record_path = _via_path(root, record, site) if record else None
+    if sub.get("record_arg"):
+        record_path = record_path or str(site_logs / f"via-{stamp}.json")
+        cmd += [sub["record_arg"], record_path]
+    if sub.get("log_arg"):
+        cmd += [sub["log_arg"], str(site_logs)]
+    for jid in _dep_job_ids(deps):
+        cmd += [sub["after_arg"], jid]
+    payload = {"run_type": "slurm", "status": "not-run" if dry_run else "submitted", "command": cmd,
+               "chdir": str(root), "logs": str(site_logs), "sbatch_args": [],
+               "via": {"command": argv, "text": _via_text(argv), "module": mod_id, "submit": sub,
+                       "record": record_path, "added": cmd[len(argv):]},
+               **(extra_payload or {})}
+    if deps:
+        payload["after"] = deps
+    if dry_run:
+        return led.append("run", "slurm", actor, wi, payload)
+    site_logs.mkdir(parents=True, exist_ok=True)
+    timeout = cfg.get("via_timeout") or VIA_TIMEOUT_DEFAULT
+    try:
+        timeout = float(timeout)
+    except (TypeError, ValueError):
+        fail(f"config slurm.via_timeout must be a number of seconds: {timeout!r}")
+    failure = out = err = None
+    try:
+        proc = subprocess.run(cmd, cwd=root, env=site.env(), capture_output=True, text=True, timeout=timeout)
+        out, err, code = proc.stdout, proc.stderr, proc.returncode
+        if code != 0:
+            failure = f"exit {code}"
+    except FileNotFoundError:
+        code, failure = None, f"command not found: {cmd[0]}"
+    except subprocess.TimeoutExpired as exc:
+        code, failure = None, f"no exit after {timeout:g} s (config slurm.via_timeout)"
+        out = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        err = exc.stderr.decode(errors="replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+    if failure:
+        tail = ((err or "").strip() or (out or "").strip())[-2000:]
+        ev = led.event("slurm.via-failed", actor, wi, {"command": cmd, "chdir": str(root), "exit": code,
+                                                       "failure": failure, "stderr_tail": (err or "")[-2000:],
+                                                       "stdout_tail": (out or "")[-2000:], "module": mod_id})
+        fail(f"--via command failed ({failure}; recorded as event {ev['id']}, no run): {tail or 'no output'}")
+    if record_path is None:
+        found = VIA_RECORD_LINE.findall(out or "")
+        if not found:
+            fail("--via: the command exited 0 but named no submission record: pass --record <path>, set config "
+                 f"modules[<m>].submit.record_arg, or make it print `submission-record: <path>` as its last line "
+                 f"(stdout tail: {(out or '').strip()[-400:]!r})")
+        record_path = _via_path(root, found[-1], site)
+    if not os.path.isfile(record_path):
+        fail(f"--via: submission record {record_path} does not exist after the command exited 0")
+    ingested = ingest_submission(Path(record_path), root, site)
+    jobs = ingested["jobs"]
+    first = jobs[0]
+    payload.update(job_id=first["job_id"], jobs=jobs, log_out=first.get("log_out"), log_err=first.get("log_err"))
+    if first.get("script"):
+        payload["script"] = first["script"]
+        if os.path.isfile(first["script"]):
+            payload["script_sha256"] = sha256_file(first["script"])
+    arrays = [j for j in jobs if j["kind"] == "array"]
+    if arrays:  # decision 3: `array` is the first array job; every job is waited for
+        a = arrays[0]
+        payload["array"] = {"job_id": a["job_id"], "items": list(a["items"]), "count": a["count"], "level": a["level"],
+                            "items_file": None}
+        if a.get("max_parallel"):
+            payload["max_parallel"] = a["max_parallel"]
+    payload["via"].update(record=record_path, schema_version=ingested["schema_version"], tool=ingested["tool"],
+                          tool_version=ingested["tool_version"], submitted_at=ingested["submitted_at"],
+                          cwd=ingested["cwd"], stdout_tail=(out or "")[-1000:])
+    for key in ("manifest", "selection", "records"):
+        if ingested.get(key) is not None:
+            payload["via"][key] = ingested[key]
+    if ingested["extra"]:
+        payload["via"]["extra"] = ingested["extra"]
+    check = _via_day_check(site, payload, cfg)
+    if check is not None:
+        payload["start_check"] = check
+    return led.append("run", "slurm", actor, wi, payload)
+
+
+def _via_summary(run: dict, lines: dict[str, list[str]]) -> dict:
+    """State of a submission that holds several jobs (a via run), from batched `sacct` lines grouped by job id (see
+    `sacct_lines`): per-job states, per-item states of the recorded `array` (the first array job), the overall state
+    (COMPLETED only when every task of every job completed; FAILED when all ended and any did not complete; else
+    RUNNING or PENDING) and `final` once every job has ended."""
+    p = run["payload"]
+    first_array = str((p.get("array") or {}).get("job_id") or "")
+    by_job: dict[str, str] = {}
+    items: dict[str, str] = {}
+    all_states: list[str] = []
+    for job in p.get("jobs") or []:
+        jid = str(job["job_id"])
+        if job.get("kind") == "array":
+            count = int(job.get("count") or len(job.get("items") or []))
+            by_idx = _parse_array_lines(jid, lines.get(jid, []), count)
+            states = list(by_idx.values())
+            if jid == first_array and not items:
+                names = p["array"]["items"]
+                items = {names[i]: st for i, st in by_idx.items() if i < len(names)}
+            by_job[jid] = overall_state(states)
+        else:
+            own = [ln for ln in lines.get(jid, []) if ln.split("|")[0] == jid] or lines.get(jid, [])
+            raw = "|".join(own[0].split("|")[1:]) if own else ""
+            states = [(raw.split("|")[0].split() or ["UNKNOWN"])[0] if raw else "UNKNOWN"]
+            by_job[jid] = states[0]
+        all_states += states
+    counts: dict[str, int] = {}
+    for st in items.values():
+        counts[st] = counts.get(st, 0) + 1
+    return {"scheduler_state": overall_state(all_states), "items": items, "counts": counts,
+            "final": bool(all_states) and all(st in TERMINAL_STATES for st in all_states), "jobs": by_job}
+
+
+def _via_status(site: Site, run: dict) -> dict:
+    return _via_summary(run, sacct_lines(site, [str(j["job_id"]) for j in run["payload"]["jobs"]]))
+
+
 def array_states(site: Site, job: str, count: int) -> dict[int, str]:
     """Per-task state of an array job from `sacct -j <job> -X -P -n --format=JobID,State,ExitCode`: task
     lines `<job>_<i>|STATE|x:y`, pending ranges `<job>_[0-3,7%2]|PENDING|0:0`. Missing tasks are UNKNOWN."""
@@ -721,23 +1086,33 @@ def _record_array(site: Site, led: Ledger, actor: str, run: dict, st: dict, wait
     """Record an array's state. Per-item final states are recorded once: when all tasks are terminal and the
     same final states are already recorded, that record is returned instead of a new one."""
     rid = run["id"]
+    multi = "jobs" in st  # a via submission: per-job states beside the first array's per-item states
+    rec_items = st["items"] if st["items"] or not multi else None
     if st["final"]:
         for e in reversed(led.events(run["wi"])):
-            if e["type"] == "run.status" and e["payload"].get("run") == rid and e["payload"].get("item_states"):
-                if e["payload"]["item_states"] == st["items"]:
+            if e["type"] == "run.status" and e["payload"].get("run") == rid and \
+                    (e["payload"].get("item_states") or (multi and e["payload"].get("final"))):
+                if e["payload"].get("item_states") == rec_items and (not multi or e["payload"].get("jobs") == st["jobs"]):
                     return e
                 break
     payload = {"run": rid, "job_id": run["payload"]["job_id"], "scheduler_state": st["scheduler_state"],
                "items": st["items"], "counts": st["counts"], "final": st["final"]}
+    if multi:
+        payload["jobs"] = st["jobs"]
     if waited:
         payload["waited"] = True
     if watched:
         payload["watched"] = True
     if st["final"]:
-        payload["item_states"] = st["items"]
+        if rec_items is not None:
+            payload["item_states"] = rec_items
         failed = [i for i, s in st["items"].items() if s != "COMPLETED"]
         if failed:
             payload["failed_items"] = failed
+        if multi:
+            bad = [j for j, s in st["jobs"].items() if s != "COMPLETED"]
+            if bad:
+                payload["failed_jobs"] = bad
         mod = run["payload"].get("module") or {}
         if mod.get("tree"):  # array tasks share one pinned tree: removed once every task has ended
             from . import exectree
@@ -776,7 +1151,9 @@ def _log_hint(site: Site, run: dict) -> dict:
 
     p = run["payload"]
     job = str(p.get("job_id") or "").split(";")[0].strip()
-    name = _scan_opt([str(w) for w in p.get("command") or []], "-J", "--job-name") or f"dureh-{run['wi']}"
+    first = (p.get("jobs") or [{}])[0]
+    name = first.get("name") or (_scan_opt([str(w) for w in p.get("command") or []], "-J", "--job-name")
+                                 if not p.get("via") else None) or f"dureh-{run['wi']}"
     out = {}
     for key in ("log_out", "log_err"):
         if p.get(key):
@@ -792,7 +1169,9 @@ def slurm_status(site: Site, actor: str, run_id: str) -> dict:
     job = run["payload"].get("job_id")
     if not job:
         fail(f"{run_id} has no scheduler job id")
-    if run["payload"].get("array"):
+    if run["payload"].get("jobs"):
+        ev = _record_array(site, led, actor, run, _via_status(site, run), waited=False)
+    elif run["payload"].get("array"):
         ev = _record_array(site, led, actor, run, _array_status(site, run), waited=False)
     else:
         state, line = job_state(site, job)
@@ -814,9 +1193,10 @@ def slurm_wait(site: Site, actor: str, run_id: str, timeout: int = 3600, interva
     run = _get_run(led, run_id)
     job = run["payload"].get("job_id") or fail(f"{run_id} has no scheduler job id")
     deadline = time.monotonic() + max(0, timeout)
-    if run["payload"].get("array"):
+    if run["payload"].get("array") or run["payload"].get("jobs"):
+        probe = _via_status if run["payload"].get("jobs") else _array_status
         while True:
-            st = _array_status(site, run)
+            st = probe(site, run)
             if st["final"] or time.monotonic() >= deadline:
                 break
             time.sleep(max(1, min(interval, deadline - time.monotonic())))
@@ -911,8 +1291,8 @@ def watch_round(site: Site, actor: str, reported: set[str]) -> list[str]:
                                      nxt=f"check by hand (no scheduler state after {days:g} days)"))
             continue
         if not site.observe:
-            if seen.get("array"):
-                _record_array(site, led, actor, run, seen["array"], waited=False, watched=True)
+            if seen.get("multi") or seen.get("array"):
+                _record_array(site, led, actor, run, seen.get("multi") or seen["array"], waited=False, watched=True)
             else:
                 led.event("run.status", actor, run["wi"], {"run": run["id"], "job_id": run["payload"]["job_id"],
                                                            "scheduler_state": seen["state"], "raw": seen.get("raw", ""),
@@ -952,13 +1332,19 @@ def slurm_resubmit_failed(site: Site, actor: str, run_id: str, script: str | Non
     led = Ledger(site)
     run = _get_run(led, run_id)
     p = run["payload"]
+    if wi is not None and wi != run["wi"]:
+        fail(f"{run_id} belongs to {run['wi']}, not {wi}")
+    if p.get("via"):
+        for name, value in (("--script", script), ("--sbatch-arg", extra), ("--module", module), ("--rev", rev),
+                            ("--max-parallel", max_parallel)):
+            if value not in (None, []):
+                fail(f"{run_id} was submitted --via a module command; {name} does not apply (the module renders the job)")
+        return _resubmit_via(site, actor, run, dry_run, after)
     arr = p.get("array")
     if not arr:
         fail(f"{run_id} is not an --each (array) run")
     if not p.get("job_id"):
         fail(f"{run_id} has no scheduler job id")
-    if wi is not None and wi != run["wi"]:
-        fail(f"{run_id} belongs to {run['wi']}, not {wi}")
     by_idx = array_states(site, str(p["job_id"]), arr["count"])
     waiting = {arr["items"][i]: s for i, s in by_idx.items() if s not in TERMINAL_STATES}
     if waiting:
@@ -977,6 +1363,52 @@ def slurm_resubmit_failed(site: Site, actor: str, run_id: str, script: str | Non
                         {"resubmit_of": run_id, "resubmit_states": {i: states[i] for i in failed}},
                         module=module, rev=rev, after=after, items=failed,
                         max_parallel=max_parallel if max_parallel is not None else p.get("max_parallel"))
+
+
+def _resubmit_via(site: Site, actor: str, run: dict, dry_run: bool, after: list[str] | None) -> dict:
+    """`--resubmit-failed` on a via run: the items of its array job(s) whose task did not complete go to a file under
+    the WI's log dir and the recorded module command runs again with `modules[<m>].submit.items_arg @<file>`
+    (recorded `resubmit_of`); refused while any job is pending or running. Without a configured items_arg the
+    refusal lists the failed items, the file and the command to rerun by hand."""
+    from datetime import datetime, timezone
+
+    p, rid = run["payload"], run["id"]
+    arrays = [j for j in p.get("jobs") or [] if j.get("kind") == "array"]
+    if not arrays:
+        fail(f"{rid}: the submission holds no array job, so there are no items to resubmit")
+    lines = sacct_lines(site, [str(j["job_id"]) for j in p["jobs"]])
+    st = _via_summary(run, lines)
+    if not st["final"]:
+        waiting = {j: s for j, s in st["jobs"].items() if s not in TERMINAL_STATES}
+        fail(f"{rid}: not every job has ended ({', '.join(f'{k} {v}' for k, v in list(waiting.items())[:5])}); "
+             f"`slurm wait --run {rid}` first")
+    failed: list[str] = []
+    states: dict[str, str] = {}
+    for j in arrays:
+        by_idx = _parse_array_lines(str(j["job_id"]), lines.get(str(j["job_id"]), []), int(j["count"]))
+        for i, state in by_idx.items():
+            item = j["items"][i]
+            states.setdefault(item, state)
+            if state != "COMPLETED" and item not in failed:
+                failed.append(item)
+    if not failed:
+        fail(f"{rid}: every item completed; nothing to resubmit")
+    via = p["via"]
+    mod_id, sub = via_module_config(site, list(via["command"]), via.get("module"))
+    site_logs = wi_log_dir(site, run["wi"])
+    site_logs.mkdir(parents=True, exist_ok=True)
+    items_file = site_logs / f"via-failed-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}.items"
+    items_file.write_text("".join(f"{i}\n" for i in failed), encoding="utf-8")
+    if not sub.get("items_arg"):
+        where = f"config modules[{mod_id}].submit" if mod_id else f"no config modules[] entry matches {via['command'][0]!r}"
+        fail(f"{rid}: {len(failed)} item(s) did not complete: {', '.join(failed[:20])}{' ...' if len(failed) > 20 else ''} "
+             f"(list: {items_file}). {where} has no items_arg, so the harness cannot hand them to the module; rerun by hand: "
+             f"slurm submit --wi {run['wi']} --via '{via['text']} <the module's item option> @{items_file}'")
+    return slurm_submit_via(site, actor, run["wi"], list(via["command"]), after=after, dry_run=dry_run,
+                            via_module=via.get("module"),
+                            extra_payload={"resubmit_of": rid, "resubmit_states": {i: states[i] for i in failed},
+                                           "resubmit_items_file": str(items_file)},
+                            argv_extra=[sub["items_arg"], f"@{items_file}"])
 
 
 def _job_root(site: Site, target: str | None) -> Path:
@@ -1141,9 +1573,11 @@ def slurm_cancel(site: Site, actor: str, run_id: str) -> dict:
     led = Ledger(site)
     run = led.get("run", run_id)
     job = run["payload"].get("job_id") or fail(f"{run_id} has no job id")
-    proc = subprocess.run(["scancel", job], capture_output=True, text=True, timeout=60, env=site.env())
+    ids = [str(j["job_id"]) for j in run["payload"].get("jobs") or []] or [str(job)]  # a via submission: every job
+    proc = subprocess.run(["scancel", *ids], capture_output=True, text=True, timeout=60, env=site.env())
     return led.event("run.status", actor, run["wi"], {"run": run_id, "job_id": job, "scheduler_state": "CANCEL-REQUESTED",
                                                       "scancel_exit": proc.returncode,
+                                                      **({"jobs": ids} if len(ids) > 1 else {}),
                                                       "note": "cancellation does not undo partial outputs; inspect and purge"},
                      [run_id])
 

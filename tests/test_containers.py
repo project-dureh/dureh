@@ -43,7 +43,8 @@ class ContainerBuild(SiteCase):
             (self.fake / f).chmod(0o755)
         cfg = json.loads((self.site_root / "config.json").read_text())
         cfg["env"] = {"path_prepend": [str(self.fake)], "vars": {"CAMRI_CONTAINER_CACHE": "$DUREH_SITE/cache/containers"}}
-        cfg["containers"] = {"module": ""}  # never load the real apptainer module in a test
+        # never load the real apptainer module in a test; the cache env var name is config (UP-0069)
+        cfg["containers"] = {"module": "", "cache_env": "CAMRI_CONTAINER_CACHE"}
         (self.site_root / "config.json").write_text(json.dumps(cfg))
         self.cache = self.site_root / "cache" / "containers"
         self.cache.mkdir(parents=True)
@@ -162,7 +163,8 @@ class ContainerBuild(SiteCase):
 
     def test_generic_key_wins_over_env_var(self):
         cfg = json.loads((self.site_root / "config.json").read_text())
-        cfg["containers"] = {"module": "", "cache": "images", "build_args": ["--fakeroot", "--ignore-fakeroot-command"]}
+        cfg["containers"] = {"module": "", "cache": "images", "build_args": ["--fakeroot", "--ignore-fakeroot-command"],
+                             "cache_env": "CAMRI_CONTAINER_CACHE"}
         (self.site_root / "config.json").write_text(json.dumps(cfg))
         (self.site_root / "images").mkdir()
         run = containers.build(self.site(), "desk", self.w, RECIPE, "camri", self.rev, name="camri-rt")

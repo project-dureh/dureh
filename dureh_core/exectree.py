@@ -1,11 +1,12 @@
 """Pinned module execution trees for scheduler jobs (UR-20261004-04).
 
 `dureh slurm submit --module <m>` runs a job against a frozen copy of `modules/<m>` instead of the live
-checkout, so a promotion during the job cannot change the code under it (measured: job 3748401 started on
-camri 1eeab74 while modules/camri moved to 8333b22 and 69f83b3).
+checkout, so a promotion during the job cannot change the code under it (measured 2026-10-04: job 3748401
+started on one module revision while the module's checkout moved twice during the job).
 
-- Revision: `--rev`, else the WI target project's manifest pin (`provenance.tool_versions.<m>` of
-  `camri-manifest.yaml`, for example "2.0.0a1+2396359"); resolved to the full sha in modules/<m>.
+- Revision: `--rev`, else the WI target project's manifest pin (`provenance.tool_versions.<m>` of the project
+  manifest named by config `project.manifest`, for example "2.0.0a1+2396359"); resolved to the full sha in
+  modules/<m>. With `project.manifest` null the pin is never read and `--module` needs `--rev`.
 - Tree: `git -C modules/<m> archive <rev> | tar -x` into `<site>/scratch/exec/<WI>-<m>-<rev7>-<ts>/`, then
   made read-only. No `git worktree`: nothing is written into the module's .git.
 - Environment: `shared-venv` (the archived uv.lock is byte-identical to modules/<m>/uv.lock and
@@ -30,7 +31,6 @@ from .site import Site
 from .util import fail, git
 
 HEX = re.compile(r"^[0-9a-f]{7,40}$")
-MANIFEST = "camri-manifest.yaml"
 
 
 def exec_root(site: Site) -> Path:
@@ -50,14 +50,15 @@ def manifest_pin(site: Site, target: str | None, module: str) -> tuple[str | Non
     from . import yamlsub
     from .paths import target_root
 
-    if not target or not re.match(r"^projects/[^/]+$", target):
+    manifest = site.project_manifest()
+    if not manifest or not target or not re.match(r"^projects/[^/]+$", target):
         return None, None
     root = target_root(site, target)
-    if root is None or not (root / MANIFEST).is_file():
+    if root is None or not (root / manifest).is_file():
         return None, None
-    rel = f"{target}/{MANIFEST}"
+    rel = f"{target}/{manifest}"
     try:
-        data = yamlsub.load_file(root / MANIFEST) or {}
+        data = yamlsub.load_file(root / manifest) or {}
     except Exception as exc:  # noqa: BLE001 - an unreadable manifest is reported, not a crash
         fail(f"cannot read {rel}: {exc}")
     tv = ((data.get("provenance") or {}).get("tool_versions") or {}) if isinstance(data, dict) else {}
@@ -133,8 +134,10 @@ def prepare(site: Site, wi: str, target: str | None, module: str, rev: str | Non
         fail(f"module is missing or not a git repository: modules/{module}")
     pin, manifest = manifest_pin(site, target, module)
     if rev is None and pin is None:
+        name = site.project_manifest()
         where = f"{manifest} has no usable provenance.tool_versions.{module}" if manifest else \
-            f"{wi} targets {target}, which has no {MANIFEST}"
+            f"{wi} targets {target}, which has no {name}" if name else \
+            "config project.manifest is unset, so no project manifest pin is read"
         fail(f"no revision for modules/{module}: {where}; pass --rev <rev>")
 
     def resolve(r: str, what: str) -> str:
@@ -166,7 +169,7 @@ def prepare(site: Site, wi: str, target: str | None, module: str, rev: str | Non
                         f"use ${{{env['root']}}} instead")
     if not root_env:
         warnings.append(f"config modules[{module}] has no root_env; only DUREH_MODULE_ROOT points at the pinned "
-                        f"tree (the site may set root_env, e.g. \"CAMRI_PROJECT\" for camri)")
+                        f"tree (the site may set root_env, e.g. \"{module.upper().replace('-', '_')}_PROJECT\")")
     block = {"name": module, "rev": full, "rev_override": bool(rev is not None and pin_full and full != pin_full),
              "tree": str(tree), "env_mode": None, "manifest_pin": pin_full, "manifest": manifest,
              "root_env": root_env, "rev_env": rev_env, "env": env}

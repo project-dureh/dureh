@@ -51,6 +51,7 @@ def validate_package(startup: Path) -> dict:
     for v in m.get("values") or []:
         if v.get("skill") and not (startup / v["skill"]).is_file():
             fail(f"value {v.get('id')} names a missing skill: {v['skill']}")
+    package_config_defaults(m)
     return m
 
 
@@ -90,6 +91,84 @@ def _answers(questions: list[dict], supplied: dict, interactive: bool) -> dict:
     return out
 
 
+# config.json keys a startup package may seed through `config_defaults` (startup.yaml); never the site identity,
+# harness root, models or state backend, which the install and the preset own.
+CONFIG_DEFAULT_KEYS = ("project", "containers", "slurm", "checks", "env", "limits", "guards", "modules", "index")
+
+
+def package_config_defaults(manifest: dict) -> dict:
+    """The `config_defaults` block of a startup manifest, checked: a mapping of known top-level keys to mappings
+    (`modules`: a list of {id, ...} entries). UP-0069: company values (manifest name, env names) live here, not in code."""
+    block = manifest.get("config_defaults")
+    if block in (None, {}):
+        return {}
+    if not isinstance(block, dict):
+        fail("startup.yaml config_defaults must be a mapping")
+    for key, value in block.items():
+        if key not in CONFIG_DEFAULT_KEYS:
+            fail(f"startup.yaml config_defaults.{key}: not a key a package may seed (allowed: {', '.join(CONFIG_DEFAULT_KEYS)})")
+        if key == "modules":
+            if not isinstance(value, list) or not all(isinstance(e, dict) and e.get("id") for e in value):
+                fail("startup.yaml config_defaults.modules must be a list of {id: <module>, ...} entries")
+        elif not isinstance(value, dict):
+            fail(f"startup.yaml config_defaults.{key} must be a mapping")
+    return block
+
+
+def merge_config_defaults(config: dict, defaults: dict) -> tuple[dict, list[str]]:
+    """`defaults` under `config`: a key the config lacks is added; a mapping is merged key by key (the config's
+    value wins, recursively); `modules` entries are matched by id and merged the same way (new ids are appended).
+    Returns (merged config, dotted paths that were added)."""
+    out = json.loads(json.dumps(config))
+    added: list[str] = []
+
+    def merge(dst: dict, src: dict, path: str) -> None:
+        for k, v in src.items():
+            here = f"{path}.{k}" if path else k
+            if k not in dst or dst[k] is None:
+                dst[k] = json.loads(json.dumps(v))
+                added.append(here)
+            elif isinstance(dst[k], dict) and isinstance(v, dict):
+                merge(dst[k], v, here)
+            # anything else: the site's value stands
+
+    for key, value in defaults.items():
+        if key == "modules":
+            mods = list(out.get("modules") or [])
+            for entry in value:
+                hit = next((m for m in mods if isinstance(m, dict) and m.get("id") == entry["id"]), None)
+                if hit is None:
+                    mods.append(json.loads(json.dumps(entry)))
+                    added.append(f"modules[{entry['id']}]")
+                else:
+                    merge(hit, entry, f"modules[{entry['id']}]")
+            out["modules"] = mods
+        else:
+            merge(out, {key: value}, "")
+    return out, added
+
+
+def apply_config_defaults(site, manifest: dict | None = None) -> list[str]:
+    """For an existing site (`adapter sync`): add the package's `config_defaults` the site's config.json lacks
+    (never changing a value the site has). Reads the package source tree's startup.yaml when it exists, else the
+    site's copy. Returns the dotted keys added; config.json is rewritten only when something was added."""
+    if manifest is None:
+        src = site.package_source() or site.startup
+        path = src / "startup.yaml"
+        if not path.is_file():
+            return []
+        manifest = yamlsub.load_file(path) or {}
+    defaults = package_config_defaults(manifest)
+    if not defaults:
+        return []
+    merged, added = merge_config_defaults(site.config, defaults)
+    if added:
+        write_replace(site.config_path, json.dumps(merged, indent=2, ensure_ascii=False) + "\n",
+                      site.config_path.stat().st_mode & 0o777)
+        site.config = merged
+    return added
+
+
 def _config(site: Path, manifest: dict, startup: Path, preset: dict) -> dict:
     models = {}
     waiver = (date.today() + timedelta(days=int(preset.get("waiver_days", 31)))).isoformat()
@@ -100,7 +179,10 @@ def _config(site: Path, manifest: dict, startup: Path, preset: dict) -> dict:
             entry.setdefault("waiver_expires", waiver)
             entry.setdefault("note", "bootstrap waiver: no qualification exam has been run for this tier")
         models[tier] = entry
-    return {
+    harness_defaults = {"slurm": {"account": None, "partition": None, "time": None}, "checks": {},
+                        "push": {"allowed_remotes": []}, "state": {"backend": "git", "ria": None},
+                        "console": {"revision": None}, "env": {}, "limits": {}, "index": {}}
+    config = {
         "schema_version": SCHEMA_VERSION,
         "site": {"id": preset.get("site_id") or f"s-{secrets.token_hex(4)}", "name": preset.get("name") or site.name,
                  "root": str(site)},
@@ -110,15 +192,18 @@ def _config(site: Path, manifest: dict, startup: Path, preset: dict) -> dict:
         "references": preset.get("references") or [],
         "runtime": {"adapter": preset.get("adapter", "claude-code")},
         "models": models,
-        "index": preset.get("index") or {},
-        "slurm": preset.get("slurm") or {"account": None, "partition": None, "time": None},
-        "checks": preset.get("checks") or {},
-        "push": preset.get("push") or {"allowed_remotes": []},
-        "state": preset.get("state") or {"backend": "git", "ria": None},
-        "console": preset.get("console") or {"revision": None},
-        "env": preset.get("env") or {},
-        "limits": preset.get("limits") or {},
     }
+    # precedence: the preset, then the package's config_defaults, then the harness defaults
+    for key in ("index", "slurm", "checks", "push", "state", "console", "env", "limits"):
+        if preset.get(key):
+            config[key] = preset[key]
+    for key in ("project", "containers", "guards", "modules"):
+        if key in preset:
+            config[key] = preset[key]
+    config, _ = merge_config_defaults(config, package_config_defaults(manifest))
+    for key, value in harness_defaults.items():
+        config.setdefault(key, value)
+    return config
 
 
 def install(startup_arg: str, site_arg: str, preset_path: str | None = None, persona_path: str | None = None,

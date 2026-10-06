@@ -4,6 +4,9 @@
 dureh slurm submit --wi <WI> --script <job.sh> [--sbatch-arg ARG ...] [--module <m> [--rev <rev>]] [--dry-run]
                    [--each <items> | --each-from-bids <dataset> [--level subject|session] | --resubmit-failed <run>]
                    [--after <run>[,<run>...]] [--max-parallel N]
+dureh slurm submit --wi <WI> --via '<module command ...>' [--record <path>] [--via-module <m>]
+                   [--after <run>[,<run>...]] [--dry-run]            # a module's own submit command (release 42)
+dureh slurm submit --wi <WI> --resubmit-failed <via run>             # re-runs the module command over the failed items
 dureh slurm status --run <run id>
 dureh slurm wait   --run <run id> [--timeout S] [--interval S]
 dureh slurm watch  [--interval S] [--once]          # desk only
@@ -265,6 +268,92 @@ uv run --frozen --project "${CAMRI_PROJECT}" camri run fmriprep --root . --subje
 ```
 
 A chained workflow (several steps in one camri call) is the same: one `--each` array over subjects.
+
+## A module's own submit command: `--via` (release 42, proposals/module-submit-contract.md)
+
+Director, 2026-10-06: every CLI a company module ships is free of dureh; item levels, BIDS filters and the module's own
+environment names belong to the module. The harness then does two things only: it runs the module's submit command
+inside the WI context and ingests the record that command writes. `--script` (with `--each`) stays the generic path
+for plain scripts and is unchanged.
+
+```
+dureh slurm submit --wi WI-0120 --via 'camri run fmriprep step1 --workflow fmriprep.default --level subject --submit --detach'
+```
+
+- **Who, where, how.** The same guards as a plain submit: pipeline-runner (or the desk), a dispatched WI of that
+  role. The command (one quoted string, split like a shell) runs with cwd = the WI's job root (the target project
+  or module, where `--chdir` points for a plain submit) and the site environment (`site.env()`: `DUREH_SITE`,
+  `env.path_prepend`, `env.vars`); nothing DUREH-specific is required of the module. stdout/stderr are captured;
+  config `slurm.via_timeout` (default 600 s) bounds the command. `--dry-run` records `status: not-run` with the
+  command the harness would run and runs nothing.
+- **What the harness may add to the command** comes only from config, never from a module name in code:
+  `modules[<m>].submit: {record_arg, log_arg, after_arg, items_arg}` (each optional, each one option name of the
+  module's CLI). The entry is the `modules[]` item whose `cli` (or `id`) is the command's first word (basename), or the
+  one named with `--via-module <m>` (needed for wrapped commands such as `uv run camri ...`). `record_arg <path>`
+  tells the module where to write its submission record (`<slurm.log_dir>/<WI>/via-<utc ts>.json`, or the `--record`
+  path), `log_arg <slurm.log_dir>/<WI>/` where its logs go, `after_arg <job id>` once per job id of each `--after`
+  run, `items_arg @<file>` the items to rerun (`--resubmit-failed`). Without a declared option nothing is passed:
+  the module decides and the record says where things are. camri-org:
+  `"submit": {"record_arg": "--submission-record", "log_arg": "--log-dir", "after_arg": "--after", "items_arg": "--items"}`.
+- **`--after` with `--via`** needs `after_arg`; without it the submit is refused (put the dependency in the module
+  command yourself). A dependency on a via run waits for every job of that submission (`after[].job_ids`), for a
+  plain submit too (`--dependency=afterok:<id>:<id>`).
+- **Failure.** Exit code other than 0, a command not found, or no exit within `via_timeout`: nothing is submitted
+  by the harness, no `run` record is written; one `slurm.via-failed` event (command, exit, stderr/stdout tails) is
+  recorded and the error shows the tail. A command that exits 0 but names no record is refused the same way (no
+  event: nothing ran that the scheduler knows of).
+- **Ingest contract (decision 1).** The record path is `--record <path>` (relative to the job root), else the path
+  the harness passed through `record_arg`, else the last stdout line matching `submission-record: <path>`. The file
+  is JSON in the minimal schema below; a module's own schema (camri: `camri.submission.v1`) is a superset, unknown
+  top-level keys are kept under `via.extra`.
+
+  ```
+  { "schema_version": str,                       # or "schema"
+    "tool": str?, "tool_version": str?, "submitted_at": iso8601?, "cwd": path?,
+    "jobs": [ { "job_id": str, "kind": "array"|"single", "count": int?, "max_parallel": int?, "name": str?,
+                "script": path?, "logs": {"stdout": pattern, "stderr": pattern}?  (or "log_out"/"log_err"),
+                "dependency": [job id]?, "items": [...]? } ],
+    "items": [ str | {"index": int, "item": str, "level": str?, "sub": str?, "ses": str?, "path": str?} ]?,
+    "level": str?, "manifest": {"path", "sha256"}?, "selection": {"level": str, ...}?, "records": object? }
+  ```
+
+  Required: `schema_version`, `jobs[].job_id`, `jobs[].kind`. An array job needs items (its own `items`, else the
+  record's); each item matches `^[A-Za-z0-9][A-Za-z0-9._-]*$`, no duplicates, `count` (when given) equals their
+  number. The level is what the record declares (`selection.level`, `level`, or the items' `level`), else
+  subject/session/plain by the `--each` grammar, else `plain` (a module's file-level stems are not parsed).
+  Relative paths resolve against the record's `cwd`, else the job root. Log patterns keep `%A_%a`/`%j`; `name` is the
+  job name `%x` stands for (status/wait print the resolved paths; purge resolves them per task).
+- **Record (decision 3).** The usual `run` of type `slurm` with `status: submitted`, so everything downstream reads one
+  shape: `job_id` = the first job, `jobs[]` (all, normalised as above), `script`/`script_sha256`/`log_out`/`log_err` from
+  the first job, `chdir`, `logs`, `after`, `array: {job_id, items, count, level}` for the FIRST array job, `max_parallel`,
+  and `via: {command, text, module, submit, added, record, schema_version, tool, tool_version, submitted_at, cwd,
+  manifest, selection, records, extra, stdout_tail}`. `--module` with `--via` (the module's jobs on a pinned tree) is
+  phase 2 and refused for now (decision 2): the module's jobs run its live checkout.
+- **status / wait / watch.** One batched `sacct` call over every job of the submission. The state is the worst:
+  COMPLETED only when every task of every job completed; FAILED when all ended and any did not; else RUNNING or
+  PENDING. `wait` returns when every job ended. The `run.status` event carries `jobs: {job id: state}`, the first
+  array's `items`/`counts`, and when final `item_states`, `failed_items`, `failed_jobs` (recorded once). `promote
+  --run` needs the overall COMPLETED. `slurm cancel` cancels every job. `watch` reports the submission as one line
+  (`job=` the first job, `items=` the first array's counts).
+- **Workday start check (decision 4), warn-only.** The job exists before the harness can check it. In an on-duty
+  workday the harness reads `#SBATCH --time` from the first job's recorded script (else config `slurm.time`) and the
+  expected start from `squeue --start`; when the expected end is past the day's end the record says
+  `start_check: {late: true, ...}` and the submit prints a warning (cancel with `slurm cancel` or let it run). Not
+  checkable: `"unavailable"`; no `--time`: `"skipped: ..."`.
+- **`--resubmit-failed <via run>`.** Refused while any job is pending or running. The items of the array job(s)
+  whose task is not COMPLETED are written to `<slurm.log_dir>/<WI>/via-failed-<utc ts>.items`; with a configured
+  `items_arg` the recorded module command runs again with `items_arg @<file>` (the module's item option must take
+  such a list and replace its own item walk; filters may still apply), recorded `resubmit_of`, `resubmit_states`,
+  `resubmit_items_file`. Without `items_arg` the refusal lists the failed items, the file and the command to rerun
+  by hand. `--script`, `--sbatch-arg`, `--module`, `--max-parallel` do not apply to a via run.
+- **Purge.** `dureh purge --wi <WI>` removes, for every recorded job, its logs (patterns resolved per task) and the
+  module's rendered scripts when they lie in `<slurm.log_dir>/<WI>/` (what `log_arg` points the module at); inside
+  the site only, as for every other log.
+- **Desk guidance** (generated item 8): a module with its own submit command is submitted `--via`, one submission per
+  step, the next step `--after <run>`; the module makes the array and the item list, the harness records it; plain
+  scripts use `--each`; group steps go `--after` the array; never loop submits by hand. The hook lets
+  `dureh slurm submit --via '... --submit ...'` through (the quoted command is one word to the guard) and still denies
+  a bare `sbatch`.
 
 ## Pinned module trees: `--module <m>` (UR-20261004-04)
 

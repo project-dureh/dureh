@@ -73,6 +73,7 @@ class ModuleExec(SiteCase):
         cfg = json.loads((self.site_root / "config.json").read_text())
         cfg["env"] = {"path_prepend": [str(self.fake)]}
         cfg["containers"] = {"module": ""}
+        cfg["project"] = {"manifest": "camri-manifest.yaml"}  # UP-0069: the manifest name is config, not code
         cfg["modules"] = [{"id": "camri", "path": "modules/camri", "env_rebuild": "echo REBUILD-RAN", **entry}]
         (self.site_root / "config.json").write_text(json.dumps(cfg))
         self.s = self.site()

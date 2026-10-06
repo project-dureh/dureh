@@ -159,5 +159,5 @@ event_authority:
   manager: [guard.denied, finding.created, wi.staged, rework.requested, dispatch.prepared, wi.dispatched, checker.dispatched, agent.started, agent.finished, wi.stopped, bundle.ready, agent.cleaned, lane.refused]
   worker: [guard.denied, finding.created, wi.staged, agent.started, agent.finished, agent.cleaned]
   checker: [guard.denied, finding.created, verification.recorded, wi.verified, rework.requested, run.completed, agent.started, agent.finished, agent.cleaned]
-  pipeline-runner: [guard.denied, finding.created, wi.staged, run.completed, run.status, container.built, agent.started, agent.finished, agent.cleaned]
+  pipeline-runner: [guard.denied, finding.created, wi.staged, run.completed, run.status, slurm.via-failed, container.built, agent.started, agent.finished, agent.cleaned]
   data-steward: [guard.denied, finding.created, wi.staged, container.retired, agent.started, agent.finished, agent.cleaned]

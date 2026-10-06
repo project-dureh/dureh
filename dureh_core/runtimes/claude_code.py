@@ -82,7 +82,7 @@ def _skill_frontmatter(name: str, text: str) -> str:
     if text.startswith("---\n"):
         return text
     first = next((l.lstrip("# ").strip() for l in text.splitlines() if l.strip()), name)
-    return f"---\nname: {name}\ndescription: {first}. CAMRI package skill installed by DUREH.\n---\n\n{text}"
+    return f"---\nname: {name}\ndescription: {first}. Startup package skill installed by DUREH.\n---\n\n{text}"
 
 
 def _agent_file(site: Site, role, project: str | None = None) -> str:
@@ -175,7 +175,7 @@ def _agent_file(site: Site, role, project: str | None = None) -> str:
                           " images are built later by a pipeline-runner from the promoted revision, never by you.",
                           f"- Finish with `{dureh} wi stage --wi <WI> --summary ...` after committing on the WI branch."],
             "data-steward": [f"- `derivatives/` is written only by `{dureh} promote` (see harness docs/promote.md), never directly.",
-                             "- Pin images in camri-manifest.yaml by `sha256:<hex>` from `container.built`; project copies of module"
+                             f"- Pin images in {site.project_manifest() or 'the project manifest'} by `sha256:<hex>` from `container.built`; project copies of module"
                              " recipes under code/containers/ are optional (the module's containers/ is canonical).",
                              f"- Remove an image no manifest pins with `{dureh} container retire --sif <file> --reason ... --wi <WI>`"
                              " (`--dry-run` first lists pinning manifests); never delete from the cache yourself.",
@@ -220,9 +220,11 @@ TESTS_RULE = ("- Test suites are scheduler work too: never run `pytest`, `python
               " suite in the session (one session hit its memory limit this way). The WI's declared checks run as one"
               " scheduler job when the checker runs `dureh verify --wi <WI>`; other computation goes through"
               " `dureh slurm submit`. Commit, stage, and let the check job report.")
-SUBJECT_RULE = ("Submit one job per subject with `slurm submit --each <subjects>` (all subjects at once, no cap); during"
-                " development one array per step, the next step with `--after <run>`; a chained workflow is one array over"
-                " subjects; group-level steps as separate jobs `--after` the subject array; never loop submits by hand.")
+SUBJECT_RULE = ("A module with its own submit command is submitted through it: `slurm submit --wi <WI> --via '<module command>"
+                " ... --submit --detach'` (for example `camri run <pipeline> <step> --workflow <w> --level subject|session|file"
+                " [filters] --submit --detach`), one submission per step, the next step `--after <run>`; the module makes the"
+                " array and the item list, the harness records it. Plain scripts use `--each <items>` (one job per subject,"
+                " all at once, no cap). Group steps go `--after` the array. Never loop submits by hand.")
 
 
 REPORT_RULE = (" Report with `{0} report --kind status|question|approval-exec|approval-light|alert|end-report --file <msg>`;"

@@ -14,6 +14,18 @@ READ_ONLY_SITE_DIRS = ("references", "startup")
 _VAR = re.compile(r"\$\{(\w+)(?::-([^}]*))?\}|\$(\w+)")
 TOOL_NAMES = ("wi", "dispatch", "verify", "ledger", "status", "slurm", "container", "path-refs", "purge", "push", "usage", "upstream", "promote", "worktree", "day", "slack", "report")
 
+# Company-specific names the harness used to carry in code (UP-0069): now config keys with generic defaults. A startup
+# package supplies its own values through `config_defaults` in startup.yaml (merged at install, docs/config.md).
+PROJECT_DEFAULTS = {
+    "manifest": "manifest.yaml",             # the one project manifest the harness reads (pins, data flow); null = off
+    "pipeline_version_key": "version",       # key of a pipeline entry that names the pipeline's software version
+    "derivative_entry": "{family}_{species}_{suffix}",  # derivative name a pipeline entry produces (str.format fields)
+}
+CONTAINER_DEFAULTS = {
+    "cache_env": "DUREH_CONTAINER_CACHE",    # env var that names the container cache when containers.cache is unset
+    "manifest_globs": ["*manifest*.yaml", "*manifest*.yml", "*manifest*.json"],  # project files an image may be pinned in
+}
+
 
 class Site:
     def __init__(self, root: Path):
@@ -210,6 +222,25 @@ class Site:
 
     def limit(self, name: str, default=None):
         return self.org.limits.get(name, default)
+
+    def _setting(self, section: str, defaults: dict, key: str):
+        block = self.config.get(section)
+        if isinstance(block, dict) and key in block:
+            return block[key]
+        return defaults[key]
+
+    def project_setting(self, key: str):
+        """config `project.<key>` (manifest, pipeline_version_key, derivative_entry), else PROJECT_DEFAULTS."""
+        return self._setting("project", PROJECT_DEFAULTS, key)
+
+    def container_setting(self, key: str):
+        """config `containers.<key>` (cache_env, manifest_globs), else CONTAINER_DEFAULTS."""
+        return self._setting("containers", CONTAINER_DEFAULTS, key)
+
+    def project_manifest(self) -> str | None:
+        """Name of the project manifest file the harness reads; None when `project.manifest` is null or empty."""
+        name = self.project_setting("manifest")
+        return str(name) if name else None
 
     def model_for_tier(self, tier: str) -> dict:
         models = self.config.get("models") or {}
