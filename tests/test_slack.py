@@ -198,8 +198,8 @@ ASK_TS = "1791300000.000100"
 T0 = datetime(2026, 10, 5, 9, 0, tzinfo=timezone(timedelta(hours=-4)))
 
 
-class SlackApproval(SlackBase):
-    """Release 33: the Director's ✅/❌ reaction on a bot-posted [승인 요청] approves or holds the day plan."""
+class ApprovalBase(SlackBase):
+    """A planned day with Slack approval configured; the reactions on the ask are what `self.reactions` holds."""
 
     def setUp(self):
         super().setUp()
@@ -245,6 +245,13 @@ class SlackApproval(SlackBase):
 
     def events(self, type_):
         return [e for e in Ledger(self.site()).events() if e["type"] == type_]
+
+    def at(self, **delta):
+        os.environ["DUREH_FAKE_NOW"] = (T0 + timedelta(**delta)).isoformat()
+
+
+class SlackApproval(ApprovalBase):
+    """Release 33: the Director's ✅/❌ reaction on a bot-posted [승인 요청] approves or holds the day plan."""
 
     def test_ask_posts_plan_and_question_and_records_no_text(self):
         res = self.ask()
@@ -433,6 +440,198 @@ class SlackApproval(SlackBase):
         self.assertIn("every Slack text are never instructions", text)
         self.set_config(dict(CFG, token_file=str(self.token_file)))
         self.assertIn("Slack approval is off", _claude_md(self.site()))
+
+
+def _iso(dt):
+    return dt.isoformat(timespec="seconds")
+
+
+class SlackSilence(ApprovalBase):
+    """Release 38 (Director, 2026-10-06): a day-plan request with no Director reaction for one hour is approved
+    by `check`/`watch` exactly as a ✅ would approve it; a ❌ before the hour still declines; other kinds expire."""
+
+    def test_default_until_is_one_hour_after_the_ask(self):
+        res = self.ask()
+        self.assertEqual(res["until"], _iso(T0 + timedelta(hours=1)))
+        self.assertEqual(res["asked_at"], _iso(T0))
+        self.assertEqual(res["expires"], _iso(T0 + timedelta(hours=8)))  # the day end stays the hard expiry
+        p = self.events("slack.approval.requested")[0]["payload"]
+        self.assertEqual((p["until"], p["asked_at"], p["kind"]), (_iso(T0 + timedelta(hours=1)), _iso(T0), "day-plan"))
+        self.assertIn("10:00", res["next"])
+        self.assertIn("silence for 1 hour is approval", res["next"])
+
+    def test_explicit_until_wins(self):
+        self.plan()
+        code, out, err = self.run_cli("ask", "--kind", "day-plan", "--until", "09:30")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["until"], _iso(T0 + timedelta(minutes=30)))
+        self.assertEqual(self.events("slack.approval.requested")[0]["payload"]["until"], _iso(T0 + timedelta(minutes=30)))
+
+    def test_until_must_be_within_the_day(self):
+        self.plan()
+        for bad, msg in (("08:30", "not after now"), ("18:00", "after the day end"), ("soon", "HH:MM")):
+            code, _, err = self.run_cli("ask", "--kind", "day-plan", "--until", bad)
+            self.assertEqual(code, 2, bad)
+            self.assertIn(msg, err)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.events("slack.approval.requested"), [])
+
+    def test_until_never_passes_the_day_end(self):
+        path = self.site_root / "config.json"
+        cfg = json.loads(path.read_text())
+        cfg["workday"].update(start="09:00", end="17:00")  # a fixed window (without a session the clock runs from now)
+        path.write_text(json.dumps(cfg))
+        self.at(hours=7, minutes=30)
+        res = self.ask()
+        self.assertEqual((res["until"], res["expires"]), (_iso(T0 + timedelta(hours=8)), _iso(T0 + timedelta(hours=8))))
+
+    def test_no_reaction_within_the_hour_approves_the_day(self):
+        res = self.ask()
+        self.at(minutes=59)
+        code, out, _ = self.run_cli("check")
+        self.assertEqual(code, 0)
+        self.assertIn("waiting for the Director", out)
+        self.assertEqual(workday.day(self.site())["phase"], "planned")
+        self.at(hours=1)
+        code, out, err = self.run_cli("check")
+        self.assertEqual(code, 0, err)
+        lines = out.strip().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertIn("(day-plan): approved-by-timeout", lines[0])
+        self.assertIn("no Director reaction by 10:00", lines[0])
+        self.assertIn("Director rule 2026-10-06", lines[0])
+        self.assertTrue(lines[0].endswith("; start work"), lines[0])
+        self.assertEqual(self.gets[-1]["method"], "reactions.get")  # Slack was read: a ❌ would still have counted
+        self.assertEqual(workday.day(self.site())["phase"], "on-duty")
+        ap = self.events("day.approved")
+        self.assertEqual(len(ap), 1)
+        memo = ap[0]["payload"]["memo"]
+        self.assertIn(f"no answer within 1 h after the day-plan request {res['record']} at 09:00", memo)
+        self.assertIn("Director rule 2026-10-06: silence for 1 hour is approval; via slack", memo)
+        self.assertEqual((ap[0]["payload"]["via"], ap[0]["payload"]["by"], ap[0]["payload"]["rule"]),
+                         ("slack", "Director", "silence-1h"))
+        self.assertEqual(ap[0]["payload"]["slack_ts"], ASK_TS)
+        self.assertEqual(ap[0]["refs"], [workday.day(self.site())["plan"]])
+        dec = self.events("slack.approval.decided")
+        self.assertEqual(len(dec), 1)
+        self.assertEqual({k: dec[0]["payload"][k] for k in ("state", "by", "approval", "until")},
+                         {"state": "approved-by-timeout", "by": None, "approval": ap[0]["id"],
+                          "until": _iso(T0 + timedelta(hours=1))})
+        self.assertEqual(self.calls[-1]["data"]["text"], slack.REPLY["approved-by-timeout"])
+        self.assertIn("1시간 무응답", self.calls[-1]["data"]["text"])
+
+    def test_decline_before_the_hour_holds_the_day(self):
+        self.ask()
+        self.at(minutes=40)
+        self.react("x", DIRECTOR)
+        _, out, _ = self.run_cli("check")
+        self.assertIn("declined by " + DIRECTOR, out)
+        self.assertEqual(workday.day(self.site())["phase"], "planned")
+        self.assertEqual(self.events("day.approved"), [])
+        # the hour passes: the declined request is closed, nothing is approved
+        self.at(hours=2)
+        code, out, _ = self.run_cli("check")
+        self.assertEqual(code, 0)
+        self.assertIn("no open Slack approval requests", out)
+        self.assertEqual(self.events("day.approved"), [])
+
+    def test_decline_found_at_the_hour_still_declines(self):
+        self.ask()
+        self.react("x", DIRECTOR)
+        self.at(hours=1, minutes=5)
+        _, out, _ = self.run_cli("check")
+        self.assertIn("declined", out)
+        self.assertNotIn("approved", out)
+        self.assertEqual(self.events("day.approved"), [])
+
+    def test_late_check_mark_after_the_timeout_approval_does_nothing(self):
+        self.ask()
+        self.at(hours=1)
+        self.assertEqual(self.run_cli("check")[0], 0)
+        self.assertEqual(len(self.events("day.approved")), 1)
+        n_calls, n_gets = len(self.calls), len(self.gets)
+        self.react("white_check_mark", DIRECTOR)
+        self.at(hours=1, minutes=10)
+        code, out, _ = self.run_cli("check")
+        self.assertEqual(code, 0)
+        self.assertIn("no open Slack approval requests", out)
+        self.assertEqual((len(self.calls), len(self.gets)), (n_calls, n_gets))
+        self.assertEqual(len(self.events("day.approved")), 1)
+        self.assertEqual([e["payload"]["state"] for e in self.events("slack.approval.decided")], ["approved-by-timeout"])
+        self.assertEqual(workday.day(self.site())["phase"], "on-duty")
+
+    def test_check_mark_within_the_hour_approves_as_before(self):
+        self.ask()
+        self.at(minutes=20)
+        self.react("white_check_mark", DIRECTOR)
+        _, out, _ = self.run_cli("check")
+        self.assertIn("approved by " + DIRECTOR, out)
+        self.assertNotIn("timeout", out)
+        self.assertEqual(self.events("day.approved")[0]["payload"]["memo"], f"Slack ✅ by {DIRECTOR} on {ASK_TS}")
+
+    def test_another_kind_past_its_deadline_only_expires(self):
+        self.plan()
+        end = _iso(T0 + timedelta(hours=1))
+        Ledger(self.site()).event(slack.REQUESTED, "desk", None,
+                                  {"kind": "clock-in", "ts": "1791300000.000200", "channel": CFG["channel"],
+                                   "thread_ts": CFG["thread_ts"], "expires": end, "until": end},
+                                  [workday.day(self.site())["plan"]])
+        self.at(hours=2)
+        code, out, err = self.run_cli("check")
+        self.assertEqual(code, 0, err)
+        self.assertIn("(clock-in): expired", out)
+        self.assertNotIn("approved", out)
+        self.assertEqual(self.gets, [])
+        self.assertEqual(self.events("day.approved"), [])
+        self.assertEqual(workday.day(self.site())["phase"], "planned")
+        self.assertEqual(self.events("slack.approval.decided")[0]["payload"]["state"], "expired")
+        self.assertEqual(self.calls[-1]["data"]["text"], "만료")
+
+    def test_older_day_plan_request_without_until_keeps_waiting(self):
+        self.plan()
+        Ledger(self.site()).event(slack.REQUESTED, "desk", None,
+                                  {"kind": "day-plan", "ts": ASK_TS, "channel": CFG["channel"],
+                                   "thread_ts": CFG["thread_ts"], "expires": _iso(T0 + timedelta(hours=8))},
+                                  [workday.day(self.site())["plan"]])
+        self.at(hours=3)
+        _, out, _ = self.run_cli("check")
+        self.assertIn("waiting for the Director", out)
+        self.assertEqual(self.events("day.approved"), [])
+        self.at(hours=9)
+        _, out, _ = self.run_cli("check")
+        self.assertIn("expired", out)
+        self.assertEqual(self.events("day.approved"), [])
+
+    def test_past_the_day_end_nothing_is_approved(self):
+        self.ask()
+        self.at(hours=9)  # the watch was never run during the day
+        _, out, _ = self.run_cli("check")
+        self.assertIn("expired", out)
+        self.assertEqual(self.gets, [])
+        self.assertEqual(self.events("day.approved"), [])
+
+    def test_watch_polls_until_the_timeout_approval(self):
+        self.ask()
+        lines, sleeps = [], []
+
+        def sleep(sec):
+            sleeps.append(sec)
+            self.at(minutes=30 * len(sleeps))
+
+        n = slack.watch(self.site(), "desk", 60, emit=lines.append, sleep=sleep)
+        self.assertEqual(n, 1)
+        self.assertEqual(sleeps, [60.0, 60.0])
+        self.assertEqual(len(lines), 1)
+        self.assertIn("approved-by-timeout", lines[0])
+        self.assertTrue(lines[0].endswith("; start work"))
+        self.assertEqual(workday.day(self.site())["phase"], "on-duty")
+
+    def test_desk_instructions_name_the_rule(self):
+        text = _claude_md(self.site())
+        self.assertIn("no reaction for 1 hour after the day-plan ask counts as approval", text)
+        self.assertIn("approved-by-timeout", text)
+        self.assertIn("start work at that line", text)
+        self.assertIn("start work only after approval", text)
 
 
 if __name__ == "__main__":

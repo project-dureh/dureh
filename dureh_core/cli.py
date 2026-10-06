@@ -539,7 +539,7 @@ def cmd_slack(a):
         return
     if c == "ask":
         text = Path(a.file).read_text(encoding="utf-8") if a.file else None
-        _print(slack.ask(site, _actor(a), a.kind, text, a.no_consult, a.wait))
+        _print(slack.ask(site, _actor(a), a.kind, text, a.no_consult, a.wait, a.until))
     elif c == "opinions":
         if a.watch:
             slack.watch_opinions(site, _actor(a), a.days, a.interval, emit=lambda line: print(line, flush=True))
@@ -565,6 +565,8 @@ def cmd_slack(a):
             print(slack.decision_line(dec))
         for w in res["waiting"]:
             extra = f"; ignored reactions (not the Director): {', '.join(w['ignored'])}" if w["ignored"] else ""
+            if w.get("until"):
+                extra = f" (until {slack._hhmm(w['until'])}, then approved by the Director's rule of 2026-10-06)" + extra
             print(f"slack approval {w['ts']} ({w['kind']}): waiting for the Director{extra}")
         if not res["decisions"] and not res["waiting"]:
             print("no open Slack approval requests")
@@ -992,12 +994,17 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--file", help="the plan text to post (default: the recorded day plan)")
     x.add_argument("--no-consult", action="store_true",
                    help="urgent: ask without the slack.consult_agent summary line (recorded)")
-    x.add_argument("--wait", type=float, help="seconds to wait for slack.consult_agent (default 600)")
+    x.add_argument("--wait", type=float, help="seconds to wait for slack.consult_agent (default 120; Director, 2026-10-06)")
+    x.add_argument("--until", help="day-plan: HH:MM (today) or an ISO time; no Director reaction by then counts as "
+                                   "approval (default: 1 hour after the ask; Director rule 2026-10-06)")
     x.add_argument("--actor")
     x = add(sk, "check", cmd_slack, "decide open approval requests from the Director's reaction (✅ approves the day "
-                                    "as `day approve` does, via slack; ❌ holds; past the day end: expired); idempotent")
+                                    "as `day approve` does, via slack; ❌ holds; day-plan with no reaction by its `until`, "
+                                    "1 h after the ask: approved-by-timeout, recorded the same way; past the day end: "
+                                    "expired); idempotent")
     x.add_argument("--actor")
-    x = add(sk, "watch", cmd_slack, "repeat `slack check`, print only decisions, exit when nothing is open (for Monitor)")
+    x = add(sk, "watch", cmd_slack, "repeat `slack check`, print only decisions, exit when nothing is open (for Monitor; "
+                                    "a day-plan request resolves by itself at its `until`)")
     x.add_argument("--interval", type=float, default=60, help="seconds between checks (default 60, at least 5)")
     x.add_argument("--actor")
     x = add(sk, "opinions", cmd_slack, "read the company's threads; print one JSON line per new opinion (a Director reply "

@@ -332,6 +332,45 @@ class ConsultAsk(Base):
             self.assertEqual(self.run_cli("ask", "--kind", "day-plan", "--wait", "30")[0], 0)
         self.assertIn("\nCleo 의견: 응답 없음\n", self.posts[-1]["text"])
 
+    def test_ask_waits_120_s_by_default(self):
+        """Director, 2026-10-06 ("Cleo 120초 OK"): `slack ask` waits 120 s for the consult agent, not 600."""
+        self.assertEqual((slack.ASK_CONSULT_WAIT, slack.CONSULT_WAIT), (120.0, 600.0))
+        sleeps = []
+        with mock.patch.object(slack, "_sleep", sleeps.append):
+            code, out, err = self.run_cli("ask", "--kind", "day-plan")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sleeps, [30.0] * 4)
+        self.assertEqual(json.loads(out)["consult"]["answered"], False)
+        self.assertIn("\nCleo 의견: 응답 없음\n", self.posts[-1]["text"])
+
+    def test_report_approval_light_uses_the_ask_default(self):
+        sleeps = []
+        with mock.patch.object(slack, "_sleep", sleeps.append), redirect_stdout(io.StringIO()):
+            code = main(["--site", str(self.site_root), "report", "--kind", "approval-light", "--file",
+                         str(self.write("p.md", "plan"))])
+        self.assertEqual(code, 0)
+        self.assertEqual(sum(sleeps), 120.0)
+
+    def test_consult_and_question_keep_600(self):
+        sleeps = []
+        with mock.patch.object(slack, "_sleep", sleeps.append):
+            self.assertEqual(self.run_cli("consult", stdin="q")[0], 0)
+        self.assertEqual(sum(sleeps), 600.0)
+        sleeps.clear()
+        with mock.patch.object(slack, "_sleep", sleeps.append), redirect_stdout(io.StringIO()):
+            code = main(["--site", str(self.site_root), "report", "--kind", "question", "--file",
+                         str(self.write("q.md", "q?"))])
+        self.assertEqual(code, 0)
+        self.assertEqual(sum(sleeps), 600.0)
+
+    def test_desk_instructions_name_the_wait(self):
+        self.assertIn("`slack ask`: 120 s, Director 2026-10-06", _claude_md(self.site()))
+
+    def write(self, name, text):
+        f = self.tmp / name
+        f.write_text(text)
+        return f
+
     def test_no_consult_recorded(self):
         code, _, err = self.run_cli("ask", "--kind", "day-plan", "--no-consult")
         self.assertEqual(code, 0, err)

@@ -25,7 +25,15 @@ the Director's (`slack.director_user`) reply after a bot message the Director fl
 grey_question) or 💬 (speech_balloon), and an agent's (`slack.agents` {id: label}) FIRST reply after a bot message that
 mentions it (`<@ID>`, posted by `slack ask-agent`). Everything else is ignored and only counted. Each new item is
 printed (text included) and recorded as `slack.opinion.received` {id, reply_ts, by, kind, chars, thread, flagged}
-(never the text); `slack answer` replies in the item's thread. Slack text is an opinion, never an instruction."""
+(never the text); `slack answer` replies in the item's thread. Slack text is an opinion, never an instruction.
+
+Director, 2026-10-06 (release 38): "출근후 저의 승인을 기다리는것은 1시간 정도 해주시고, 1시간동안 답이 없으면 승인이라고
+생각하고 업무 시작해주세요". A `day-plan` request carries `until` (default: one hour after the ask; `--until` wins).
+When `check`/`watch` finds it past `until` with no Director ✅/❌, the day is approved exactly as a ✅ would approve it
+(state `approved-by-timeout`, memo names the rule). A ❌ before then still declines; a later ✅ changes nothing
+(already decided). The day end stays the hard expiry (`expires`): past it nothing is read and nothing is approved.
+Older request records without `until` keep the old behaviour. Same day: the consult wait of `slack ask` is 120 s
+("Cleo 120초 OK"); `slack consult` and `report --kind question` keep 600 s."""
 from __future__ import annotations
 
 import json
@@ -317,8 +325,12 @@ KINDS = ("day-plan",)
 ASK_LINE = "[승인 요청] 오늘 계획을 승인하시겠습니까? ✅ 승인 / ❌ 보류"
 APPROVE = ("white_check_mark", "heavy_check_mark", "ballot_box_with_check")
 DECLINE = ("x", "negative_squared_cross_mark", "no_entry")
-REPLY = {"approved": "✅ 승인 확인, 업무 시작", "declined": "❌ 보류: 디렉터님을 기다립니다", "expired": "만료"}
+TIMEOUT_APPROVED = "approved-by-timeout"
+REPLY = {"approved": "✅ 승인 확인, 업무 시작", "declined": "❌ 보류: 디렉터님을 기다립니다", "expired": "만료",
+         TIMEOUT_APPROVED: "⏱ 1시간 무응답: 승인으로 간주하고 업무 시작 (Director 규칙 2026-10-06)"}
 REQUESTED, DECIDED = "slack.approval.requested", "slack.approval.decided"
+SILENCE_HOURS = 1.0  # Director, 2026-10-06: a day-plan request with no answer for one hour counts as approved
+SILENCE_RULE = "Director rule 2026-10-06: silence for 1 hour is approval"
 
 
 def _approval_events(site: Site) -> tuple[list[dict], set[str]]:
@@ -333,11 +345,40 @@ def open_requests(site: Site) -> list[dict]:
     return [e for e in asked if e["payload"].get("ts") not in decided]
 
 
+def parse_until(raw: str | None, now, end) -> str:
+    """The `until` of a day-plan request: `--until` as HH:MM (today) or an ISO time, else one hour after `now`;
+    never after the day end (then the day end itself)."""
+    from datetime import datetime, timedelta
+
+    from .workday import _parse, _ts
+
+    end_dt = _parse(end)
+    if raw is None or not str(raw).strip():
+        return _ts(min(now + timedelta(hours=SILENCE_HOURS), end_dt))
+    text = str(raw).strip()
+    try:
+        if re.fullmatch(r"\d{1,2}:\d{2}", text):
+            h, m = (int(x) for x in text.split(":"))
+            dt = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        else:
+            dt = datetime.fromisoformat(text)
+            dt = dt if dt.tzinfo else dt.replace(tzinfo=now.tzinfo)
+    except ValueError:
+        fail(f"--until must be HH:MM (today) or an ISO time, not {raw!r}")
+    if dt <= now:
+        fail(f"--until {text} is not after now ({_ts(now)})")
+    if dt > end_dt:
+        fail(f"--until {text} is after the day end {end}; the request cannot outlive the day")
+    return _ts(dt)
+
+
 def ask(site: Site, actor: str, kind: str, text: str | None = None, no_consult: bool = False,
-        wait: float | None = None) -> dict:
+        wait: float | None = None, until: str | None = None) -> dict:
     """Post the recorded day plan with the approval line; record {kind, ts, channel} (never the text).
-    With `slack.consult_agent` set, the agent is consulted first and "<label> 의견: ..." is added to the request;
-    `no_consult` (urgent) skips it and is recorded."""
+    With `slack.consult_agent` set, the agent is consulted first (up to `wait` seconds, default ASK_CONSULT_WAIT) and
+    "<label> 의견: ..." is added to the request; `no_consult` (urgent) skips it and is recorded.
+    A day-plan request carries `until` (default one hour after the ask; `until` wins): no Director reaction by then
+    counts as approval (Director, 2026-10-06), recorded by `check`/`watch`."""
     from . import workday
 
     _require_desk(site, actor)
@@ -357,19 +398,26 @@ def ask(site: Site, actor: str, kind: str, text: str | None = None, no_consult: 
         plan = next(e for e in Ledger(site).events() if e["id"] == d["plan"])["payload"]
         text = f"*오늘 계획* ({plan.get('date')})\n목표: {plan.get('goal')}\n\n{plan.get('plan', '').strip()}"
     _token(cfg)
-    text, consult = _consult_gate(site, actor, cfg, text, no_consult, CONSULT_WAIT if wait is None else wait)
+    text, consult = _consult_gate(site, actor, cfg, text, no_consult, ASK_CONSULT_WAIT if wait is None else wait)
     body = text.strip() + "\n\n" + ASK_LINE
     body = _clean(body)
     # the request expires at the end of the company's day (the session clock; without a session, the config window
-    # or the hours from now)
-    _start, end = workday.clock(site, workday.todays_session(workday._events(site)), workday._now())
+    # or the hours from now); a day-plan request also carries `until`, after which silence counts as approval
+    now = workday._now()
+    _start, end = workday.clock(site, workday.todays_session(workday._events(site)), now)
+    silence = {"until": parse_until(until, now, end), "asked_at": workday._ts(now)} if kind == "day-plan" else {}
     _token(cfg)
     thread, info = _target(site, actor, cfg)
     ts = _send(cfg, body, thread)
     rec = Ledger(site).event(REQUESTED, actor, None, {"kind": kind, "ts": ts, "channel": cfg["channel"],
-                                                      "thread_ts": thread, "expires": end, **consult}, [d["plan"]])
+                                                      "thread_ts": thread, "expires": end, **silence, **consult},
+                             [d["plan"]])
+    hint = "run `dureh slack watch` as a Monitor; start work only after approval"
+    if silence:
+        hint += (f": the Director's ✅, or no Director reaction by {_hhmm(silence['until'])} ({SILENCE_RULE}), which "
+                 "`slack watch`/`slack check` records as the approval")
     return {"asked": True, "kind": kind, "ts": ts, "channel": cfg["channel"], "thread_ts": thread, "expires": end,
-            "record": rec["id"], **consult, **info, "next": "run `dureh slack watch` as a Monitor; start work only after approval"}
+            **silence, "record": rec["id"], **consult, **info, "next": hint}
 
 
 def _base(name: str) -> str:
@@ -413,14 +461,18 @@ def check(site: Site, actor: str) -> dict:
         ts, kind = p["ts"], p.get("kind")
         plan_id = (req.get("refs") or [None])[0]
         d = workday.day(site)
-        if p.get("expires") and workday._now() >= workday._parse(p["expires"]):
-            state, ignored = "expired", []
-        elif d.get("phase") != "planned" or d.get("plan") != plan_id:
+        now = workday._now()
+        until = p.get("until") if kind == "day-plan" else None  # older day-plan records: no silence rule
+        if p.get("expires") and now >= workday._parse(p["expires"]):
+            state, ignored = "expired", []  # the day end: the hard expiry for every kind; Slack is not read
+        elif kind == "day-plan" and (d.get("phase") != "planned" or d.get("plan") != plan_id):
             state, ignored = "closed", []  # the plan was approved in the session, replaced or closed meanwhile
         else:
             state, ignored = _decide(director, _reactions(cfg, ts))
+            if state is None and until and now >= workday._parse(until):
+                state = TIMEOUT_APPROVED  # Director, 2026-10-06: no ✅/❌ for one hour counts as approval
         if state is None:
-            waiting.append({"ts": ts, "kind": kind, "ignored": ignored})
+            waiting.append({"ts": ts, "kind": kind, "ignored": ignored, **({"until": until} if until else {})})
             continue
         out = {"ts": ts, "kind": kind, "state": state, "by": director if state in ("approved", "declined") else None,
                "ignored": ignored}
@@ -428,8 +480,16 @@ def check(site: Site, actor: str) -> dict:
             rec = workday.approve(site, actor, f"Slack ✅ by {director} on {ts}", via="slack",
                                   extra={"slack_ts": ts, "slack_user": director})
             out["approval"] = rec["id"]
+        elif state == TIMEOUT_APPROVED:
+            asked_at = p.get("asked_at") or req["ts"]
+            memo = (f"no answer within 1 h after the day-plan request {req['id']} at {_hhmm(asked_at)}"
+                    f" (until {_hhmm(until)}); {SILENCE_RULE}; via slack")
+            rec = workday.approve(site, actor, memo, via="slack",
+                                  extra={"slack_ts": ts, "rule": "silence-1h", "until": until})
+            out["approval"], out["until"] = rec["id"], until
         led.event(DECIDED, actor, None, {"ts": ts, "state": state, "by": out["by"], "ignored": len(ignored),
-                                         **({"approval": out["approval"]} if "approval" in out else {})}, [req["id"]])
+                                         **({"approval": out["approval"]} if "approval" in out else {}),
+                                         **({"until": until} if state == TIMEOUT_APPROVED else {})}, [req["id"]])
         reply_thread = p.get("thread_ts") or cfg["thread_ts"] or day_thread(site, cfg, day_date(site))
         if state in REPLY and reply_thread:
             try:
@@ -440,12 +500,25 @@ def check(site: Site, actor: str) -> dict:
     return {"decisions": decisions, "waiting": waiting}
 
 
+def _hhmm(ts: str) -> str:
+    from .workday import _local
+
+    try:
+        return _local(ts).strftime("%H:%M")
+    except ValueError:
+        return str(ts)[11:16]
+
+
 def decision_line(dec: dict) -> str:
     line = f"slack approval {dec['ts']} ({dec['kind']}): {dec['state']}"
     if dec.get("by"):
         line += f" by {dec['by']}"
+    if dec["state"] == TIMEOUT_APPROVED:
+        line += f" (no Director reaction by {_hhmm(dec['until'])}; {SILENCE_RULE})"
     if dec.get("approval"):
         line += f"; day approved ({dec['approval']}, via slack)"
+    if dec["state"] == TIMEOUT_APPROVED:
+        line += "; start work"
     if dec.get("ignored"):
         line += f"; ignored reactions (not the Director): {', '.join(dec['ignored'])}"
     if dec.get("reply_error"):
@@ -454,7 +527,8 @@ def decision_line(dec: dict) -> str:
 
 
 def watch(site: Site, actor: str, interval: float = 60, emit=print, sleep=time.sleep) -> int:
-    """Check until nothing is open; emit only decision lines. Returns the number of decisions."""
+    """Check until nothing is open; emit only decision lines. Returns the number of decisions. A day-plan request
+    resolves by itself at its `until` (approved-by-timeout), so the watch ends within the hour at the latest."""
     _require_desk(site, actor)
     n = 0
     while True:
@@ -682,7 +756,8 @@ def answer(site: Site, actor: str, oid: str, text: str) -> dict:
 # ------------------------------------------------------------------ consult before asking the Director (release 35)
 CONSULTED = "slack.agent.consulted"
 CONSULT_POLL = 30.0
-CONSULT_WAIT = 600.0
+CONSULT_WAIT = 600.0       # `slack consult`, `report --kind question`
+ASK_CONSULT_WAIT = 120.0   # `slack ask` (Director, 2026-10-06: "Cleo 120초 OK"; 600 s cost ten minutes per request)
 
 
 def consult_line(label: str, reply: str | None) -> str:

@@ -8,7 +8,9 @@ instructions come only through the company session.
 
 One narrow exception (Director, 2026-10-05; release 33): the Director may approve the company's day plan with a
 reaction. Only the Director's ✅/❌ reaction on a bot-posted `[승인 요청]` message counts; no text is ever read
-as an instruction (see [Day-plan approval by reaction](#day-plan-approval-by-reaction)).
+as an instruction (see [Day-plan approval by reaction](#day-plan-approval-by-reaction)). Since release 38
+(Director, 2026-10-06) silence counts too: no Director reaction for **one hour** after the day-plan ask is approval,
+recorded by `slack check`/`slack watch` (see [Silence is approval](#silence-is-approval-director-2026-10-06)).
 
 Release 35 (Director, 2026-10-05, the same rules as upstream): the desk reads **opinions** (the Director's replies under
 bot messages the Director flagged, and the first reply of an agent the desk asked) and answers them in the thread;
@@ -113,7 +115,7 @@ Desk only, with workday mode on and `slack.director_user` set.
 
 ```sh
 bin/dureh day plan --goal "..." --file plan.md        # first: the recorded plan for today
-bin/dureh slack ask --kind day-plan [--file F]        # posts the plan (default: the recorded plan text) + the question
+bin/dureh slack ask --kind day-plan [--file F] [--until HH:MM]   # posts the plan (default: the recorded plan text) + the question
 bin/dureh slack watch [--interval 60]                 # the desk's Monitor: prints only decisions, exits when nothing is open
 bin/dureh slack check                                 # one pass (same decisions; also lists requests still waiting)
 ```
@@ -121,11 +123,13 @@ bin/dureh slack check                                 # one pass (same decisions
 - `ask` refuses without a day plan recorded today that waits for approval (hint: `dureh day plan`), and while a
   request for the same plan is open. It posts, in the company thread, the plan text followed by
   `[승인 요청] 오늘 계획을 승인하시겠습니까? ✅ 승인 / ❌ 보류`, and records `slack.approval.requested`
-  `{kind, ts, channel, expires}` (expires = the company's day end) with the plan as ref; never the text.
+  `{kind, ts, channel, expires, until, asked_at}` (expires = the company's day end; until = one hour after the ask,
+  or `--until`, see below) with the plan as ref; never the text.
 - `check` reads, for each open request, only the reactions on that bot message (`reactions.get`, GET, `full=true`,
   bot token). Only reactions by `director_user` count:
   - ✅ `white_check_mark`, `heavy_check_mark`, `ballot_box_with_check` -> **approved**;
   - ❌ `x`, `negative_squared_cross_mark`, `no_entry` -> **declined**; both ✅ and ❌ -> declined;
+  - no Director ✅/❌ and the request is past its `until` -> **approved-by-timeout** (day-plan only, see below);
   - past the day end -> **expired** (Slack is not read);
   - the plan already approved in the session, replaced or closed -> **closed** (Slack is not read, no reply);
   - no Director ✅/❌ yet -> still open.
@@ -134,12 +138,29 @@ bin/dureh slack check                                 # one pass (same decisions
   `Slack ✅ by <director_user> on <ts>` and `via: slack` (plus `slack_ts`, `slack_user`) in the `day.approved`
   record; `by` stays `Director`. `day approve` itself is not restricted to the Director's own terminal (the desk
   records the Director's words), so no `--via-slack` flag exists: only `slack check` writes `via: slack`.
-- Each decision records `slack.approval.decided` `{ts, state, by, ignored, approval?}` and posts a short reply in
-  the thread: `✅ 승인 확인, 업무 시작`, `❌ 보류: 디렉터님을 기다립니다` or `만료`. A failed reply is reported
-  in the line; the decision stands. One line is printed per decision. A decided request is never read again
-  (idempotent).
+- Each decision records `slack.approval.decided` `{ts, state, by, ignored, approval?, until?}` and posts a short
+  reply in the thread: `✅ 승인 확인, 업무 시작`, `❌ 보류: 디렉터님을 기다립니다`, `⏱ 1시간 무응답: 승인으로 간주하고
+  업무 시작 (Director 규칙 2026-10-06)` or `만료`. A failed reply is reported in the line; the decision stands. One
+  line is printed per decision. A decided request is never read again (idempotent).
 - After ❌ the day stays `planned`: the desk waits for the Director in the session (a revised plan may be asked again).
 - `slack.*` events cannot be added by `dureh event add`.
+
+### Silence is approval (Director, 2026-10-06)
+
+"출근후 저의 승인을 기다리는것은 1시간 정도 해주시고, 1시간동안 답이 없으면 승인이라고 생각하고 업무 시작해주세요."
+
+- A `day-plan` request carries `until`: by default **one hour after the ask**, or `--until HH:MM` (today) / an ISO
+  time; `--until` must be after now and not after the day end. When the hour would pass the day end, `until` is the
+  day end (and the request simply expires there).
+- When `check`/`watch` finds the request past `until` with no Director ✅/❌ on it, it records the approval exactly as
+  a ✅ would: the same `day.approved` record (`via: slack`, `rule: silence-1h`, `until`), memo
+  `no answer within 1 h after the day-plan request <record id> at <HH:MM> (until <HH:MM>); Director rule 2026-10-06:
+  silence for 1 hour is approval; via slack`; the request state is **approved-by-timeout**; the printed line ends with
+  `; start work`. The desk starts work at that line.
+- A ❌ before the hour still declines. After the decision a late ✅ or ❌ changes nothing (the request is closed; see
+  idempotent above). Other kinds and older `day-plan` records without `until` keep the old behaviour: they wait until
+  the day end and then expire.
+- `slack watch` therefore ends within the hour at the latest: by the Director's reaction or by the timeout approval.
 
 
 ## Opinions
@@ -185,6 +206,8 @@ bin/dureh slack consult [--file F] [--wait 600]     # ask it, poll every 30 s fo
   chars, reply_ts?}` (never the text). The consulted reply is not listed again by `opinions`.
 - `slack ask --kind day-plan` and `dureh report --kind question` consult first and add one line
   `<label> 의견: <reply, first 300 characters, or 응답 없음>` to the request; the Director still decides.
+  `slack ask` waits **120 s** by default (Director, 2026-10-06: "Cleo 120초 OK"; `--wait` overrides); `slack consult`
+  and `report --kind question` keep 600 s.
   `slack ask --no-consult` (urgent) skips it and records `consult: {agent, skipped: true, reason: --no-consult}` in
   `slack.approval.requested` (otherwise `consult: {agent, request, answered}`).
 
