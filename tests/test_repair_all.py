@@ -359,6 +359,79 @@ class RepairAll(SiteCase):
         self.assertEqual(len(self.runs()), 2)
         self.assertEqual(len([e for e in Ledger(self.s).events() if e["type"] == "env.repaired"]), 1)
 
+    def test_prune_stale_lists_then_removes_the_copies_and_never_a_venv(self):
+        import io
+        from contextlib import redirect_stdout
+
+        def copy(path: Path, size: int):
+            (path / "lib").mkdir(parents=True)
+            (path / "lib" / "big").write_bytes(b"x" * size)
+            return path
+
+        fake_venv(self.wt / ".venv", self.wt / ".venv")
+        fake_venv(self.mod / ".venv", self.mod / ".venv")
+        a = copy(self.wt / ".venv.stale-20261006", 3000)  # the rename step's copy
+        b = copy(self.mod / ".venv.stale-20261007T120000", 5000)  # a repair's copy
+        exec_dir = self.site_root / "scratch" / "exec"
+        c = copy(exec_dir / f"{self.wi}-demo-abcdef0-20261006T120000000000Z.venv.stale-20261006", 100)
+        other = self.site_root / "projects"
+        other.mkdir(exist_ok=True)
+        (other / "p").mkdir()
+        keep = copy(other / "p" / ".venv", 10)  # a plain .venv, not a copy
+        (self.wt / ".venv.stale-link").symlink_to(a)  # a symlink is not followed or removed
+        events = len(Ledger(self.s).events())
+
+        # listing is the default: path and size, nothing removed
+        r = wf.prune_stale_venvs(self.s, "desk")
+        rows = {row["name"]: row for row in r["items"]}
+        rel = lambda path: str(path.relative_to(self.site_root))
+        self.assertEqual(set(rows), {rel(a), rel(b), rel(c)})
+        self.assertEqual([row["state"] for row in r["items"]], ["listed"] * 3)
+        self.assertEqual((rows[rel(a)]["target"], rows[rel(a)]["size"]), ("modules/demo", 3000))
+        self.assertEqual(rows[rel(b)]["target"], "modules/demo")
+        self.assertEqual(r["summary"], {"remove": False, "items": 3, "size": 8100, "removed": 0, "errors": 0})
+        self.assertTrue(a.is_dir() and b.is_dir() and c.is_dir())
+        self.assertEqual(len(Ledger(self.s).events()), events)
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(cli.main(["--site", str(self.site_root), "worktree", "repair", "--all",
+                                       "--prune-stale"]), 0)
+        text = out.getvalue()
+        self.assertIn("would remove", text)
+        self.assertIn("2.9K", text)
+        self.assertIn("nothing removed (add --remove)", text)
+        self.assertTrue(a.is_dir())
+
+        # --target: one main tree
+        r = wf.prune_stale_venvs(self.s, "desk", target="modules/demo")
+        self.assertEqual([row["name"] for row in r["items"]], [rel(b)])
+        self.assertTrue(b.is_dir())
+
+        # --remove: the copies go, every .venv stays, one env.repaired record per copy
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(cli.main(["--site", str(self.site_root), "worktree", "repair", "--all", "--prune-stale",
+                                       "--remove"]), 0)
+        self.assertIn("3 of 3 stale copies removed", out.getvalue())
+        self.assertFalse(a.exists() or b.exists() or c.exists())
+        self.assertTrue((self.wt / ".venv" / "bin" / "pytest").is_file())
+        self.assertTrue((self.mod / ".venv" / "bin" / "pytest").is_file())
+        self.assertTrue((keep / "lib" / "big").is_file())
+        self.assertTrue((self.wt / ".venv.stale-link").is_symlink())
+        pruned = [e for e in Ledger(self.s).events() if e["type"] == "env.repaired" and e["payload"]["env"] == "pruned"]
+        self.assertEqual(len(pruned), 3)
+        self.assertEqual({e["payload"]["venv"] for e in pruned}, {str(a), str(b), str(c)})
+        self.assertEqual([e["wi"] for e in pruned if e["payload"]["venv"] == str(a)], [self.wi])
+        self.assertEqual(wf.prune_stale_venvs(self.s, "desk", remove=True)["summary"]["items"], 0)
+        with self.assertRaisesRegex(DurehError, "only the desk"):
+            wf.prune_stale_venvs(self.s, "py-writer")
+        with self.assertRaisesRegex(DurehError, "--prune-stale goes with"):
+            a_ = cli.parser().parse_args(["--site", str(self.site_root), "worktree", "repair", "--prune-stale"])
+            a_.func(a_)
+        with self.assertRaisesRegex(DurehError, "--remove goes with"):
+            a_ = cli.parser().parse_args(["--site", str(self.site_root), "worktree", "repair", "--all", "--remove"])
+            a_.func(a_)
+
     def test_only_the_desk(self):
         with self.assertRaisesRegex(DurehError, "only the desk"):
             wf.worktree_repair_all(self.s, "py-writer")

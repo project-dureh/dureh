@@ -639,8 +639,22 @@ def cmd_authorize_write(a):
 
 
 def cmd_worktree(a):
-    from .workflow import env_repair, worktree_repair, worktree_repair_all
+    from .workflow import env_repair, prune_stale_venvs, worktree_repair, worktree_repair_all
 
+    if a.prune_stale:
+        if a.wi or not (a.all or a.target) or (a.all and a.target):
+            fail("--prune-stale goes with --all (every root) or --target <target> (one main tree), not --wi")
+        if a.envs_only or a.no_envs or a.force:
+            fail("--prune-stale takes none of --envs-only, --no-envs and --force")
+        r = prune_stale_venvs(_site(a), _actor(a), target=a.target, remove=a.remove and not a.dry_run)
+        if a.json:
+            _print(r)
+            return
+        for line in prune_stale_lines(r):
+            print(line)
+        return
+    if a.remove:
+        fail("--remove goes with --prune-stale")
     if a.all:
         if a.wi or a.target:
             fail("--all covers every worktree and environment of the site; it takes neither --wi nor --target")
@@ -680,6 +694,32 @@ def repair_all_lines(r: dict) -> list[str]:
                else f"summary: worktrees {fmt(w)} (environments not checked: --no-envs)")
     if dry:
         out.append("dry run: nothing was changed or recorded")
+    return out
+
+
+def _size(n: int) -> str:
+    for unit in ("B", "K", "M", "G", "T"):
+        if n < 1024 or unit == "T":
+            return f"{n:.0f}{unit}" if unit == "B" else f"{n:.1f}{unit}"
+        n /= 1024
+    return f"{n:.1f}T"
+
+
+def prune_stale_lines(r: dict) -> list[str]:
+    """One line per `.venv.stale-*` copy of `worktree repair --prune-stale` and a summary line."""
+    out = []
+    for row in r["items"]:
+        state = {"listed": "would remove"}.get(row["state"], row["state"])
+        note = row.get("error") or _size(row["size"])
+        out.append(f"{row['kind']:<10} {row['name']:<50} {(row.get('target') or '-'):<18} {state:<13} {note}".rstrip())
+    s = r["summary"]
+    if not r["items"]:
+        out.append("summary: no .venv.stale-* copies found")
+    elif s["remove"]:
+        out.append(f"summary: {s['removed']} of {s['items']} stale copies removed, {_size(s['size'])}"
+                   + (f"; {s['errors']} error(s)" if s["errors"] else ""))
+    else:
+        out.append(f"summary: {s['items']} stale copies, {_size(s['size'])}; nothing removed (add --remove)")
     return out
 
 
@@ -1167,7 +1207,8 @@ def parser() -> argparse.ArgumentParser:
     x = add(wt, "repair", cmd_worktree, "desk: re-link a WI worktree after the site moved (or prune it if its directory is"
             " gone) and rebuild a stale .venv (recreated from scratch) or create a missing one with the configured"
             " env_rebuild; --target rebuilds a main tree's .venv;"
-            " --all does both for every worktree and environment of the site (after a move or rename)")
+            " --all does both for every worktree and environment of the site (after a move or rename);"
+            " --prune-stale lists (and with --remove deletes) the .venv.stale-* copies a rebuild left behind")
     x.add_argument("--wi")
     x.add_argument("--target")
     x.add_argument("--all", action="store_true", help="every WI worktree (worktrees/* and the entries modules/* and"
@@ -1181,7 +1222,14 @@ def parser() -> argparse.ArgumentParser:
                    " rebuild, for example without network)")
     x.add_argument("--force", action="store_true", help="with --all: rebuild every environment that has an"
                    " env_rebuild, stale or not")
-    x.add_argument("--json", action="store_true", help="with --all: print the items and summary as JSON")
+    x.add_argument("--prune-stale", action="store_true", help="with --all or --target: list the .venv.stale-<time>"
+                   " copies (a rebuild moves the old environment aside; the rename step left some) under worktrees/*,"
+                   " the main trees and scratch/exec, with their size; nothing is removed without --remove; a plain"
+                   " .venv is never touched")
+    x.add_argument("--remove", action="store_true", help="with --prune-stale: remove the copies (one env.repaired"
+                   " record each)")
+    x.add_argument("--json", action="store_true", help="with --all or --prune-stale: print the items and summary as"
+                   " JSON")
     x.add_argument("--actor")
     x = add(sub, "promote", cmd_promote, "data-steward: promote verified checkpoints into a derivatives subdataset, "
             "or (--kind report) land a generated report into derivatives/<dataset>/reports/<name>/")

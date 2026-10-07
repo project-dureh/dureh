@@ -18,7 +18,9 @@ from .site import Site
 from .util import fail, git, sha256_file
 
 BRIEF_TAG = "DUREH-BRIEF"
-CACHE_RE = re.compile(r"(^|/)(__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.venv)(/|$)|\.py[co]$")
+# interpreter caches, the virtualenv and the `.venv.stale-<time>` copies a rebuild (or the rename step) moved aside
+CACHE_RE = re.compile(r"(^|/)(__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.venv(\.stale-[^/]*)?)(/|$)"
+                      r"|\.py[co]$")
 
 
 # --------------------------------------------------------------------- wi
@@ -370,6 +372,67 @@ def worktree_repair_all(site: Site, actor: str, dry_run: bool = False, envs: boo
                "worktrees": worktrees, "venvs": envs_c}
     if not dry_run:
         led.event("worktree.repair-all", actor, None, summary)
+    return {"items": rows, "summary": summary}
+
+
+def _dir_size(path: Path) -> int:
+    """Bytes in the files under `path` (symlinks counted by their own size, nothing followed)."""
+    total = 0
+    for dirpath, _dirnames, filenames in os.walk(path):
+        for n in filenames:
+            try:
+                total += os.lstat(os.path.join(dirpath, n)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def prune_stale_venvs(site: Site, actor: str, target: str | None = None, remove: bool = False) -> dict:
+    """`worktree repair --prune-stale`: the `.venv.stale-<time>` copies that a rebuild (_repair_env) or the site
+    rename step moved aside, under every `worktrees/*` directory, the main tree of every module and project and
+    the exec root (`<tree>.venv.stale-*`): the roots `--all` visits; `target` restricts it to that main tree.
+    Listed with their size; removed only with `remove`. A plain `.venv` is never touched. Each removed copy is
+    recorded as `env.repaired` with `env: pruned`, as the rebuild records its own row."""
+    from .exectree import exec_root
+
+    if site.org.role(actor).kind != "desk":
+        fail("only the desk prunes environments")
+    led = Ledger(site)
+    targets = {rec["id"]: rec["payload"].get("target") for rec in led.load("work-item")}
+    roots: list[tuple[str, str | None, Path, str]] = []  # name, target, directory, glob
+    if target:
+        root = target_root(site, target)
+        if root is None or not root.is_dir():
+            fail(f"unknown target {target!r}")
+        roots.append((target, target, root, ".venv.stale-*"))
+    else:
+        roots += [(t, t, r, ".venv.stale-*") for t, r in _site_repos(site)]
+        if site.worktrees.is_dir():
+            roots += [(f"worktrees/{d.name}", targets.get(d.name), d, ".venv.stale-*")
+                      for d in sorted(site.worktrees.iterdir()) if d.is_dir()]
+        if exec_root(site).is_dir():
+            roots.append(("scratch/exec", None, exec_root(site), "*.venv.stale-*"))
+    rows: list[dict] = []
+    for name, tgt, d, pattern in roots:
+        for p in sorted(d.glob(pattern)):
+            if p.is_symlink() or not p.is_dir():
+                continue
+            row = {"kind": "stale-venv", "name": str(p.relative_to(site.root)), "target": tgt, "path": str(p),
+                   "size": _dir_size(p), "state": "listed"}
+            rows.append(row)
+            if not remove:
+                continue
+            try:
+                shutil.rmtree(p)
+            except OSError as exc:
+                row.update(state="error", error=str(exc)[-300:])
+                continue
+            row["state"] = "removed"
+            wi = d.name if name.startswith("worktrees/") and d.name in targets else None
+            led.event("env.repaired", actor, wi, {"target": tgt, "venv": str(p), "env": "pruned", "size": row["size"]})
+    summary = {"remove": remove, "items": len(rows), "size": sum(r["size"] for r in rows),
+               "removed": sum(r["state"] == "removed" for r in rows),
+               "errors": sum(r["state"] == "error" for r in rows)}
     return {"items": rows, "summary": summary}
 
 

@@ -286,6 +286,7 @@ bin/dureh worktree repair --all             # every worktree and environment of 
 bin/dureh worktree repair --all --no-envs   # worktrees only (no network needed)
 bin/dureh worktree repair --all --envs-only # environments only; --force rebuilds them stale or not
 bin/dureh worktree repair --wi <WI> | --target <target>   # one worktree, or one main tree's .venv (unchanged)
+bin/dureh worktree repair --all --prune-stale [--remove]  # list (then remove) the .venv.stale-* copies left behind
 ```
 
 `--all` covers every `worktrees/*` directory and every worktree the `modules/*` and `projects/*` repositories
@@ -297,9 +298,12 @@ shebang names an interpreter that does not exist, `bin/activate` names another d
 from config.json (or `env.rebuild`), one whose target has none is `skipped: no env_rebuild`. The rebuild starts
 from nothing: the old directory is moved to `.venv.stale-<time>` first (a `uv sync` into it keeps the installed
 scripts and their old shebangs) and removed once the rebuild succeeds; it stays, named in the error, when the
-rebuild fails. A worktree with no `.venv` at all gets one created the same way. The pass never stops at an
-error: one line per item (repaired, pruned, rebuilt, unchanged, skipped, error) and a summary line (`--json` for
-the same as data). Records: `worktree.repaired` and `env.repaired` per changed item as the single
+rebuild fails. A worktree with no `.venv` at all gets one created the same way. `--prune-stale` lists the
+`.venv.stale-*` copies under `worktrees/*`, the main trees and `scratch/exec` with their size (`--target` for one
+main tree) and removes them with `--remove`, one `env.repaired` record (`env: pruned`) each; a plain `.venv` is
+never touched, and `verify` ignores the copies as it ignores `.venv`. The pass never stops at an error: one line
+per item (repaired, pruned, rebuilt, unchanged, skipped, error) and a summary line (`--json` for the same as
+data). Records: `worktree.repaired` and `env.repaired` per changed item as the single
 forms write them, plus one `worktree.repair-all` with the counts. A second run reports everything unchanged.
 `--all` is one command because `--wi` already repairs a worktree and its `.venv` together and the desk after a
 move should not have to list targets; `--no-envs` and `--envs-only` split it when a rebuild needs network or

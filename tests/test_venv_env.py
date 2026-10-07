@@ -62,6 +62,23 @@ class Venv(SiteCase):
         paths, _ = wf.changed_paths(self.s, self.wi)
         self.assertEqual(paths, ["src/new file.py"])
 
+    def test_changed_paths_exclude_stale_venv_copies_too(self):
+        self.venv(self.wt, sys.executable)
+        (self.wt / ".venv" / "y").write_text("x")
+        (self.wt / ".venv.stale-20261006" / "bin").mkdir(parents=True)  # the rename step's copy
+        (self.wt / ".venv.stale-20261006" / "x").write_text("x")
+        (self.wt / ".venv.stale-20261007T133434" / "lib").mkdir(parents=True)  # a repair's copy
+        (self.wt / ".venv.stale-20261007T133434" / "lib" / "z").write_text("x")
+        (self.wt / ".venvs").mkdir()  # not a venv name the harness knows: still an output
+        (self.wt / ".venvs" / "w").write_text("x")
+        self.stage()
+        paths, _ = wf.changed_paths(self.s, self.wi)
+        self.assertEqual(paths, [".venvs/w", "src/new file.py"])
+        for name in (".venv/y", "a/.venv.stale-20261006/x", ".venv.stale-x/bin/pytest", "b/.venv", ".venv.stale-1"):
+            self.assertTrue(wf.CACHE_RE.search(name), name)
+        for name in (".venvs/w", "x/.venv-old/y", ".venv.stale", "venv/x"):
+            self.assertFalse(wf.CACHE_RE.search(name), name)
+
     def test_verify_refuses_a_stale_venv_without_recording_a_failure(self):
         self.venv(self.wt, "/old/site/worktrees/W/.venv/bin/python")
         self.stage()
