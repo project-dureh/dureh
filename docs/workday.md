@@ -294,9 +294,12 @@ plain `git worktree repair` per repository. The environments are the main tree o
 WI worktrees' and the exec-tree siblings `scratch/exec/<tree>.venv`. An environment is stale when a script
 shebang names an interpreter that does not exist, `bin/activate` names another directory as `VIRTUAL_ENV`,
 `pyvenv.cfg`'s `home` is gone or `bin/python` dangles; a stale one is rebuilt with the target's `env_rebuild`
-from config.json (or `env.rebuild`), one whose target has none is `skipped: no env_rebuild`. The pass never stops
-at an error: one line per item (repaired, pruned, rebuilt, unchanged, skipped, error) and a summary line
-(`--json` for the same as data). Records: `worktree.repaired` and `env.repaired` per changed item as the single
+from config.json (or `env.rebuild`), one whose target has none is `skipped: no env_rebuild`. The rebuild starts
+from nothing: the old directory is moved to `.venv.stale-<time>` first (a `uv sync` into it keeps the installed
+scripts and their old shebangs) and removed once the rebuild succeeds; it stays, named in the error, when the
+rebuild fails. A worktree with no `.venv` at all gets one created the same way. The pass never stops at an
+error: one line per item (repaired, pruned, rebuilt, unchanged, skipped, error) and a summary line (`--json` for
+the same as data). Records: `worktree.repaired` and `env.repaired` per changed item as the single
 forms write them, plus one `worktree.repair-all` with the counts. A second run reports everything unchanged.
 `--all` is one command because `--wi` already repairs a worktree and its `.venv` together and the desk after a
 move should not have to list targets; `--no-envs` and `--envs-only` split it when a rebuild needs network or

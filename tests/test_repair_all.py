@@ -271,6 +271,94 @@ class RepairAll(SiteCase):
             a = cli.parser().parse_args(["--site", str(new), "worktree", "repair", "--all", "--wi", self.wi])
             a.func(a)
 
+    def test_stale_venv_is_recreated_from_scratch_not_synced_in_place(self):
+        """Release 43 gap 1: a sync into the old directory keeps the stale console scripts; the repair moves the
+        stale environment aside and the rebuild starts from nothing (the old contents are gone afterwards)."""
+        self.configure()
+        venv = self.wt / ".venv"
+        fake_venv(venv, Path("/old/site/worktrees") / self.wi / ".venv", home="/old/site/py/bin")
+        (venv / "lib").mkdir()
+        (venv / "lib" / "old-package.txt").write_text("installed before the move\n")  # what `uv sync` would keep
+        old_venv = f"/old/site/worktrees/{self.wi}/.venv"
+        self.assertEqual(wf.stale_venv(self.wt), old_venv)  # activate, the first bin/ entry, names the old place
+        r = wf.worktree_repair(self.s, "desk", self.wi)
+        self.assertEqual((r["state"], r["env"]), ("ok", "rebuilt"))
+        self.assertEqual(r["stale_interpreter"], old_venv)
+        self.assertTrue(r["moved_aside"].startswith(f"{venv}.stale-"), r)
+        self.assertTrue(r["moved_aside"].endswith(" (removed)"), r)
+        self.assertEqual(self.runs(), [f"{self.wt} "])
+        self.assertIsNone(wf.stale_venv(self.wt))
+        self.assertFalse((venv / "lib" / "old-package.txt").exists())  # recreated, not patched in place
+        self.assertEqual([p.name for p in self.wt.iterdir() if p.name.startswith(".venv")], [".venv"])  # no leftover
+        ev = [e for e in Ledger(self.s).events(self.wi) if e["type"] == "worktree.repaired"][-1]
+        self.assertEqual(ev["payload"]["env"], "rebuilt")
+        self.assertIn("moved_aside", ev["payload"])
+
+    def test_failed_rebuild_keeps_the_stale_copy_and_names_it(self):
+        cfg = json.loads(self.s.config_path.read_text())
+        cfg["modules"] = [{"id": "demo", "path": "modules/demo", "env_rebuild": "echo no network >&2; exit 3"}]
+        self.s.config_path.write_text(json.dumps(cfg))
+        self.s = Site(self.site_root)
+        venv = self.wt / ".venv"
+        fake_venv(venv, Path("/old/site/worktrees") / self.wi / ".venv")
+        with self.assertRaisesRegex(DurehError, r"no network.*moved to .*\.venv\.stale-") as cm:
+            wf.worktree_repair(self.s, "desk", self.wi)
+        aside = [p for p in self.wt.iterdir() if p.name.startswith(".venv.stale-")]
+        self.assertEqual(len(aside), 1, aside)
+        self.assertIn(str(aside[0]), str(cm.exception))
+        self.assertTrue((aside[0] / "bin" / "pytest").is_file())  # the old environment is still there to inspect
+        self.assertFalse(venv.exists())
+        # once a rebuild succeeds (here: the network is back), the leftover copy goes too
+        self.configure()
+        r = wf.worktree_repair(self.s, "desk", self.wi)
+        self.assertEqual((r["env"], r["missing"]), ("rebuilt", True))
+        self.assertEqual([p.name for p in self.wt.iterdir() if p.name.startswith(".venv")], [".venv"])
+
+    def test_missing_worktree_venv_is_created(self):
+        """Release 43 gap 2: a worktree with no .venv at all gets one (through the worktree pass and --envs-only),
+        a dry run only says so, and without env_rebuild nothing is created."""
+        venv = self.wt / ".venv"
+        self.assertFalse(venv.exists())
+        r = wf.worktree_repair_all(self.s, "desk")  # no env_rebuild configured: not a problem to report
+        rows = self.rows(r)
+        self.assertEqual((rows[self.wi]["state"], rows[self.wi]["env"]), ("unchanged", "unchanged"))
+        self.assertEqual(self.runs(), [])
+        self.assertFalse(venv.exists())
+
+        self.configure()
+        d = wf.worktree_repair_all(self.s, "desk", dry_run=True)
+        rows = self.rows(d)
+        self.assertEqual((rows[self.wi]["state"], rows[self.wi]["env"]), ("unchanged", "rebuilt"))
+        self.assertEqual(rows[self.wi]["env_reason"], "created (no .venv)")
+        self.assertFalse(venv.exists())
+        self.assertEqual(self.runs(), [])
+
+        r = wf.worktree_repair_all(self.s, "desk")
+        rows = self.rows(r)
+        self.assertEqual((rows[self.wi]["state"], rows[self.wi]["env"]), ("unchanged", "rebuilt"))
+        self.assertEqual(rows[self.wi]["env_reason"], "created (no .venv)")
+        self.assertEqual(r["summary"]["venvs"]["rebuilt"], 1)
+        self.assertTrue(venv.is_dir())
+        self.assertIsNone(wf.stale_venv(self.wt))
+        self.assertEqual(self.runs(), [f"{self.wt} "])
+        led = Ledger(self.s)
+        ev = [e for e in led.events(self.wi) if e["type"] == "worktree.repaired"]
+        self.assertEqual((ev[-1]["payload"]["env"], ev[-1]["payload"]["missing"]), ("rebuilt", True))
+        # a second run finds nothing to do
+        r2 = wf.worktree_repair_all(self.s, "desk")
+        self.assertEqual(self.rows(r2)[self.wi]["env"], "unchanged")
+        self.assertEqual(len(self.runs()), 1)
+
+        # the env pass alone (--envs-only) lists a worktree without a .venv too
+        import shutil
+        shutil.rmtree(venv)
+        r3 = wf.worktree_repair_all(self.s, "desk", envs_only=True)
+        row = self.rows(r3)[f"worktrees/{self.wi}"]
+        self.assertEqual((row["state"], row["detail"]), ("rebuilt", "created (no .venv)"))
+        self.assertTrue(venv.is_dir())
+        self.assertEqual(len(self.runs()), 2)
+        self.assertEqual(len([e for e in Ledger(self.s).events() if e["type"] == "env.repaired"]), 1)
+
     def test_only_the_desk(self):
         with self.assertRaisesRegex(DurehError, "only the desk"):
             wf.worktree_repair_all(self.s, "py-writer")

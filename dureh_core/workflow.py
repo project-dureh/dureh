@@ -238,8 +238,8 @@ def _exec_venvs(site: Site) -> list[tuple[Path, Path, str | None]]:
         return []
     out = []
     for venv in sorted(root.iterdir()):
-        if ".venv" not in venv.name or not venv.is_dir():
-            continue
+        if ".venv" not in venv.name or ".stale-" in venv.name or not venv.is_dir():
+            continue  # a `.stale-<time>` copy is a rebuild's leftover (see _repair_env), not an environment
         tree = root / venv.name.split(".venv", 1)[0]
         m = EXEC_TREE_RE.match(tree.name)
         out.append((venv, tree, m.group(2) if m else None))
@@ -249,7 +249,8 @@ def _exec_venvs(site: Site) -> list[tuple[Path, Path, str | None]]:
 def _env_state(r: dict) -> dict:
     """A repair-all row's state from a _repair_env result."""
     if r["env"] == "rebuilt":
-        return {"state": "rebuilt", "command": r.get("command"), "stale": r.get("stale_interpreter")}
+        return {"state": "rebuilt", "command": r.get("command"), "stale": r.get("stale_interpreter"),
+                **({"detail": "created (no .venv)"} if r.get("missing") else {})}
     if r["env"] == "stale":
         return {"state": "skipped", "reason": "no env_rebuild", "stale": r.get("stale_interpreter")}
     return {"state": "unchanged"}
@@ -265,7 +266,8 @@ def worktree_repair_all(site: Site, actor: str, dry_run: bool = False, envs: boo
     plain `git worktree repair` in each repository with linked worktrees, for worktrees that live elsewhere.
     Environments (`envs`): the main tree of every module and project, the WI worktrees' (through the worktree
     pass; in the env pass with `envs_only`) and the exec-tree siblings `<tree>.venv`; only stale ones are rebuilt
-    unless `force`; no `env_rebuild` for the target is "skipped", not an error. The pass never stops at an error:
+    unless `force`, and a worktree with no `.venv` at all gets one created; no `env_rebuild` for the target is
+    "skipped", not an error. The pass never stops at an error:
     each item ends repaired, pruned, rebuilt, unchanged, skipped or error. Records: `worktree.repaired` and
     `env.repaired` per changed item as the single forms write them, plus one `worktree.repair-all` with the
     counts; `dry_run` writes nothing and runs neither git nor a rebuild."""
@@ -309,6 +311,8 @@ def worktree_repair_all(site: Site, actor: str, dry_run: bool = False, envs: boo
                 row["env"] = {"ok": "unchanged", "stale": "skipped", "rebuilt": "rebuilt"}[r["env"]]
                 if r["env"] == "stale":
                     row["env_reason"] = "no env_rebuild"
+                elif r.get("missing"):
+                    row["env_reason"] = "created (no .venv)"
                 if r.get("stale_interpreter"):
                     row["stale"] = r["stale_interpreter"]
         if not dry_run:
@@ -330,7 +334,7 @@ def worktree_repair_all(site: Site, actor: str, dry_run: bool = False, envs: boo
                 venvs.append((target, target, root, root / ".venv"))
         if envs_only and site.worktrees.is_dir():
             for d in sorted(site.worktrees.iterdir()):
-                if (d / ".venv").is_dir():
+                if d.is_dir():  # with or without a .venv: a missing one is created
                     venvs.append((f"worktrees/{d.name}", targets.get(d.name), d, d / ".venv"))
         for venv, tree, module in _exec_venvs(site):
             venvs.append((str(venv.relative_to(site.root)), f"modules/{module}" if module else None, tree, venv))
@@ -826,30 +830,50 @@ def _env_rebuild_command(site: Site, target: str) -> str | None:
 def _repair_env(site: Site, root: Path, target: str, venv: Path | None = None, force: bool = False,
                 dry_run: bool = False) -> dict:
     """Rebuild `venv` (default <root>/.venv) with the target's env_rebuild, run in `root`, when it is stale (or
-    `force`). An environment elsewhere than <root>/.venv (an exec tree's sibling) is named to the command through
-    VIRTUAL_ENV and UV_PROJECT_ENVIRONMENT, as the job wrapper does. `dry_run` only reports."""
+    `force`), and create it when it is missing. An existing environment is moved aside first
+    (`<venv>.stale-<time>`): a sync into the old directory keeps the installed scripts and their old shebangs, so
+    the rebuild must start from nothing; the copy (and any earlier failed attempt's) is removed once the rebuild
+    succeeds and kept, named in the error, when it fails. An
+    environment elsewhere than <root>/.venv (an exec tree's sibling) is named to the command through VIRTUAL_ENV
+    and UV_PROJECT_ENVIRONMENT, as the job wrapper does. `dry_run` only reports."""
     venv = Path(venv) if venv is not None else Path(root) / ".venv"
     stale = venv_stale(venv)
-    if not stale and not (force and venv.is_dir()):
+    missing = not venv.exists()
+    if not stale and not missing and not force:
         return {"env": "ok"}
     cmd = _env_rebuild_command(site, target)
     if not cmd:
+        if missing:
+            return {"env": "ok"}  # a target without env_rebuild may not use a virtualenv
         return {"env": "stale", "stale_interpreter": stale,
                 "hint": f"set `env_rebuild` on the {target} entry in config.json (or `env.rebuild`), for example"
                         " \"uv sync --frozen --all-groups\", then run the repair again; the Director owns config.json"}
+    extra = {"missing": True} if missing else {}
     if dry_run:
-        return {"env": "rebuilt", "command": cmd, "stale_interpreter": stale, "dry_run": True}
+        return {"env": "rebuilt", "command": cmd, "stale_interpreter": stale, "dry_run": True, **extra}
+    aside = None
+    if venv.exists():  # stale, or forced: the rebuild starts from nothing either way
+        aside = venv.with_name(f"{venv.name}.stale-{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}")
+        os.rename(venv, aside)
+        extra["moved_aside"] = str(aside)
     env = site.env()
     if venv != Path(root) / ".venv":
         env.update(VIRTUAL_ENV=str(venv), UV_PROJECT_ENVIRONMENT=str(venv))
     proc = subprocess.run(cmd, shell=True, cwd=root, capture_output=True, text=True, timeout=3600, env=env)
+    kept = f" The stale environment was moved to {aside}." if aside else ""
     if proc.returncode != 0:
         fail(f"environment rebuild `{cmd}` failed in {root} (exit {proc.returncode}): "
-             f"{(proc.stderr or proc.stdout).strip()[-600:]}")
+             f"{(proc.stderr or proc.stdout).strip()[-600:]}{kept}")
+    if not venv.is_dir():
+        fail(f"environment rebuild `{cmd}` ran in {root} but did not create {venv}{kept}")
     still = venv_stale(venv)
     if still:
-        fail(f"environment rebuild `{cmd}` ran but {venv} still names {still}")
-    return {"env": "rebuilt", "command": cmd, "stale_interpreter": stale}
+        fail(f"environment rebuild `{cmd}` ran but {venv} still names {still}{kept}")
+    for leftover in venv.parent.glob(f"{venv.name}.stale-*"):  # the copy moved aside and any earlier failed attempt's
+        shutil.rmtree(leftover, ignore_errors=True)
+    if aside:
+        extra["moved_aside"] = f"{aside} (removed)"
+    return {"env": "rebuilt", "command": cmd, "stale_interpreter": stale, **extra}
 
 
 def env_repair(site: Site, actor: str, target: str) -> dict:

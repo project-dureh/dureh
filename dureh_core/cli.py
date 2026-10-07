@@ -1165,14 +1165,16 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--path", required=True)
     wt = sub.add_parser("worktree", help="WI worktrees").add_subparsers(dest="worktree_command", required=True)
     x = add(wt, "repair", cmd_worktree, "desk: re-link a WI worktree after the site moved (or prune it if its directory is"
-            " gone) and rebuild a stale .venv with the configured env_rebuild; --target rebuilds a main tree's .venv;"
+            " gone) and rebuild a stale .venv (recreated from scratch) or create a missing one with the configured"
+            " env_rebuild; --target rebuilds a main tree's .venv;"
             " --all does both for every worktree and environment of the site (after a move or rename)")
     x.add_argument("--wi")
     x.add_argument("--target")
     x.add_argument("--all", action="store_true", help="every WI worktree (worktrees/* and the entries modules/* and"
                    " projects/* repositories register; gone ones are pruned) and every .venv the site owns (main trees,"
-                   " worktrees, exec-tree siblings); stale ones are rebuilt, each item ends repaired, pruned, rebuilt,"
-                   " unchanged, skipped or error, and one worktree.repair-all record holds the counts")
+                   " worktrees, exec-tree siblings); stale ones are rebuilt and a worktree's missing one is created,"
+                   " each item ends repaired, pruned, rebuilt, unchanged, skipped or error, and one"
+                   " worktree.repair-all record holds the counts")
     x.add_argument("--dry-run", action="store_true", help="with --all: show what would change; nothing is written")
     x.add_argument("--envs-only", action="store_true", help="with --all: only the environments (no git repair)")
     x.add_argument("--no-envs", action="store_true", help="with --all: only the worktrees (no environment check or"

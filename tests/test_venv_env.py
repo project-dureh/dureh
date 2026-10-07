@@ -12,7 +12,8 @@ from dureh_core.records import Ledger
 from dureh_core.site import Site
 from dureh_core.util import DurehError
 
-FIX = f"printf '#!%s\\n' {sys.executable} > .venv/bin/pytest"
+# A fake env_rebuild that writes a fresh .venv (the repair moves a stale one aside first, so it starts from nothing).
+FIX = f"mkdir -p .venv/bin && printf '#!%s\\n' {sys.executable} > .venv/bin/pytest"
 
 
 class Venv(SiteCase):
@@ -99,6 +100,15 @@ class Venv(SiteCase):
         r = wf.env_repair(self.s, "desk", "modules/demo")
         self.assertEqual(r["env"], "rebuilt")
         self.assertIsNone(wf.stale_venv(self.mod))
+
+    def test_repair_creates_a_missing_venv(self):
+        self.assertFalse((self.wt / ".venv").exists())
+        self.assertEqual(wf.worktree_repair(self.s, "desk", self.wi)["env"], "ok")  # no env_rebuild: nothing to do
+        self.configure(env_rebuild=FIX)
+        r = wf.worktree_repair(self.s, "desk", self.wi)
+        self.assertEqual((r["env"], r["missing"], r["stale_interpreter"]), ("rebuilt", True, None))
+        self.assertTrue((self.wt / ".venv" / "bin" / "pytest").is_file())
+        self.assertEqual(wf.worktree_repair(self.s, "desk", self.wi)["env"], "ok")
 
     def test_failed_rebuild_names_the_error(self):
         self.venv(self.wt, "/old/python")
