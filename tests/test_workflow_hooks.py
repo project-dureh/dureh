@@ -1,4 +1,6 @@
 """Phase 1 criterion 5 plus the Claude Code adapter's dispatch and guard contract."""
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -9,6 +11,7 @@ from helpers import SiteCase, denied, hook
 
 from dureh_core.records import Ledger
 from dureh_core.util import DurehError
+from dureh_core import cli
 from dureh_core import workflow as wf
 
 
@@ -161,6 +164,46 @@ class Bundle(SiteCase):
         self.assertIsNone(self.spawn("desk", "pm-modules", wf.dispatch_brief(self.s, self.bundle, "desk")["brief"]))
         wf.wi_stage(self.s, "pm-modules", self.bundle, "nothing left")
         self.assertEqual(wf.verify_wi(self.s, "checker", self.bundle)["result"], "fail")
+
+    def verify_cli(self, wi):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            try:
+                code = cli.main(["--site", str(self.site_root), "verify", "--wi", wi, "--actor", "checker"])
+            except SystemExit as exc:
+                code = exc.code
+        return code, json.loads(out.getvalue())
+
+    def test_bundle_recount_through_the_cli(self):
+        # UR-20261008-01: `verify --wi <bundle>` crashed with KeyError 'runner' printing the recount
+        for w in (self.bundle, self.item):
+            wf.wi_approve(self.s, "desk", w, "ok")
+        self.assertIsNone(self.spawn("desk", "pm-modules", wf.dispatch_brief(self.s, self.bundle, "desk")["brief"]))
+        wb = wf.dispatch_brief(self.s, self.item, "pm-modules")
+        self.assertIsNone(self.spawn("pm-modules", "py-writer", wb["brief"], "a-pm"))
+        wf.wi_stage(self.s, "pm-modules", self.bundle, "premature")
+        code, out = self.verify_cli(self.bundle)
+        self.assertEqual((code, out["result"]), (1, "fail"), out)
+        self.assertEqual(out["children"], {self.item: "dispatched"})
+        self.assertIn("0/1 bundle items", out["note"])
+        self.assertTrue(out["run"].startswith("run-"), out)
+        self.assertNotIn("runner", out)
+
+    def test_bundle_recount_through_the_cli_passes(self):
+        for w in (self.bundle, self.item):
+            wf.wi_approve(self.s, "desk", w, "ok")
+        self.assertIsNone(self.spawn("desk", "pm-modules", wf.dispatch_brief(self.s, self.bundle, "desk")["brief"]))
+        wb = wf.dispatch_brief(self.s, self.item, "pm-modules")
+        self.assertIsNone(self.spawn("pm-modules", "py-writer", wb["brief"], "a-pm"))
+        wt = Path(wb["worktree"])
+        (wt / "src" / "demo.py").write_text("def f():\n    return 1\n\n\ndef g():\n    return 2\n")
+        subprocess.run(["git", "commit", "-qam", "add g"], cwd=wt, check=True)
+        wf.wi_stage(self.s, "py-writer", self.item, "added g")
+        self.assertEqual(wf.verify_wi(self.s, "checker", self.item)["result"], "pass")
+        wf.wi_stage(self.s, "pm-modules", self.bundle, "bundle done")
+        code, out = self.verify_cli(self.bundle)
+        self.assertEqual((code, out["result"]), (0, "pass"), out)
+        self.assertEqual(out["children"], {self.item: "verified"})
 
     def test_verify_catches_out_of_scope_and_missing_output(self):
         for w in (self.bundle, self.item):

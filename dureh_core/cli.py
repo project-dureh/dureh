@@ -235,14 +235,13 @@ def cmd_verify(a):
         r = verify_collect(_site(a), _actor(a), a.wi, a.collect or None)
     else:
         r = verify_wi(_site(a), _actor(a), a.wi, local=a.local)
-    out = {k: r[k] for k in ("result", "note", "changed", "violations", "missing_outputs", "seconds", "runner")}
-    if r.get("run"):
-        out["run"] = r["run"]
-    if r.get("collected_from"):
-        out["collected_from"] = r["collected_from"]
+    # a bundle recount (UR-20261008-01) has no runner and reports its children instead of changed paths
+    out = {k: r[k] for k in ("result", "note", "changed", "violations", "missing_outputs", "seconds", "runner",
+                              "children", "run", "collected_from") if r.get(k) is not None}
     if r.get("job"):
         out["job"] = {k: r["job"][k] for k in ("job_id", "state", "log_out", "waited_seconds") if k in r["job"]}
-    _print(out | {"checks": [{"command": c["command"], "exit": c["exit"], "seconds": c["seconds"]} for c in r["checks"]]})
+    _print(out | {"checks": [{"command": c["command"], "exit": c["exit"], "seconds": c["seconds"]}
+                             for c in r.get("checks") or []]})
     if r["result"] != "pass":
         raise SystemExit(1)
 

@@ -1282,7 +1282,7 @@ def _verify_bundle(site: Site, actor: str, wi: str, start: float) -> dict:
         led.event("wi.verified", actor, wi, {"run": run["id"], "head": None}, [run["id"]])
     else:
         led.event("rework.requested", actor, wi, {"run": run["id"], "reason": note, "open": open_items}, [run["id"]])
-    return payload
+    return payload | {"run": run["id"]}
 
 
 # ---------------------------------------------------------------- promote
