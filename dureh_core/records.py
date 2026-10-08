@@ -32,6 +32,7 @@ EVENT_TO_STATUS = {
     "wi.promoted": "promoted",
     "wi.stopped": "stopped",
     "wi.reverted": "reverted",
+    "wi.reopened": "approved",  # release 45: `wi amend --reopen` of a verified, unpromoted item
 }
 TRANSITIONS = {
     None: {"proposed"},
@@ -40,11 +41,12 @@ TRANSITIONS = {
     "dispatched": {"dispatched", "staged", "stopped", "rework"},  # re-dispatch resumes a finished agent's item
     "staged": {"verified", "rework", "stopped"},
     "rework": {"dispatched", "stopped"},
-    "verified": {"promoted", "rework", "stopped"},
+    "verified": {"promoted", "rework", "stopped", "approved"},  # -> approved only by wi.reopened
     "promoted": {"reverted"},
     "stopped": {"approved"},
     "reverted": set(),
 }
+ONLY_BY = {("verified", "approved"): "wi.reopened"}  # transitions only one event type may make
 ACTIVE = {"dispatched", "staged", "rework", "verified"}
 _RECORD_CACHE: dict[str, dict[str, tuple[tuple[int, int], str]]] = {}  # dir -> file name -> (size, mtime), json
 
@@ -82,7 +84,7 @@ class Ledger:
                 fail(f"event {type_} requires --wi")
             current = self.wi_status(wi)["status"]
             target = EVENT_TO_STATUS[type_]
-            if target not in TRANSITIONS.get(current, set()):
+            if target not in TRANSITIONS.get(current, set()) or ONLY_BY.get((current, target), type_) != type_:
                 fail(f"invalid transition for {wi}: {current} -> {target} (event {type_})")
         record = {
             "schema_version": SCHEMA_VERSION,

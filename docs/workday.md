@@ -162,6 +162,13 @@ What the plan approval covers (agreed with a company desk, 2026-10-03):
   total against the daily share, so the Director can cut items at plan time.
 - Amending a plan WI's checks, acceptance, constraints, outputs or base (`wi amend`, which also re-opens a
   stopped item); a different goal is a new WI.
+- Re-opening a verified plan WI that is not promoted (release 45): `wi amend --wi <WI> --reopen --memo
+  "<Director's words>" [--add-constraint ...] [--check ...]` records the amendment with `reopened_from: verified`
+  and a `wi.reopened` event (refs the amendment, names the verify run it voids). The item goes back to
+  `approved` and is dispatched again as usual; no `dispatch stop`. Only `wi.reopened` moves an item from verified
+  to approved (`wi approve` cannot); a promoted item never changes, and an item of a verified or promoted bundle
+  is refused (re-open the bundle first). Without `--reopen`, amending a verified item is refused with this
+  command in the message.
 - Gate 2 for checker-verified module and project WIs in the plan. Promotion into derivatives and
   harness/package contributions wait for the end report.
 - After the end time, one checker run for an item staged during the day. A re-dispatch after a failed

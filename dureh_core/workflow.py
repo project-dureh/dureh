@@ -459,13 +459,16 @@ AMENDABLE = ("acceptance", "checks", "constraints", "outputs")
 
 
 def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: str | None = None,
-             add_constraints: list[str] | None = None) -> dict:
+             add_constraints: list[str] | None = None, reopen: bool = False) -> dict:
     """Change a WI's acceptance, checks, constraints or outputs, or move its base, without a replacement WI.
 
     The goal, role and target never change (that is a new WI). The amendment is approved like Gate 1:
     --memo carries the Director's words (or, in workday mode, the plan approval that covers it).
     `add_constraints` (`--add-constraint`, release 37, UR-20261005-02) appends to the constraints (after any
-    `--constraint` replacement); it alone is allowed on a staged item, since it only adds context for a rework."""
+    `--constraint` replacement); it alone is allowed on a staged item, since it only adds context for a rework.
+    `reopen` (`--reopen`, release 45) re-opens a verified item that is not promoted: the amendment records
+    `reopened_from: verified`, a `wi.reopened` event voids the verification and moves the item back to approved
+    for a new dispatch, with no `dispatch stop`. Fields are optional with it. A promoted item never changes."""
     from .ops import agent_state
 
     if site.org.role(actor).kind != "desk":
@@ -478,14 +481,24 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
     adds = [c for c in (add_constraints or []) if c is not None]
     if any(not c.strip() for c in adds):
         fail("--add-constraint needs text")
+    if reopen and st != "verified":
+        fail(f"{wi} is {st}; --reopen is for a verified item that is not promoted"
+             + (" (amend this item without it)" if st in ("approved", "rework", "dispatched", "proposed", "stopped") else ""))
+    if st == "verified" and not reopen:
+        fail(f"{wi} is verified; to change it before promotion re-open it: `dureh wi amend --wi {wi} --reopen --memo"
+             " \"<Director's words>\" [--add-constraint ...] [--check ...]` (the verification is void and the item goes"
+             " back to approved for a new dispatch)")
+    parent = rec["payload"].get("parent")
+    if reopen and parent and led.wi_status(parent)["status"] in ("verified", "promoted"):
+        fail(f"{wi} belongs to bundle {parent}, which is {led.wi_status(parent)['status']}; re-open the bundle first")
     only_adds = bool(adds) and not any(v is not None for v in fields.values()) and rebase is None
     if st == "staged" and not only_adds:
         fail(f"{wi} is staged; only --add-constraint (which appends) is allowed on a staged item. To change"
              f" acceptance, checks, constraints, outputs or the base: `dureh dispatch stop --wi {wi} --reason ...`, then"
              f" `dureh wi amend --wi {wi} --memo ...` with the change (the amendment re-opens the stopped item)")
-    if st not in ("approved", "rework", "dispatched", "proposed", "stopped", "staged"):
-        fail(f"{wi} is {st}; amend only proposed, approved, rework, stopped, staged (--add-constraint only) or"
-             " dispatched-and-ended items")
+    if st not in ("approved", "rework", "dispatched", "proposed", "stopped", "staged", "verified"):
+        fail(f"{wi} is {st}; amend only proposed, approved, rework, stopped, staged (--add-constraint only),"
+             " verified-not-promoted (--reopen) or dispatched-and-ended items")
     if st == "dispatched" and agent_state(led, wi) in ("running", "starting"):
         fail(f"an agent is running for {wi}; stop it at a safe point before amending")
     bad = [k for k in fields if k not in AMENDABLE]
@@ -502,7 +515,7 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
         if root is None or not (root / ".git").exists():
             fail(f"{wi} targets {rec['payload']['target']}, which is not a git repository")
         rebase_onto = git(["rev-parse", rebase or "HEAD"], root)
-    if not fields and not rebase_onto:
+    if not fields and not rebase_onto and not reopen:
         fail("nothing to amend: give --acceptance, --check, --constraint, --add-constraint, --output or --rebase")
     draft = {"id": wi, "payload": {**rec["payload"], **fields}}
     role = site.org.role(rec["payload"]["role"])
@@ -512,9 +525,15 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
     before = {k: rec["payload"].get(k) for k in fields}
     ev = led.event("wi.amended", actor, wi, {"fields": fields, "before": before, "rebase_onto": rebase_onto,
                                               "memo": memo, "by": "Director",
-                                              **({"added_constraints": adds, "status": st} if adds else {})})
+                                              **({"added_constraints": adds, "status": st} if adds else {}),
+                                              **({"reopened_from": "verified"} if reopen else {})})
     if st == "stopped":  # an amended stopped item is re-opened with the same approval words
         wi_approve(site, actor, wi, f"amended ({ev['id']}): {memo}")
+    if reopen:
+        verified = [e for e in led.events(wi) if e["type"] == "wi.verified"]
+        led.event("wi.reopened", actor, wi, {"amendment": ev["id"], "memo": memo, "by": "Director",
+                                             "voids": verified[-1]["payload"].get("run") if verified else None},
+                  [ev["id"]])
     return ev
 
 

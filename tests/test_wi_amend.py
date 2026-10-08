@@ -1,5 +1,6 @@
 """`dureh wi amend` (a company site's finding fnd-20261003T054002713911Z-18b8280b): change checks, acceptance,
 constraints or outputs, or move the base, without a replacement WI and a new Gate 1."""
+import os
 import subprocess
 import unittest
 
@@ -10,7 +11,7 @@ from dureh_core.records import Ledger
 from dureh_core.util import DurehError
 
 
-class WiAmend(SiteCase):
+class AmendCase(SiteCase):
     def setUp(self):
         super().setUp()
         self.install()
@@ -29,6 +30,8 @@ class WiAmend(SiteCase):
     def payload(self, wi):
         return Ledger(self.s).get("work-item", wi)["payload"]
 
+
+class WiAmend(AmendCase):
     def test_amend_checks_and_acceptance_apply_on_read(self):
         ev = wf.wi_amend(self.s, "desk", self.item, "plan approval covers it",
                          {"checks": ["true"], "acceptance": ["new criterion"]})
@@ -73,6 +76,73 @@ class WiAmend(SiteCase):
         self.assertNotEqual(old_base, head)
         self.assertEqual(Ledger(self.s).events(self.item)[-1]["payload"]["base"], head)
         self.assertNotIn("git rebase", first["brief"])
+
+
+class Reopen(AmendCase):
+    """Release 45 (6f): a verified, unpromoted item is re-opened with `wi amend --reopen`, without `dispatch stop`."""
+
+    def verified_item(self, checks=("true",)):
+        wi = wf.wi_new(self.s, "desk", "doc", "g", "doc-writer", "modules/demo", ["ok"], checks=list(checks))["id"]
+        wf.wi_approve(self.s, "desk", wi, "ok")
+        wf.dispatch_brief(self.s, wi, "desk")
+        led = Ledger(self.s)
+        led.event("wi.dispatched", "desk", wi, {"role": "doc-writer"})
+        wf.wi_stage(self.s, "desk", wi, "done")
+        self.assertEqual(wf.verify_wi(self.s, "checker", wi)["result"], "pass")
+        self.assertEqual(led.wi_status(wi)["status"], "verified")
+        return wi
+
+    def test_reopen_voids_the_verification_and_goes_back_to_approved(self):
+        wi = self.verified_item()
+        ev = wf.wi_amend(self.s, "desk", wi, "Director: also cover the edge case", {}, reopen=True,
+                         add_constraints=["cover the edge case"])
+        led = Ledger(self.s)
+        self.assertEqual(ev["payload"]["reopened_from"], "verified")
+        self.assertEqual(led.wi_status(wi)["status"], "approved")
+        last = led.events(wi)[-1]
+        self.assertEqual(last["type"], "wi.reopened")
+        self.assertEqual(last["refs"], [ev["id"]])
+        self.assertTrue(last["payload"]["voids"].startswith("run-"))
+        self.assertFalse([e for e in led.events(wi) if e["type"] == "wi.stopped"], "no dispatch stop")
+        self.assertIn("- cover the edge case", wf.dispatch_brief(self.s, wi, "desk")["brief"])
+        with self.assertRaises(DurehError):
+            wf.wi_promote(self.s, "desk", wi, "ok")  # the verification no longer stands
+
+    def test_verified_without_reopen_is_refused_with_the_way(self):
+        wi = self.verified_item()
+        with self.assertRaises(DurehError) as cm:
+            wf.wi_amend(self.s, "desk", wi, "x", {"checks": ["true"]})
+        self.assertIn("--reopen", str(cm.exception))
+        self.assertEqual(Ledger(self.s).wi_status(wi)["status"], "verified")
+
+    def test_reopen_only_for_verified_and_never_promoted(self):
+        with self.assertRaises(DurehError):
+            wf.wi_amend(self.s, "desk", self.item, "x", {}, reopen=True)  # approved
+        wi = self.verified_item()
+        wf.wi_promote(self.s, "desk", wi, "ok")
+        with self.assertRaises(DurehError):
+            wf.wi_amend(self.s, "desk", wi, "x", {}, reopen=True)
+        self.assertEqual(Ledger(self.s).wi_status(wi)["status"], "promoted")
+
+    def test_approve_cannot_reopen_a_verified_item(self):
+        wi = self.verified_item()
+        with self.assertRaises(DurehError) as cm:
+            wf.wi_approve(self.s, "desk", wi, "ok")
+        self.assertIn("verified -> approved", str(cm.exception))
+
+    def test_desk_text_names_it(self):
+        from dureh_core.runtimes import claude_code
+
+        claude_code.generate(self.s)
+        self.assertIn("wi amend --wi <WI> --reopen --memo", (self.site_root / "CLAUDE.md").read_text())
+
+    def test_cli(self):
+        from dureh_core.cli import main
+
+        wi = self.verified_item()
+        os.environ["DUREH_SITE"] = str(self.site_root)
+        self.assertEqual(main(["wi", "amend", "--wi", wi, "--memo", "Director's words", "--reopen"]), 0)
+        self.assertEqual(Ledger(self.s).wi_status(wi)["status"], "approved")
 
 
 if __name__ == "__main__":

@@ -422,7 +422,9 @@ def _claude_md(site: Site) -> str:
               f"3. Dispatch: `{dureh} dispatch brief --wi <WI>`, then use the Agent tool with `subagent_type` = the named role and the printed brief as the whole prompt."
               " The hook refuses any spawn without a recorded brief.",
               f"4. Stop or rework: `{dureh} dispatch stop --wi <WI> --reason ...` (the runtime stop ends the agent; the record keeps the reason)."
-              f" Wrong checks or a stale base: `{dureh} wi amend --wi <WI> --memo \"<Director's words>\" --check ... | --rebase` keeps the WI (Gate 1 words required, as for approval).",
+              f" Wrong checks or a stale base: `{dureh} wi amend --wi <WI> --memo \"<Director's words>\" --check ... | --rebase` keeps the WI (Gate 1 words required, as for approval)."
+              f" A verified item not yet promoted that needs more work: `{dureh} wi amend --wi <WI> --reopen --memo \"<Director's words>\" [--add-constraint ...]`"
+              " (the verification is void, the item is approved again for a new dispatch; no `dispatch stop`).",
               f"5. Gate 2: after the checker verified the item, report it to the Director and promote with `{dureh} wi promote --wi <WI> --memo ...`."
               f" For a bundle the manager staged, run `{dureh} verify --wi <bundle>` (a recount of its items' states); promoting the bundle merges any verified items not yet promoted."
               " Items whose target is `harness` or `package` are not merged: promotion leaves an opaque `contrib/c-<id>` branch for upstream to review"

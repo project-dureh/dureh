@@ -135,7 +135,7 @@ def cmd_wi_amend(a):
 
     fields = {"acceptance": a.acceptance, "checks": a.check, "constraints": a.constraint, "outputs": a.output}
     _print(wi_amend(_site(a), _actor(a), a.wi, a.memo, {k: v for k, v in fields.items() if v is not None},
-                    a.rebase, add_constraints=a.add_constraint))
+                    a.rebase, add_constraints=a.add_constraint, reopen=a.reopen))
 
 
 def cmd_wi_show(a):
@@ -837,6 +837,9 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--output", action="append", help="replaces the whole list (repeat)")
     x.add_argument("--rebase", nargs="?", const="", default=None,
                    help="move the base to REV (default: the target's current HEAD); the next brief tells the worker to rebase")
+    x.add_argument("--reopen", action="store_true",
+                   help="re-open a verified, unpromoted item: the verification is void and it goes back to approved"
+                        " for a new dispatch (no dispatch stop); other changes are optional")
     x.add_argument("--actor")
     x = add(wi, "show", cmd_wi_show, "show work items with their events (repeat --wi; --summary for status and last events)")
     x.add_argument("--wi", required=True, action="append")
