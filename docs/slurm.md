@@ -188,6 +188,29 @@ dureh verify --wi <WI> [--local]
 - **Migration.** A site with `slurm.account`/`partition` and `sbatch` on its PATH needs no config change; add
   `"checks": {"runner": "slurm", "time": "00:30:00", "sbatch_args": ["--mem=8G"]}` to pin memory or time.
 
+### Per-item local runner: `--checks-runner local` and `checks.local_allow` (release 45)
+
+Measured 2026-10-08 at a company site: a 0.04 s `grep` check cost one scheduler job and two checker spawns.
+
+```
+dureh wi new ... --check 'grep -q "## Usage" README.md' --checks-runner local
+dureh wi amend --wi <WI> --memo "..." --checks-runner local|site
+```
+
+- **Config.** `checks.local_allow` lists globs (fnmatch over the whole command; `*` matches anything) of checks
+  that may run in the verify process, for example `["grep -q *", "test -f *", "test -s *"]`. A check that holds a
+  shell operator (`;`, `&`, `|`, `<`, `>`, a backquote, `$(`) never matches, so a pattern cannot admit a chain.
+  Absent or empty (the default): `--checks-runner local` is refused and nothing changes for any item.
+  `checks.local_timeout` (default 60) is the per-check timeout in seconds on this path.
+- **Choice.** `wi new|amend --checks-runner local` is accepted only when every declared check matches; it is recorded
+  in the item (`checks_runner: local`, an amendment like any other). Amending the checks of such an item checks them
+  again. On a staged item the runner alone may be amended (not while a verify job is waiting to be collected).
+  `--checks-runner site` returns to config `checks.runner`.
+- **Verify.** The item's checks run locally, synchronously (`verify --submit` verifies at once), and the record has
+  `runner: local, runner_source: wi`. If the checks no longer match (the config changed), they run on the site
+  runner with `runner_source: site` and a `runner_note`. The site runner records `runner_source: site`, `--local`
+  `runner_source: override`. The checker's brief follows the item's runner.
+
 Agents: the generated role files say that test suites (`pytest`, `unittest discover`) never run in the session;
 the checker's `verify --wi` runs the declared checks as this job and other computation goes through
 `slurm submit`.

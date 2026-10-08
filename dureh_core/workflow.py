@@ -27,9 +27,12 @@ CACHE_RE = re.compile(r"(^|/)(__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cac
 def wi_new(site: Site, actor: str, title: str, goal: str, role: str, target: str, acceptance: list[str],
            lane: str = "work", bundle: str | None = None, value: str | None = None, checks: list[str] | None = None,
            outputs: list[str] | None = None, constraints: list[str] | None = None, parent: str | None = None,
-           source: str | None = None, academic: bool = False, fix_for: str | None = None) -> dict:
+           source: str | None = None, academic: bool = False, fix_for: str | None = None,
+           checks_runner_choice: str | None = None) -> dict:
     """Create a work item. `fix_for` names the WI whose problem this one fixes (recorded as `fix_for`): after the
-    day's end time a fix for a day plan item goes on under the finish-plan rule (workday.py)."""
+    day's end time a fix for a day plan item goes on under the finish-plan rule (workday.py).
+    `checks_runner_choice` (`--checks-runner local`, release 45) runs this item's checks in the verify process;
+    every declared check must match config `checks.local_allow`."""
     org = site.org
     if org.role(actor).kind != "desk":
         fail("only the desk creates work items")
@@ -59,6 +62,8 @@ def wi_new(site: Site, actor: str, title: str, goal: str, role: str, target: str
         payload["fix_for"] = fix_for
     if outputs:
         payload["outputs"] = list(outputs)
+    if checks_runner_choice:
+        payload["checks_runner"] = _wi_runner_choice(site, checks_runner_choice, payload["checks"])
     draft = {"id": "WI-0000", "payload": payload}
     n, limit = brief_bytes(site, draft), _brief_limit(site, r)
     if n > limit:
@@ -455,7 +460,7 @@ def _pending_rebase(site: Site, wi: str) -> str | None:
     return None
 
 
-AMENDABLE = ("acceptance", "checks", "constraints", "outputs")
+AMENDABLE = ("acceptance", "checks", "constraints", "outputs", "checks_runner")
 
 
 def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: str | None = None,
@@ -492,7 +497,11 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
     if reopen and parent and led.wi_status(parent)["status"] in ("verified", "promoted"):
         fail(f"{wi} belongs to bundle {parent}, which is {led.wi_status(parent)['status']}; re-open the bundle first")
     only_adds = bool(adds) and not any(v is not None for v in fields.values()) and rebase is None
-    if st == "staged" and not only_adds:
+    # release 45: the checks runner alone may change on a staged item (it changes where checks run, not the work)
+    only_runner = not adds and rebase is None and [k for k, v in fields.items() if v is not None] == ["checks_runner"]
+    if st == "staged" and only_runner and pending_verify(led, wi):
+        fail(f"{wi} has a submitted verify job; collect it before changing its checks runner")
+    if st == "staged" and not (only_adds or only_runner):
         fail(f"{wi} is staged; only --add-constraint (which appends) is allowed on a staged item. To change"
              f" acceptance, checks, constraints, outputs or the base: `dureh dispatch stop --wi {wi} --reason ...`, then"
              f" `dureh wi amend --wi {wi} --memo ...` with the change (the amendment re-opens the stopped item)")
@@ -504,11 +513,14 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
     bad = [k for k in fields if k not in AMENDABLE]
     if bad:
         fail(f"cannot amend {', '.join(bad)}; a different goal, role or target is a new work item")
-    fields = {k: list(v) for k, v in fields.items() if v is not None}
+    fields = {k: (v if k == "checks_runner" else list(v)) for k, v in fields.items() if v is not None}
     if adds:
         fields["constraints"] = list(fields.get("constraints", rec["payload"].get("constraints") or [])) + adds
     if "acceptance" in fields and not fields["acceptance"]:
         fail("a work item needs at least one acceptance criterion")
+    if "checks_runner" in fields or ("checks" in fields and rec["payload"].get("checks_runner") == "local"):
+        choice = fields.pop("checks_runner", None) or rec["payload"].get("checks_runner")
+        fields["checks_runner"] = _wi_runner_choice(site, choice, fields.get("checks", rec["payload"].get("checks") or []))
     rebase_onto = None
     if rebase is not None:
         root = target_root(site, rec["payload"]["target"])
@@ -786,7 +798,7 @@ def _checker_lines(site: Site, rec: dict, dureh: Path) -> list[str]:
     never = "Never run verify in the background. Do not edit files."
     try:
         slurm = bool(rec["payload"].get("checks")) and not site.org.role(rec["payload"]["role"]).is_manager \
-            and checks_runner(site) == "slurm"
+            and wi_checks_runner(site, rec["payload"])[0] == "slurm"
     except Exception:  # an invalid checks.runner fails at verify time with its own message
         slurm = False
     if not slurm:
@@ -995,6 +1007,42 @@ def checks_runner(site: Site) -> str:
     return "slurm" if scheduler and shutil.which("sbatch", path=site.env().get("PATH")) else "local"
 
 
+WI_RUNNERS = ("local", "site")
+LOCAL_TIMEOUT_DEFAULT = 60
+_SHELL_OPS = re.compile(r"[;&|`<>\n]|\$\(")
+
+
+def local_allowed(site: Site, check: str) -> bool:
+    """A check may run in the verify process for a WI that chose the local runner (release 45, 6e): it matches a
+    config `checks.local_allow` glob (fnmatch over the whole command, e.g. `grep -q *`, `test -f *`) and is one
+    simple command (no `;`, `&`, `|`, redirection, backquote or `$(`), so a pattern never admits a chain."""
+    pats = (site.config.get("checks") or {}).get("local_allow") or []
+    return not _SHELL_OPS.search(check) and any(fnmatch.fnmatchcase(check.strip(), str(p)) for p in pats)
+
+
+def _wi_runner_choice(site: Site, choice: str, checks: list[str]) -> str:
+    """Validate a per-WI runner (`--checks-runner`): `site` (config checks.runner) or `local`, which needs every
+    declared check to be allowed by `checks.local_allow`."""
+    if choice not in WI_RUNNERS:
+        fail(f"--checks-runner must be one of {', '.join(WI_RUNNERS)}: {choice!r}")
+    if choice == "local":
+        if not (site.config.get("checks") or {}).get("local_allow"):
+            fail("--checks-runner local needs config checks.local_allow (globs of checks that may run locally); it is unset")
+        bad = [c for c in checks if not local_allowed(site, c)]
+        if bad:
+            fail(f"--checks-runner local: these checks do not match checks.local_allow (or chain commands): {'; '.join(bad)}")
+    return choice
+
+
+def wi_checks_runner(site: Site, payload: dict) -> tuple[str, str]:
+    """(runner, source) for a WI's declared checks: the WI's recorded `checks_runner: local` while its checks
+    still match `checks.local_allow` (source `wi`), else config `checks.runner` (source `site`)."""
+    checks = list(payload.get("checks") or [])
+    if payload.get("checks_runner") == "local" and checks and all(local_allowed(site, c) for c in checks):
+        return "local", "wi"
+    return checks_runner(site), "site"
+
+
 def _checks_env(site: Site, wi: str, cwd: Path, troot: Path) -> dict:
     return {**site.env(), "PYTHONDONTWRITEBYTECODE": "1", "DUREH_WORK_ROOT": str(cwd),
             "DUREH_TARGET_ROOT": str(troot), "DUREH_WI": wi}
@@ -1140,13 +1188,20 @@ def verify_wi(site: Site, actor: str, wi: str, timeout: int = 1800, local: bool 
     cwd, troot, checks = ctx["cwd"], ctx["troot"], ctx["checks"]
     _check_venv(wi, cwd)
     paths, head = changed_paths(site, wi)
-    runner = "local" if local else checks_runner(site)  # release 27: checks are a scheduler job, not session work
+    # release 27: checks are a scheduler job, not session work; release 45: unless the WI chose the local runner
+    runner, source = ("local", "override") if local else wi_checks_runner(site, ctx["p"])
+    if source == "wi":
+        timeout = int((site.config.get("checks") or {}).get("local_timeout") or LOCAL_TIMEOUT_DEFAULT)
     results, job = [], None
     if checks and runner == "slurm":
         results, job = _run_checks_slurm(site, wi, cwd, troot, checks)
     elif checks:
         results = _run_checks_local(site, wi, cwd, troot, checks, timeout)
-    return _record_verification(site, ctx, actor, wi, paths, head, results, runner, job, start, local=local)
+    extra = {"runner_source": source}
+    if ctx["p"].get("checks_runner") == "local" and source == "site":
+        extra["runner_note"] = "the WI chose local, but its checks no longer match checks.local_allow; ran on the site runner"
+    return _record_verification(site, ctx, actor, wi, paths, head, results, runner, job, start, local=local,
+                                extra=extra)
 
 
 def _record_verification(site: Site, ctx: dict, actor: str, wi: str, paths: list[str], head: str | None,
@@ -1215,10 +1270,10 @@ def verify_submit(site: Site, actor: str, wi: str, timeout: int = 1800) -> dict:
     from . import ops
 
     ctx = _verify_context(site, actor, wi)
-    if ctx["bundle"] or not ctx["checks"] or checks_runner(site) != "slurm":
+    if ctx["bundle"] or not ctx["checks"] or wi_checks_runner(site, ctx["p"])[0] != "slurm":
         r = verify_wi(site, actor, wi, timeout=timeout)
-        return {"submitted": False, "why": "nothing to submit (bundle, no declared checks, or checks.runner local);"
-                                           " verified synchronously", **r}
+        return {"submitted": False, "why": "nothing to submit (bundle, no declared checks, or the local runner for"
+                                           " this item); verified synchronously", **r}
     led = ctx["led"]
     pend = pending_verify(led, wi)
     if pend:
@@ -1282,7 +1337,7 @@ def verify_collect(site: Site, actor: str, wi: str, run_id: str | None = None) -
     job.update({k: str(site.relocate(job[k])) for k in ("script", "prefix", "log_out", "log_err") if job.get(k)})
     job.update({"state": state, "raw": raw})
     return _record_verification(site, ctx, actor, wi, paths, head, results, "slurm", job, time.monotonic(),
-                                extra={"collected_from": run["id"], "submitted_ts": run["ts"]})
+                                extra={"collected_from": run["id"], "submitted_ts": run["ts"], "runner_source": "site"})
 
 
 def _verify_bundle(site: Site, actor: str, wi: str, start: float) -> dict:

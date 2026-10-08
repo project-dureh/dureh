@@ -143,6 +143,12 @@
           "items": {
             "type": "string"
           }
+        },
+        "checks_runner": {
+          "enum": [
+            "local",
+            "site"
+          ]
         }
       }
     }

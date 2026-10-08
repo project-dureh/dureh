@@ -30,6 +30,8 @@ examples. Harness defaults are generic; a startup package supplies its own value
 | `slurm.each_env` | DUREH_ITER names | the variable names an `--each` task gets its item under |
 | `slurm.watch` | `monitor` | how the desk learns that a job ended (release 45; docs/slurm.md "Watch modes"): `monitor` keeps a standing `slurm watch` Monitor (the behaviour before the key existed), `on-demand` keeps none (`slurm wait --run` for short jobs, `slurm status` at a later turn for long ones), `off` names only `slurm status`. Only generated text (CLAUDE.md, role files, hints) follows it; another value fails `adapter sync` |
 | `slurm.via_timeout` | `600` | seconds a `--via` module command may take to submit and exit |
+| `checks.local_allow` | `[]` | globs of declared checks an item may run in the verify process with `wi new/amend --checks-runner local` (release 45; docs/slurm.md "Per-item local runner"); empty refuses the per-item choice |
+| `checks.local_timeout` | `60` | seconds per check on the per-item local path |
 | `push.allowed_remotes` | `[]` | remote URLs or names `dureh push` may push to (desk only, with a Director decision bound to the exact revision, remote and ref); empty refuses every push |
 | `session.name` | the site folder name | the site's session name: session job `cc-<name>[-<purpose>]`, pane log, and the default `slurm.job_prefix` (docs/workday.md) |
 | `session.runtime` | `claude-code` | the session runtime the session job starts (`site session plan` and `start`); an unknown name is refused, listing the available ones |

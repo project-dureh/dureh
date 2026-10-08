@@ -119,7 +119,8 @@ def cmd_wi_new(a):
     from .workflow import wi_new
 
     r = wi_new(_site(a), _actor(a), a.title, a.goal, a.role, a.target, a.acceptance, a.lane, a.bundle, a.value,
-               a.check, a.output, a.constraint, a.parent, None, a.academic, fix_for=a.fix_for)
+               a.check, a.output, a.constraint, a.parent, None, a.academic, fix_for=a.fix_for,
+               checks_runner_choice=a.checks_runner)
     print(f"{r['id']} created (proposed; needs Gate 1): {r['payload']['title']}")
 
 
@@ -133,7 +134,8 @@ def cmd_wi_approve(a):
 def cmd_wi_amend(a):
     from .workflow import wi_amend
 
-    fields = {"acceptance": a.acceptance, "checks": a.check, "constraints": a.constraint, "outputs": a.output}
+    fields = {"acceptance": a.acceptance, "checks": a.check, "constraints": a.constraint, "outputs": a.output,
+              "checks_runner": a.checks_runner}
     _print(wi_amend(_site(a), _actor(a), a.wi, a.memo, {k: v for k, v in fields.items() if v is not None},
                     a.rebase, add_constraints=a.add_constraint, reopen=a.reopen))
 
@@ -237,7 +239,7 @@ def cmd_verify(a):
         r = verify_wi(_site(a), _actor(a), a.wi, local=a.local)
     # a bundle recount (UR-20261008-01) has no runner and reports its children instead of changed paths
     out = {k: r[k] for k in ("result", "note", "changed", "violations", "missing_outputs", "seconds", "runner",
-                              "children", "run", "collected_from") if r.get(k) is not None}
+                              "runner_source", "children", "run", "collected_from") if r.get(k) is not None}
     if r.get("job"):
         out["job"] = {k: r["job"][k] for k in ("job_id", "state", "log_out", "waited_seconds") if k in r["job"]}
     _print(out | {"checks": [{"command": c["command"], "exit": c["exit"], "seconds": c["seconds"]}
@@ -820,6 +822,9 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--output", action="append", help="declared output path that must exist")
     x.add_argument("--constraint", action="append")
     x.add_argument("--academic", action="store_true")
+    x.add_argument("--checks-runner", choices=["local", "site"],
+                   help="local: run this item's checks in the verify process (each must match config checks.local_allow);"
+                        " site (default): config checks.runner")
     x.add_argument("--actor")
     x = add(wi, "approve", cmd_wi_approve, "record the Director's Gate 1 approval (desk)")
     x.add_argument("--wi", required=True)
@@ -837,6 +842,8 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--output", action="append", help="replaces the whole list (repeat)")
     x.add_argument("--rebase", nargs="?", const="", default=None,
                    help="move the base to REV (default: the target's current HEAD); the next brief tells the worker to rebase")
+    x.add_argument("--checks-runner", choices=["local", "site"],
+                   help="per-item checks runner, as for wi new (local needs every check in checks.local_allow)")
     x.add_argument("--reopen", action="store_true",
                    help="re-open a verified, unpromoted item: the verification is void and it goes back to approved"
                         " for a new dispatch (no dispatch stop); other changes are optional")
