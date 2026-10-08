@@ -1020,10 +1020,14 @@ def close(site: Site, actor: str, note: str, cancel_now: bool = False) -> dict:
     d = day(site)
     if d["phase"] not in ("overtime", "off-duty") or not d.get("report"):
         fail(f"close a day after its end report (phase {d['phase']})")
+    from .ops import external_jobs, render_external
+
     handoff = _handoff_path(site)
     checked = device_on(site, "session")
+    st = site_status(site) if checked else None
+    ext = (st or {}).get("external_jobs") if st else external_jobs(site)
     if checked:
-        live = _live_agents(site_status(site))
+        live = _live_agents(st)
         if live:
             fail(f"agents are still running or starting ({', '.join(live)}); close the day when everything is idle")
         if not handoff.is_file():
@@ -1032,8 +1036,14 @@ def close(site: Site, actor: str, note: str, cancel_now: bool = False) -> dict:
         if handoff.stat().st_mtime < started:
             fail(f"the handoff {handoff} predates today's start ({d['start']}); update it before closing")
     led = Ledger(site)
+    extra = {}
+    if ext and ext["count"]:  # release 45: a warning, never a refusal (they may be meant to run overnight)
+        extra = {"external_jobs": ext}
     rec = led.event("day.closed", actor, None, {"note": note, "idle": checked or None, "checked": checked,
-                                               "handoff": str(handoff)}, [d["plan"]])
+                                               "handoff": str(handoff), **extra}, [d["plan"]])
+    if extra:
+        rec = {**rec, "warning": f"{render_external(ext)}. They keep running after the close; cancel any that"
+                                 " should not (they are not the harness's to end)."}
     from . import sessions
 
     release_on = (site.config.get("session") or {}).get("release_on_close", True)

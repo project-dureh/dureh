@@ -54,7 +54,8 @@ class SiteCase(unittest.TestCase):
         data = {"name": "test-site", "persona": {"name": "Tester"},
                 "references": [{"path": str(self.ref), "name": "old-org"}],
                 # each_level any: the suites submit single plumbing jobs; the file-level loop rule has its own tests
-                "slurm": {"account": "acct-x", "partition": "general", "each_level": "any"},
+                # external_jobs off: status must not list a login node's real squeue jobs (test_external_jobs fakes it)
+                "slurm": {"account": "acct-x", "partition": "general", "each_level": "any", "external_jobs": False},
                 "checks": {"runner": "local"}}  # never a real sbatch from a test; test_verify_slurm fakes it
         data.update(extra)
         p = self.tmp / "preset.json"

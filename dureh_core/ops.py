@@ -282,6 +282,77 @@ def lane_refusals(led: Ledger, hours: int = 24) -> dict:
                      "holders": [h["wi"] for h in last["payload"].get("holders") or []]} if last else None}
 
 
+EXTERNAL_LIMIT = 10  # external jobs listed by status; the rest are counted
+EXTERNAL_IGNORE_DEFAULT = ["cc-*"]  # session jobs (`cc-<session name>[-<purpose>]`): this and other sessions' desks
+
+
+def _base_job(job) -> str:
+    return str(job).split(";")[0].strip().split("_")[0].split("+")[0].split(".")[0]
+
+
+def _owned_jobs(led: Ledger) -> set[str]:
+    """Scheduler job ids a harness record owns: every run record's job(s) and every session job started."""
+    owned = set()
+    for r in led.load("run"):
+        p = r["payload"]
+        if p.get("job_id"):
+            owned.add(_base_job(p["job_id"]))
+        owned |= {_base_job(j["job_id"]) for j in p.get("jobs") or [] if j.get("job_id")}
+        if isinstance(p.get("job"), dict) and p["job"].get("job_id"):
+            owned.add(_base_job(p["job"]["job_id"]))
+    for e in led.events():
+        if e["type"] in ("session.started", "container.built") and (e["payload"] or {}).get("job_id"):
+            owned.add(_base_job(e["payload"]["job_id"]))
+    return owned
+
+
+def external_jobs(site: Site, led: Ledger | None = None) -> dict | None:
+    """Release 45: the site user's scheduler jobs (one `squeue -h -u $USER`) that no harness record owns, so the
+    desk sees work started outside `dureh slurm submit|verify|site session` (by hand, by a module's own
+    framework, or left over). Excluded: jobs a run or session record names, the calling job ($SLURM_JOB_ID, the
+    session itself), and names matching config `slurm.external_ignore` (default `cc-*`, the session jobs of this
+    and other sites). {jobs: [{job_id, name, state, time}] (at most EXTERNAL_LIMIT), count}; None when config
+    `slurm.external_jobs` is false or squeue cannot be asked (never an error)."""
+    cfg = site.config.get("slurm") or {}
+    if cfg.get("external_jobs", True) is False:
+        return None
+    import getpass
+
+    try:
+        user = os.environ.get("USER") or getpass.getuser()
+        proc = subprocess.run(["squeue", "-h", "-u", user, "-o", "%i|%j|%T|%M"], capture_output=True, text=True,
+                              timeout=30, env=site.env())
+    except (OSError, subprocess.SubprocessError, KeyError):
+        return None
+    if proc.returncode != 0:
+        return None
+    led = led or Ledger(site)
+    owned = _owned_jobs(led)
+    own_job = os.environ.get("SLURM_JOB_ID")
+    if own_job:
+        owned.add(_base_job(own_job))
+    ignore = cfg.get("external_ignore", EXTERNAL_IGNORE_DEFAULT) or []
+    out = []
+    for line in proc.stdout.splitlines():
+        parts = line.strip().split("|")
+        if len(parts) < 4 or not parts[0]:
+            continue
+        job, name, state, used = (x.strip() for x in parts[:4])
+        if _base_job(job) in owned or any(fnmatch.fnmatchcase(name, str(g)) for g in ignore):
+            continue
+        out.append({"job_id": job, "name": name, "state": state, "time": used})
+    return {"jobs": out[:EXTERNAL_LIMIT], "count": len(out)}
+
+
+def render_external(ext: dict | None) -> str | None:
+    if not ext or not ext["count"]:
+        return None
+    more = ext["count"] - len(ext["jobs"])
+    return (f"External jobs ({ext['count']}, no harness record): "
+            + "; ".join(f"{j['job_id']} {j['name']} {j['state']} {j['time']}" for j in ext["jobs"])
+            + (f"; ... and {more} more" if more > 0 else ""))
+
+
 def _upstream(site: Site) -> dict:
     from .upstream import collaboration
 
@@ -317,6 +388,7 @@ def status(site: Site) -> dict:
         "last_session": sessions[-1]["ts"] if sessions else None,
         "index_fresh": led.index_fresh(),
         "workday": _workday(site),
+        "external_jobs": external_jobs(site, led),
         "labels": led.labels(),  # UR-20261008-02: `WI-xxxx (short title)` wherever the text names a WI
     }
 
@@ -363,6 +435,9 @@ def render_status(st: dict) -> str:
     for o in st.get("orphaned") or []:
         still = f"; still running: {', '.join(o['children_running'])}" if o["children_running"] else ""
         lines.append(f"Orphaned: {o['wi']} {o['role']} agent {o['agent']}{still} -> {o['action']}")
+    ext = render_external(st.get("external_jobs"))
+    if ext:
+        lines.append(ext)
     for b in st.get("bundles_to_close") or []:
         counts = ", ".join(f"{k} {v}" for k, v in sorted(b["counts"].items()))
         lines.append(f"Bundle to close (manager not needed): {b['wi']} {b['role']} items {counts} -> {b['action']}")

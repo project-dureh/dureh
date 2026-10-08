@@ -103,6 +103,25 @@ wait for jobs; the desk watches the scheduler and re-dispatches.
   carries the hint "do not wait for jobs in the session: end your turn; the desk re-dispatches you when `dureh
   slurm watch` reports the job". `slurm wait` stays for jobs expected to end within minutes.
 
+### External jobs (release 45)
+
+A job the site user started outside the harness (by hand, by a module's own framework, a leftover) holds
+cluster resources that no record, lane or end report shows. `dureh status` asks `squeue -h -u $USER -o
+%i|%j|%T|%M` once and lists the jobs no harness record owns:
+
+```
+External jobs (2, no harness record): 1001 manual-test RUNNING 0:12:01; 1002_2 framework-step RUNNING 0:05
+```
+
+- **Owned** (never listed): every job id a `run` record names (`job_id`, each `jobs[].job_id`, a verify run's job;
+  array tasks by their array id), every `session.started` and `container.built` job, and the calling job
+  (`$SLURM_JOB_ID`: the session itself). Names matching config `slurm.external_ignore` (default `["cc-*"]`,
+  the session jobs of this site and of other sites under the same user) are left out too.
+- At most 10 are listed, the rest counted (`... and N more`). When `squeue` is missing or fails, nothing is
+  listed and nothing fails. Config `slurm.external_jobs: false` never asks.
+- `dureh day close` warns about them (result `warning`, `external_jobs` in `day.closed`) and does not refuse.
+- The harness never cancels such a job: it is not the harness's to end.
+
 ### Watch modes: config `slurm.watch` (release 45)
 
 Measured 2026-10-08 at a company site: a standing watch Monitor expires and must be re-armed; about ten re-arms

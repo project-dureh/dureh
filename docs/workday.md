@@ -117,7 +117,10 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
 7. **Close.** In this order: the desk stops every Monitor and background task, writes the handoff
    (`state/memory/handoff.md`), runs `dureh day close`, and then does nothing more. `day close` checks that no
    agent runs and the handoff is fresh, records `day.closed`, and releases the session job as described in
-   "Closing the session job" below: the job sends `/exit` to its claude and completes by itself.
+   "Closing the session job" below: the job sends `/exit` to its claude and completes by itself. Release 45:
+   scheduler jobs of the site user that no harness record owns (`External jobs` in `dureh status`, docs/slurm.md)
+   do not refuse the close; they are recorded in `day.closed` (`external_jobs`) and the result carries a
+   `warning` naming them, since they keep running after the close.
 
 ### Closing the session job (release 39)
 

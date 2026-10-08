@@ -462,6 +462,8 @@ def _claude_md(site: Site) -> str:
               " ended, re-dispatch the bundle so its manager re-dispatches the item; an ended verify job is collected by the checker,"
               " item 1). Workers never wait for jobs in the session;"
               " a dispatched item whose agent ended is normal while its job runs, not an incident."
+              f" `{dureh} status` lists `External jobs` (scheduler jobs of the site user that no harness record owns); tell the Director"
+              " about one you did not expect; `day close` warns about them but does not refuse."
               " Lanes: only an item with a live agent or a job not known to have ended holds one (items waiting for you and orphaned"
               " bundles do not); every lane refusal is recorded as `lane.refused` and counted in status."
               f" A dispatch whose agent never started is superseded by a new `{dureh} dispatch brief --wi <WI>` after"

@@ -29,6 +29,8 @@ examples. Harness defaults are generic; a startup package supplies its own value
 | `slurm.each_level` | `file` | the level workflow steps loop at (`file`, `session`, `subject`, or `any` to switch the rule off): a bare single job needs `--single --reason`, a coarser `--each-from-bids --level` needs `--reason` (docs/slurm.md "loop rule") |
 | `slurm.each_env` | DUREH_ITER names | the variable names an `--each` task gets its item under |
 | `slurm.watch` | `monitor` | how the desk learns that a job ended (release 45; docs/slurm.md "Watch modes"): `monitor` keeps a standing `slurm watch` Monitor (the behaviour before the key existed), `on-demand` keeps none (`slurm wait --run` for short jobs, `slurm status` at a later turn for long ones), `off` names only `slurm status`. Only generated text (CLAUDE.md, role files, hints) follows it; another value fails `adapter sync` |
+| `slurm.external_jobs` | `true` | `dureh status` asks `squeue -u $USER` for jobs no harness record owns and lists them as `External jobs` (release 45; docs/slurm.md); `false` never asks |
+| `slurm.external_ignore` | `["cc-*"]` | job-name globs never listed as external (default: session jobs `cc-<name>[-<purpose>]` of this and other sites) |
 | `slurm.via_timeout` | `600` | seconds a `--via` module command may take to submit and exit |
 | `checks.local_allow` | `[]` | globs of declared checks an item may run in the verify process with `wi new/amend --checks-runner local` (release 45; docs/slurm.md "Per-item local runner"); empty refuses the per-item choice |
 | `checks.local_timeout` | `60` | seconds per check on the per-item local path |
