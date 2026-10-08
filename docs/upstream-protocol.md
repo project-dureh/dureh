@@ -102,6 +102,10 @@ stays where it is.
   nothing new, let agents reach a safe point, `upstream send --kind idle`; `landed` naming a release checkout:
   `adapter sync --harness <checkout>`, `verify --self`, report; `reply`/`approval`: recorded by `--record`, a
   one-line notice to the Director. Without the exchange the generated text does not mention the watch.
+- Off switch (release 45): `"upstream": {"exchange": "<dir>", "watch": false}` drops the watch Monitor from the
+  desk text (items 10 and 11) while keeping the by-kind handling: the desk runs `upstream inbox --record` when
+  `dureh status` shows new messages from upstream. Default (absent or true): the watch. The command itself works
+  either way.
 - `dureh status` shows `Upstream: collaborating` while a request is open or a merge window is in play, with
   the open requests, blocked WIs, the merge window (`closed`, `requested`, `open (site idle)`) and unread
   upstream messages. An upstream `merge-window` message whose body starts with `open` requests a window;

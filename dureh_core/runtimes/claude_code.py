@@ -310,13 +310,25 @@ def _upstream_exchange(site: Site) -> bool:
     return bool((site.config.get("upstream") or {}).get("exchange"))
 
 
+def _upstream_watch(site: Site) -> bool:
+    """The mailbox watch Monitor is in the desk text: the exchange is set and `upstream.watch` is not false
+    (release 45, 6a: the off switch; default on)."""
+    return _upstream_exchange(site) and (site.config.get("upstream") or {}).get("watch", True) is not False
+
+
 def _upstream_watch_rule(site: Site, dureh) -> str:
-    """The mailbox watch (release 44): only for a site whose config sets upstream.exchange; otherwise nothing."""
+    """The mailbox watch (release 44): only for a site whose config sets upstream.exchange; otherwise nothing.
+    With `upstream.watch: false` the Monitor is dropped and the desk reads the mailbox when status shows new messages."""
     if not _upstream_exchange(site):
         return ""
-    return (f" Mailbox watch: from the start of the day keep `{dureh} upstream inbox --watch` running as a Monitor (one line"
-            " per upstream message not yet received; it records nothing); re-arm it when the Monitor expires and stop it at"
-            f" day end with the other Monitors. On each line run `{dureh} upstream inbox --record`, then by kind:"
+    if not _upstream_watch(site):
+        lead = (" Mailbox (no standing watch: config `upstream.watch: false`): when status shows new messages from upstream,"
+                f" run `{dureh} upstream inbox --record`, then by kind:")
+    else:
+        lead = (f" Mailbox watch: from the start of the day keep `{dureh} upstream inbox --watch` running as a Monitor (one line"
+                " per upstream message not yet received; it records nothing); re-arm it when the Monitor expires and stop it at"
+                f" day end with the other Monitors. On each line run `{dureh} upstream inbox --record`, then by kind:")
+    return (lead +
             " `merge-window` open: dispatch nothing new, let running agents reach a safe point, then"
             f" `{dureh} upstream send --kind idle`; `landed` naming a release checkout: `{dureh} adapter sync --harness <checkout>`,"
             f" `{dureh} verify --self`, and report the result; `reply` or `approval`: it is recorded by `--record`; give the"
@@ -382,7 +394,7 @@ def _claude_md(site: Site) -> str:
     workers = [r for r in org.roles.values() if r.kind == "worker"]
     name = persona.get("name") or "the desk"
     upstream_start = (f" from the start of the day keep `{dureh} upstream inbox --watch` running as a Monitor (item 10);"
-                      if _upstream_exchange(site) else "")
+                      if _upstream_watch(site) else "")
     lines = [GENERATED_HEADER, "", f"# DUREH desk — {name}", "",
              f"This directory is a DUREH site running the `{site.config['startup']['id']}` startup package.",
              "You are the desk: the only persistent agent, the only one with persona and memory, and the only one who speaks to the Director.",

@@ -199,6 +199,24 @@ class MailboxWatch(SiteMailbox):
         self.assertNotIn("--watch` running as a Monitor (item 10)", claude_code._claude_md(Site(self.site_root)))
         self.assertNotIn("inbox --watch", claude_code._claude_md(Site(self.site_root)))
 
+    def test_watch_off_switch_drops_the_monitor_text(self):
+        """Release 45 (6a): `upstream.watch: false` keeps the mailbox handling but drops the standing Monitor."""
+        from dureh_core.runtimes import claude_code
+
+        cfg = json.loads((self.site_root / "config.json").read_text())
+        cfg["upstream"]["watch"] = False
+        (self.site_root / "config.json").write_text(json.dumps(cfg))
+        md = claude_code._claude_md(Site(self.site_root))
+        self.assertNotIn("inbox --watch", md)
+        self.assertNotIn("as a Monitor (item 10)", md)
+        self.assertIn("no standing watch: config `upstream.watch: false`", md)
+        self.assertIn("upstream inbox --record`, then by kind", md)
+        self.assertIn("upstream send --kind idle", md)
+        up.watch_inbox(Site(self.site_root), "desk", rounds=1, emit=lambda line: None)  # the command still works
+        cfg["upstream"]["watch"] = True
+        (self.site_root / "config.json").write_text(json.dumps(cfg))
+        self.assertIn("upstream inbox --watch` running as a Monitor", claude_code._claude_md(Site(self.site_root)))
+
 
 if __name__ == "__main__":
     unittest.main()
