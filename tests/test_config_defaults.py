@@ -10,7 +10,7 @@ from dureh_core.site import CONTAINER_DEFAULTS, PROJECT_DEFAULTS
 from dureh_core.util import DurehError
 from tests.helpers import SiteCase
 
-# the block startup-packages/camri-org/startup.yaml needs (proposals/module-submit-contract.md (b))
+# the block a company's startup package needs (proposals/module-submit-contract.md (b))
 CAMRI_DEFAULTS = """config_defaults:
   project:
     manifest: camri-manifest.yaml

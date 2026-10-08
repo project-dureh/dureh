@@ -15,7 +15,7 @@ from pathlib import Path
 from .paths import target_root
 from .records import Ledger
 from .site import Site
-from .util import fail, git, sha256_file
+from .util import fail, git, sha256_file, times_word
 
 BRIEF_TAG = "DUREH-BRIEF"
 # interpreter caches, the virtualenv and the `.venv.stale-<time>` copies a rebuild (or the rename step) moved aside
@@ -735,8 +735,10 @@ def _render_brief(site: Site, rec: dict, role: str, wt: dict, entry: dict,
         lines += ["", "How to run the bundle:",
                   f"1. For each item: `{dureh} dispatch brief --wi <WI>` then spawn the named subagent with the printed brief as the whole prompt.",
                   f"2. After a worker staged its item, run `{dureh} dispatch brief --wi <WI> --role checker` and spawn `checker` with that brief.",
-                  "3. Re-dispatch at most twice per item after a failed check; then stop and report.",
-                  f"4. When every item is verified, run `{dureh} wi stage --wi {rec['id']} --summary ...` and return a summary of at most 30 lines."]
+                  f"3. Re-dispatch at most {times_word(int(site.limit('max_redispatch', 2)))} per item after a failed check;"
+                  " then stop and report.",
+                  f"4. When every item is verified, run `{dureh} wi stage --wi {rec['id']} --summary ...` and return a summary"
+                  f" of at most {int(site.limit('manager_report_lines', 30))} lines."]
     elif role == "checker":
         lines += [""] + _checker_lines(site, rec, dureh)
     elif role == "data-steward":
@@ -744,13 +746,15 @@ def _render_brief(site: Site, rec: dict, role: str, wt: dict, entry: dict,
                   "--run <completed slurm run id> --source checkpoints/<step>/<path> --dataset <derivatives name>`;"
                   " update dataset_description.json with `--metadata dataset_description.json --input <file in $TMPDIR>`.",
                   f"Commit any metadata edits on the WI branch, then run `{dureh} wi stage --wi {rec['id']} --summary \"...\"`.",
-                  "Return at most 30 lines: promotions and paths, commands run with results, open assumptions."]
+                  f"Return at most {int(site.limit('worker_report_lines', 30))} lines: promotions and paths, commands run"
+                  " with results, open assumptions."]
     elif role == "researcher":
         lines += ["", f"Record each result with `{dureh} ledger add finding --wi {rec['id']} --summary ... --evidence-level ...`.",
                   "Keep sources (identity, retrieval time, passage or hash). Do not write files."]
     else:
         lines += ["", f"When done, commit on the WI branch, then run `{dureh} wi stage --wi {rec['id']} --summary \"...\"`.",
-                  "Return at most 30 lines: changed paths, commands run with results, open assumptions. The checker owns validation."]
+                  f"Return at most {int(site.limit('worker_report_lines', 30))} lines: changed paths, commands run with"
+                  " results, open assumptions. The checker owns validation."]
     return "\n".join(lines) + "\n"
 
 

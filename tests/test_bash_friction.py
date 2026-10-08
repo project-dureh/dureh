@@ -1,4 +1,4 @@
-"""Friction seen at UNC_Lee_CAMRI-ORG on 2026-10-03 (upstream health check, no UR):
+"""Friction seen at a company site on 2026-10-03 (upstream health check, no UR):
 `cd X && bin/dureh ...`, `bin/dureh ... | head` and Claude Code's `git commit -m "$(cat <<'EOF' ...)"` were refused."""
 import unittest
 

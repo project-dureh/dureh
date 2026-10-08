@@ -24,6 +24,10 @@ limits:
   worker_brief_bytes: 2048
   manager_brief_bytes: 10240
   worker_report_lines: 30
+  # the generated manager instructions: lines a manager returns to the desk, and how often it may re-dispatch an
+  # item after failed checks before it stops and reports (guidance in the agent file, not enforced by a hook)
+  manager_report_lines: 30
+  max_redispatch: 2
   max_concurrent_lanes: 2
   reorg_lanes: 1
   # a dispatch with no agent.started after this many seconds never spawned; a new dispatch supersedes it (release 30)

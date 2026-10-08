@@ -1,4 +1,4 @@
-"""`dureh wi amend` (UNC_Lee_CAMRI-ORG finding fnd-20261003T054002713911Z-18b8280b): change checks, acceptance,
+"""`dureh wi amend` (a company site's finding fnd-20261003T054002713911Z-18b8280b): change checks, acceptance,
 constraints or outputs, or move the base, without a replacement WI and a new Gate 1."""
 import subprocess
 import unittest

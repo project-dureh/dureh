@@ -1,7 +1,7 @@
 """Release 32: scheduler stdout/stderr never land in the company root or a project tree. Every sbatch call carries
 its own --output/--error inside `<slurm.log_dir>/<WI>/` (command-line options override #SBATCH directives); a
 script's own name keeps only its basename there. Evidence: 8 `dureh-WI-0058-<job>.out/.err` files in the
-camri-org root from 2026-10-03 (`#SBATCH --output=dureh-%x-%j.out`). Fake sbatch only."""
+company site root from 2026-10-03 (`#SBATCH --output=dureh-%x-%j.out`). Fake sbatch only."""
 import contextlib
 import io
 import json
@@ -162,7 +162,7 @@ class SlurmLogs(SiteCase):
         self.assertTrue(keep.is_file())
 
     def test_old_records_still_found(self):
-        """A release-31 record whose relative #SBATCH --output put the logs in the site root (the camri-org case)."""
+        """A release-31 record whose relative #SBATCH --output put the logs in the site root (the company-site case)."""
         script = self.site_root / "projects" / "lna" / "job.sh"
         script.write_text("#!/bin/sh\n#SBATCH --output=%x-%j.out\n#SBATCH --error=%x-%j.err\necho hi\n")
         Ledger(self.s).append("run", "slurm", "desk", self.w, {

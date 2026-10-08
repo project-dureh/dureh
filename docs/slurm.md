@@ -18,7 +18,7 @@ dureh slurm cancel --run <run id>
 ## Scheduler logs never land in the site root or a project tree (release 32)
 
 Director, 2026-10-05: scheduler stdout/stderr belong in the site's log dir only. Evidence: 8
-`dureh-WI-0058-<job>.out/.err` files in the camri-org root from 2026-10-03, written by a script's
+`dureh-WI-0058-<job>.out/.err` files in a company site root from 2026-10-03, written by a script's
 `#SBATCH --output=dureh-%x-%j.out` (relative, so it resolved against the job's directory, the site root).
 
 - **Config `slurm.log_dir`**: default `logs/slurm`, relative to the site root; an absolute path is allowed only
@@ -61,7 +61,7 @@ Director, 2026-10-05: scheduler stdout/stderr belong in the site's log dir only.
 
 ## Jobs end outside agent turns: `dureh slurm watch` (release 30, provisional names)
 
-Measured 2026-10-04 at UNC_Lee_CAMRI-ORG: agents cannot wait for a job inside their session (background waits,
+Measured 2026-10-04 at a company site: agents cannot wait for a job inside their session (background waits,
 `&`, `until squeue` loops and `run_in_background` are refused; a long `slurm wait` holds the session), so a
 worker ends its turn while its job runs. Its item then shows as dispatched with an ended agent, the desk
 noticed late and re-adopted by hand, and such items held the two lanes all day. Director's rule: workers never

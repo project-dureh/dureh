@@ -24,7 +24,7 @@ class PyWriterScope(unittest.TestCase):
 
 
 class Notebooks(unittest.TestCase):
-    # UR-20261003-06 (UNC_Lee_CAMRI-ORG): one marimo notebook per pipeline in the project's code/ folder
+    # UR-20261003-06 (a company site): one marimo notebook per pipeline in the project's code/ folder
     def test_project_notebooks_in_scope_other_project_code_not(self):
         from dureh_core.org import HARNESS_ROOT, Org
 

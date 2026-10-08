@@ -21,7 +21,7 @@ DAY = "1791218340.000100"
 OLD = "1790000000.000001"
 CLEO = "U0C7M7DP0DN"
 T0 = datetime(2026, 10, 5, 10, 0, tzinfo=timezone(timedelta(hours=-4)))
-CFG = {"channel": "C0C6U53DZD0", "username": "서지아 (camri-org)", "director_user": D}
+CFG = {"channel": "C0C6U53DZD0", "username": "desk (example-org)", "director_user": D}
 
 
 def bot(ts, text="status", reactions=None):

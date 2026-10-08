@@ -156,7 +156,7 @@ idle it proposes the next work; if that fits the goals the Director set, it proc
 Where the Director would decide, the desk picks something easy to change, records it as provisional, and keeps
 going. `day plan` and `day end` record the heads of state and of every module and project: rollback points.
 
-What the plan approval covers (agreed with the CAMRI-ORG desk, 2026-10-03):
+What the plan approval covers (agreed with a company desk, 2026-10-03):
 
 - The plan lists each work item with its expected agent spawns and a rough usage estimate, and the day
   total against the daily share, so the Director can cut items at plan time.

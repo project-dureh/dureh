@@ -482,7 +482,7 @@ def check(site: Site, actor: str) -> dict:
             out["approval"] = rec["id"]
         elif state == TIMEOUT_APPROVED:
             asked_at = p.get("asked_at") or req["ts"]
-            memo = (f"no answer within 1 h after the day-plan request {req['id']} at {_hhmm(asked_at)}"
+            memo = (f"no answer within {_span(asked_at, until)} after the day-plan request {req['id']} at {_hhmm(asked_at)}"
                     f" (until {_hhmm(until)}); {SILENCE_RULE}; via slack")
             rec = workday.approve(site, actor, memo, via="slack",
                                   extra={"slack_ts": ts, "rule": "silence-1h", "until": until})
@@ -498,6 +498,19 @@ def check(site: Site, actor: str) -> dict:
                 out["reply_error"] = str(exc)
         decisions.append(out)
     return {"decisions": decisions, "waiting": waiting}
+
+
+def _span(start: str, end: str) -> str:
+    """The wait between two recorded times as `1 h`, `30 min` or `1 h 15 min` (the request's own `until`, which
+    `--until` may set to other than an hour)."""
+    from .workday import _parse
+
+    try:
+        minutes = max(0, round((_parse(end) - _parse(start)).total_seconds() / 60))
+    except (TypeError, ValueError):
+        return "the wait"
+    h, m = divmod(minutes, 60)
+    return " ".join(x for x in (f"{h} h" if h else "", f"{m} min" if m or not h else "") if x)
 
 
 def _hhmm(ts: str) -> str:

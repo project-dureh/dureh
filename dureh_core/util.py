@@ -17,6 +17,11 @@ def fail(message: str) -> "None":
     raise DurehError(message)
 
 
+def times_word(n: int) -> str:
+    """`once`, `twice`, `3 times`: a count for generated guidance text."""
+    return {0: "zero times", 1: "once", 2: "twice"}.get(n, f"{n} times")
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 

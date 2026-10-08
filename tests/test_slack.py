@@ -16,7 +16,7 @@ from dureh_core.records import Ledger
 from dureh_core.runtimes.claude_code import _claude_md
 from dureh_core.util import DurehError
 
-CFG = {"channel": "C0C6U53DZD0", "thread_ts": "1791213939.792479", "username": "서지아 (camri-org)",
+CFG = {"channel": "C0C6U53DZD0", "thread_ts": "1791213939.792479", "username": "desk (example-org)",
        "icon_emoji": ":brain:"}
 FAKE_TOKEN = "xoxb-test-not-a-real-token"
 REAL_REQUEST = slack._request
@@ -72,7 +72,7 @@ class SlackCase(SlackBase):
         self.assertEqual(c["token"], FAKE_TOKEN)
         d = c["data"]
         self.assertEqual((d["channel"], d["thread_ts"]), (CFG["channel"], CFG["thread_ts"]))
-        self.assertEqual(d["username"], "서지아 (camri-org)")
+        self.assertEqual(d["username"], "desk (example-org)")
         self.assertEqual(d["icon_emoji"], ":brain:")
         self.assertEqual(d["text"], "*출근* 오늘 계획: WI-0001")
         self.assertNotIn(FAKE_TOKEN, out)
@@ -466,6 +466,20 @@ class SlackSilence(ApprovalBase):
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(out)["until"], _iso(T0 + timedelta(minutes=30)))
         self.assertEqual(self.events("slack.approval.requested")[0]["payload"]["until"], _iso(T0 + timedelta(minutes=30)))
+
+    def test_timeout_memo_names_the_actual_wait(self):
+        # review 2026-10-07 #11: the memo said "within 1 h" whatever --until set
+        self.plan()
+        code, out, err = self.run_cli("ask", "--kind", "day-plan", "--until", "09:30")
+        self.assertEqual(code, 0, err)
+        rec = json.loads(out)["record"]
+        self.at(minutes=31)
+        self.assertEqual(self.run_cli("check")[0], 0)
+        memo = self.events("day.approved")[0]["payload"]["memo"]
+        self.assertIn(f"no answer within 30 min after the day-plan request {rec} at 09:00 (until 09:30)", memo)
+        self.assertEqual([slack._span("2026-10-08T09:00:00+00:00", x) for x in
+                          ("2026-10-08T10:00:00+00:00", "2026-10-08T10:15:00+00:00", "2026-10-08T09:45:00+00:00")],
+                         ["1 h", "1 h 15 min", "45 min"])
 
     def test_until_must_be_within_the_day(self):
         self.plan()

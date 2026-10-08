@@ -110,7 +110,7 @@ class Bundle(SiteCase):
         self.assertIn(str(wt), p["removed"])
 
     def test_stopped_children_are_not_counted_in_the_bundle_recount(self):
-        # UNC_Lee_CAMRI-ORG finding fnd-20261003T184341577481Z-02e9dca5: superseded items made WI-0014 fail forever
+        # a company site's finding fnd-20261003T184341577481Z-02e9dca5: superseded items made WI-0014 fail forever
         old = wf.wi_new(self.s, "desk", "old try", "Add g", "py-writer", "modules/demo", ["g"], parent=self.bundle)["id"]
         for w in (self.bundle, self.item, old):
             wf.wi_approve(self.s, "desk", w, "ok")

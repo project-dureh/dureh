@@ -1,4 +1,4 @@
-"""Release 37 (UR-20261005-02, UNC_Lee_CAMRI-ORG WI-0122): a checker lost two background `verify --wi` runs to the
+"""Release 37 (UR-20261005-02, a company site's WI-0122): a checker lost two background `verify --wi` runs to the
 end-of-agent cleanup, rework briefs carried no failure context, and `wi amend --constraint` replaced the whole list.
 `verify --wi --submit/--collect`, `slurm watch` lines for verify jobs, lanes held by a pending verify job, the
 "Last verification" block of rework briefs, and `wi amend --add-constraint`. Fake sbatch/sacct only."""

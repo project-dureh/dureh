@@ -15,7 +15,7 @@ from dureh_core.records import Ledger
 from dureh_core.runtimes.claude_code import WAIT_HINT
 from dureh_core.util import DurehError, read_json
 
-FINDING = "fnd-20261004T214606784656Z-a4f231c9"  # UNC_Lee_CAMRI-ORG, 2026-10-04: WI-0117's 21:25 dispatch never started
+FINDING = "fnd-20261004T214606784656Z-a4f231c9"  # a company site, 2026-10-04: WI-0117's 21:25 dispatch never started
 
 
 class WatchCase(SiteCase):

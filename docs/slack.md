@@ -26,7 +26,7 @@ it may **consult** an agent before asking the Director; `slack.enabled` switches
 "slack": {
   "channel": "C0C6U53DZD0",
   "daily_thread": true,
-  "username": "서지아 (camri-org)",
+  "username": "desk (example-org)",
   "icon_emoji": ":brain:",
   "director_user": "U081JGBMDG8",
   "agents": {"U0C7M7DP0DN": "Cleo"},
@@ -40,7 +40,7 @@ it may **consult** an agent before asking the Director; `slack.enabled` switches
 | `channel` | channel ID (not the name) of `#project` |
 | `daily_thread` | `true`: one thread per working day, opened by the first post of the day; `false`: every post replies in `thread_ts`. Default: `true` when `thread_ts` is absent, `false` when it is set (older configs keep their one thread) |
 | `thread_ts` | `ts` of the company thread's parent message, as a string; required when `daily_thread` is false, otherwise ignored |
-| `username` | display name for this company's posts (here: 데스크 서지아 of camri-org) |
+| `username` | display name for this company's posts (here: the desk of example-org) |
 | `icon_emoji` / `icon_url` | optional avatar |
 | `director_user` | the Director's Slack user ID; the only user whose reaction counts. Without it `slack ask`/`check` refuse and the Director approves in the session |
 | `agents` | optional `{"<user or bot id>": "<label>"}` (or `{"<id>": {"label": ...}}`): agents whose first reply to `slack ask-agent` counts as an opinion |
@@ -154,8 +154,9 @@ bin/dureh slack check                                 # one pass (same decisions
   day end (and the request simply expires there).
 - When `check`/`watch` finds the request past `until` with no Director ✅/❌ on it, it records the approval exactly as
   a ✅ would: the same `day.approved` record (`via: slack`, `rule: silence-1h`, `until`), memo
-  `no answer within 1 h after the day-plan request <record id> at <HH:MM> (until <HH:MM>); Director rule 2026-10-06:
-  silence for 1 hour is approval; via slack`; the request state is **approved-by-timeout**; the printed line ends with
+  `no answer within <wait> after the day-plan request <record id> at <HH:MM> (until <HH:MM>); Director rule 2026-10-06:
+  silence for 1 hour is approval; via slack` (`<wait>` is the request's own span from the ask to `until`, `1 h`
+  by default); the request state is **approved-by-timeout**; the printed line ends with
   `; start work`. The desk starts work at that line.
 - A ❌ before the hour still declines. After the decision a late ✅ or ❌ changes nothing (the request is closed; see
   idempotent above). Other kinds and older `day-plan` records without `until` keep the old behaviour: they wait until

@@ -58,7 +58,7 @@ class RelocateRoot(SiteCase):
         self.assertEqual(self.s.relocate(self.wt), self.wt)
 
     def rename(self):
-        new = self.tmp / "camri-org"
+        new = self.tmp / "renamed-org"
         os.rename(self.site_root, new)
         self.site_root = new
         self.s = Site(new)
