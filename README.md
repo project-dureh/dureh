@@ -15,7 +15,7 @@ Installation requires an absent or empty destination and a startup package with 
 
 ## Organization and runtime
 
-`org/roles.yaml` is the single, runtime-neutral definition: the desk, three managers, nine worker types, their dispatch authority, tiers, and write scopes. `org/tiers.yaml` holds provisional limits. The Claude Code adapter (`dureh_core/runtimes/claude_code.py`) generates `CLAUDE.md`, `.claude/settings.json`, `.claude/agents/*.md`, and `.claude/skills/*` in the site, and implements the dispatch contract with hooks:
+`org/roles.yaml` is the single, runtime-neutral definition: the desk, three managers, nine worker types, their dispatch authority, tiers, and write scopes. `org/tiers.yaml` holds provisional limits. The Claude Code adapter (`dureh_core/runtimes/claude_code.py`) generates `CLAUDE.md`, `.claude/settings.json`, `.claude/agents/*.md`, and `.claude/skills/*` in the site (settings.json carries the persona's conversation `language` as Claude Code's response language once the persona records one; generated documents stay English), and implements the dispatch contract with hooks:
 
 | Contract | Claude Code mechanism |
 |---|---|
