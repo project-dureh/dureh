@@ -1193,6 +1193,8 @@ def verify_submit(site: Site, actor: str, wi: str, timeout: int = 1800) -> dict:
     """`verify --wi --submit` (release 37, UR-20261005-02): submit the declared-checks job and return at once with
     a pending verify run; `verify --wi --collect` records the verification after the job ended. With nothing to
     submit (a bundle, no declared checks, or the local runner) the verification runs synchronously as usual."""
+    from . import ops
+
     ctx = _verify_context(site, actor, wi)
     if ctx["bundle"] or not ctx["checks"] or checks_runner(site) != "slurm":
         r = verify_wi(site, actor, wi, timeout=timeout)
@@ -1202,7 +1204,7 @@ def verify_submit(site: Site, actor: str, wi: str, timeout: int = 1800) -> dict:
     pend = pending_verify(led, wi)
     if pend:
         fail(f"{wi} already has verify run {pend['id']} (job {pend['payload']['job_id']}) waiting to be collected;"
-             f" run `dureh verify --wi {wi} --collect` once `slurm watch` reports it ended")
+             f" run `dureh verify --wi {wi} --collect` {ops.job_end_phrase(site)}")
     cwd, troot = ctx["cwd"], ctx["troot"]
     _check_venv(wi, cwd)
     _, head = changed_paths(site, wi)
@@ -1214,7 +1216,7 @@ def verify_submit(site: Site, actor: str, wi: str, timeout: int = 1800) -> dict:
         "note": f"declared checks submitted as scheduler job {job['job_id']}; collect with `verify --wi {wi} --collect`"})
     return {"submitted": True, "run": run["id"], "job_id": job["job_id"], "head": head, "script": job["script"],
             "log_out": job["log_out"], "log_err": job["log_err"],
-            "next": f"end your turn; when `slurm watch` reports the job, the checker runs `dureh verify --wi {wi} --collect`"}
+            "next": f"end your turn; {ops.job_end_phrase(site)}, the checker runs `dureh verify --wi {wi} --collect`"}
 
 
 def verify_collect(site: Site, actor: str, wi: str, run_id: str | None = None) -> dict:
@@ -1246,7 +1248,7 @@ def verify_collect(site: Site, actor: str, wi: str, run_id: str | None = None) -
     have_all = all(Path(f"{prefix}.check{i}.exit").is_file() for i in range(1, len(p["checks"]) + 1))
     if first not in ops.TERMINAL_STATES and not (first == "UNKNOWN" and have_all):
         fail(f"verify run {run['id']}: job {job_id} is still {first}; nothing was recorded. End your turn: the desk"
-             f" re-dispatches the checker when `slurm watch` reports the job ended, then run `verify --wi {wi} --collect`")
+             f" re-dispatches the checker {ops.job_end_phrase(site)}, then run `verify --wi {wi} --collect`")
     paths, head = changed_paths(site, wi)
     if head != p.get("head"):
         fail(f"{wi} moved from {str(p.get('head'))[:12]} to {str(head)[:12]} after verify run {run['id']} was submitted;"

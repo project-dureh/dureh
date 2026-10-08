@@ -103,6 +103,24 @@ wait for jobs; the desk watches the scheduler and re-dispatches.
   carries the hint "do not wait for jobs in the session: end your turn; the desk re-dispatches you when `dureh
   slurm watch` reports the job". `slurm wait` stays for jobs expected to end within minutes.
 
+### Watch modes: config `slurm.watch` (release 45)
+
+Measured 2026-10-08 at a company site: a standing watch Monitor expires and must be re-armed; about ten re-arms
+brought one useful line in a day. `slurm.watch` sets what the generated desk text (CLAUDE.md items 1, 8 and 9), the
+role files and the refused-wait hint tell agents about job ends. The commands themselves (`slurm watch [--once]`,
+`slurm wait`, `slurm status`) work the same in every mode, and lanes, records and `day close` do not change.
+
+| mode | desk text | worker/checker hint |
+|---|---|---|
+| `monitor` (default; sites without the key) | keep `dureh slurm watch` running as a Monitor; re-dispatch when a line arrives | "the desk re-dispatches you when `dureh slurm watch` reports the job" |
+| `on-demand` | no standing Monitor: a job expected within minutes is waited for with `slurm wait --run <id>`; a longer one is checked with `slurm status --run <id>` (or one `slurm watch --once` pass) at the next turn or when the Director asks | "the desk re-dispatches you once the job has ended" |
+| `off` | job ends are not watched; a job's state is read with `slurm status --run <id>` | as `on-demand` |
+
+In every mode an ended job is followed by the same re-dispatch of the owning WI, and an ended verify job by the
+checker's `verify --wi <WI> --collect`. Another value fails generation (`adapter sync`) with the allowed values.
+Switching: set the key in `config.json` (a key that changes running behaviour: merge window or the desk's OK), run
+`dureh adapter sync`, and stop a running watch Monitor if the new mode has none.
+
 ### Lanes count live work only (release 30)
 
 `max_concurrent_lanes` (default 2) counts top-level work items (not items inside a bundle) that are **active

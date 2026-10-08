@@ -23,7 +23,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 
 from .. import yamlsub
-from ..ops import render_status, status, transcript_usage
+from ..ops import render_status, status, transcript_usage, watch_mode
 from ..org import HARNESS_ROOT
 from .. import procs
 from ..paths import classify, scratch_roots, write_decision
@@ -162,7 +162,7 @@ def _agent_file(site: Site, role, project: str | None = None) -> str:
                                 f"- {_log_rule(site)}",
                                 "- Never wait for a job in the session (no `squeue`/`sleep` loops, no background commands,"
                                 f" no long `slurm wait`): after submitting, report the run id(s) and end your turn; the desk"
-                                f" re-dispatches you when `dureh slurm watch` reports the job, and `{dureh} slurm status --run <run-id>`"
+                                f" re-dispatches you {_job_end_seen(site)}, and `{dureh} slurm status --run <run-id>`"
                                 f" then shows its final state (per item for `--each`). `{dureh} slurm wait --run <run-id>` only for"
                                 " a job expected to end within a few minutes.",
                                 f"- {SUBJECT_RULE} File-level items are BIDS file stems; subject/session items are `sub-<label>` (or `sub-<label>_ses-<label>`);"
@@ -323,6 +323,56 @@ def _upstream_watch_rule(site: Site, dureh) -> str:
             " Director a one-line notice.")
 
 
+def _watch_mode(site: Site) -> str:
+    return watch_mode(site)  # an invalid slurm.watch fails generation (adapter sync) with the allowed values
+
+
+def _job_end_seen(site: Site) -> str:
+    """When the desk re-dispatches a worker whose job ended, in the site's `slurm.watch` mode (role files)."""
+    return ("when `dureh slurm watch` reports the job" if _watch_mode(site) == "monitor"
+            else "once the job has ended")
+
+
+def _job_end_rule(site: Site, dureh) -> str:
+    """Item 8: how the desk learns that a job ended (release 45, config `slurm.watch`); the text ends where the
+    re-dispatch rule continues it."""
+    mode = _watch_mode(site)
+    if mode == "monitor":
+        return (f" Jobs end outside agent turns: keep `{dureh} slurm watch` running as a Monitor (one line per tracked job that ends:"
+                " run, job, WI, role, agent, state, next step; it records the final state, so a restart reports nothing twice;"
+                " it checks every 300 s by default with one batched `sacct` call; a job sacct has no state for after `watch_stale_days`"
+                " (default 7) is reported once with `next=check by hand` and no longer checked). When a line arrives,")
+    if mode == "on-demand":
+        return (" Jobs end outside agent turns. No standing job Monitor (config `slurm.watch: on-demand`): after a submit,"
+                f" wait for a job expected within minutes with `{dureh} slurm wait --run <id>`; check a longer job with"
+                f" `{dureh} slurm status --run <id>` at your next turn or when the Director asks (`{dureh} slurm watch --once`"
+                " checks every tracked job in one pass and prints one line per ended job with its next step, then exits)."
+                " When a job has ended,")
+    return (f" Jobs end outside agent turns; they are not watched (config `slurm.watch: off`): read a job's state with"
+            f" `{dureh} slurm status --run <id>`. When a job has ended,")
+
+
+def _verify_end_rule(site: Site) -> str:
+    """Item 1: how an ended verify job comes back to the checker, in the site's `slurm.watch` mode."""
+    if _watch_mode(site) == "monitor":
+        return ("`slurm watch` reports the verify job's end with `next=dispatch brief ... (checker collects verify run <id>)`;"
+                " re-dispatch the checker, which runs `verify --wi <WI> --collect`.")
+    return ("once the verify job has ended (`slurm status --run <id>`), re-dispatch the checker"
+            " (`dispatch brief --wi <WI> --role checker`), which runs `verify --wi <WI> --collect`.")
+
+
+def _no_poll_rule(site: Site, dureh) -> str:
+    """Item 9: the rule that replaces a polling loop, in the site's `slurm.watch` mode."""
+    mode = _watch_mode(site)
+    if mode == "monitor":
+        return (f" `{dureh} slurm watch` as a Monitor reports it; `{dureh} slurm wait --run <id>` only for a job expected"
+                " within minutes.")
+    if mode == "on-demand":
+        return (f" `{dureh} slurm wait --run <id>` for a job expected within minutes; otherwise `{dureh} slurm status --run <id>`"
+                " at a later turn.")
+    return f" read its state with `{dureh} slurm status --run <id>` when you need it."
+
+
 def _claude_md(site: Site) -> str:
     persona = _persona(site)
     org = site.org
@@ -361,8 +411,9 @@ def _claude_md(site: Site) -> str:
               " `$DUREH_TARGET_ROOT` is the target's main tree and `$DUREH_SITE` the site. `--output` paths are relative to that same working directory."
               f" The checker's `{dureh} verify --wi <WI>` runs the declared checks as ONE scheduler job (config `checks.runner`: `slurm` by default where `sbatch` exists,"
               " `checks.time`, `checks.sbatch_args`; logs under `<slurm.log_dir>/<WI>/verify-*`, default `logs/slurm`); `--local` is the escape hatch for a machine without a scheduler."
-              " With the slurm runner the checker runs `verify --wi <WI> --submit` (returns a verify run id at once) and ends its turn; `slurm watch` reports the verify job's end"
-              " with `next=dispatch brief ... (checker collects verify run <id>)`; re-dispatch the checker, which runs `verify --wi <WI> --collect`. A pending verify job holds the item's lane."
+              " With the slurm runner the checker runs `verify --wi <WI> --submit` (returns a verify run id at once) and ends its turn; "
+              + _verify_end_rule(site) +
+              " A pending verify job holds the item's lane."
               " A rework brief carries the last failed verification (check ids, exit codes, last lines, log paths) outside the brief budget;"
               " add context to a staged or reworked item with `wi amend --add-constraint TEXT` (appends; `--constraint` replaces the list)."
               " Nobody runs a module's test suite (`pytest`, `unittest discover`) in the session: tests are checks or `slurm submit` jobs."
@@ -383,12 +434,10 @@ def _claude_md(site: Site) -> str:
               f" After the site moved or was renamed, `{dureh} worktree repair --all` does this for every worktree and environment at once (`--dry-run` first)."
               " Never edit `.git` files or rebuild environments by hand.",
               f"8. Compute runs only as scheduler jobs through `{dureh} slurm submit`. {SUBJECT_RULE} {_log_rule(site)}"
-              f" Jobs end outside agent turns: keep `{dureh} slurm watch` running as a Monitor (one line per tracked job that ends:"
-              " run, job, WI, role, agent, state, next step; it records the final state, so a restart reports nothing twice;"
-              " it checks every 300 s by default with one batched `sacct` call; a job sacct has no state for after `watch_stale_days`"
-              " (default 7) is reported once with `next=check by hand` and no longer checked)."
-              f" When a line arrives, re-dispatch the owning WI: `{dureh} dispatch brief --wi <WI>` (for an item of a bundle whose manager"
-              " ended, re-dispatch the bundle so its manager re-dispatches the item). Workers never wait for jobs in the session;"
+              + _job_end_rule(site, dureh) +
+              f" re-dispatch the owning WI: `{dureh} dispatch brief --wi <WI>` (for an item of a bundle whose manager"
+              " ended, re-dispatch the bundle so its manager re-dispatches the item; an ended verify job is collected by the checker,"
+              " item 1). Workers never wait for jobs in the session;"
               " a dispatched item whose agent ended is normal while its job runs, not an incident."
               " Lanes: only an item with a live agent or a job not known to have ended holds one (items waiting for you and orphaned"
               " bundles do not); every lane refusal is recorded as `lane.refused` and counted in status."
@@ -401,7 +450,7 @@ def _claude_md(site: Site) -> str:
               f" a code-generated report lands with `{dureh} promote --kind report ... --dataset <pipeline> --name <report>` in derivatives/<pipeline>/reports/<report>/ with provenance.json.",
               f"9. Self-test the harness and this site with `{dureh} verify --self` after any harness or package update."
               f" Several work items at once: `{dureh} wi show --wi A --wi B --summary`. Never wait for a scheduler job in a polling loop:"
-              f" `{dureh} slurm watch` as a Monitor reports it; `{dureh} slurm wait --run <id>` only for a job expected within minutes."
+              + _no_poll_rule(site, dureh) +
               f" A NEW module starts with `{dureh} site new-module --id <id> --package <pkg> [--depends <site module>] [--source <dir>]`"
               " (standard skeleton, registered with env_rebuild, a WI target at once; site modules it imports are pinned by git revision).",
               f"10. A harness problem (not a site problem) is a finding tagged `upstream`; turn it into a request with `{dureh} upstream draft --finding <id> --type bug|change|decision|friction --severity blocking|degrading|minor`."
@@ -1001,34 +1050,45 @@ def _marked(original: str, agent_id: str, simple: bool) -> str:
 
 WAIT_HINT = ("do not wait for jobs in the session: end your turn; the desk re-dispatches you when `dureh slurm watch`"
              " reports the job")
+# release 45: with config slurm.watch on-demand or off there is no watch to name
+WAIT_HINT_UNWATCHED = "do not wait for jobs in the session: end your turn; the desk re-dispatches you once the job has ended"
+
+
+def wait_hint_text(site: Site) -> str:
+    try:
+        return WAIT_HINT if watch_mode(site) == "monitor" else WAIT_HINT_UNWATCHED
+    except DurehError:
+        return WAIT_HINT
 _WAIT_FORM = re.compile(r"(?<![\w-])(squeue|sacct|sleep|until|while|scontrol\s+show\s+job|slurm\s+(wait|status))(?![\w-])")
 
 
-def _wait_hint(reason: str, command: str, always: bool = False) -> str:
+def _wait_hint(reason: str, command: str, always: bool = False, hint: str = WAIT_HINT) -> str:
     """Release 30: a refused form that looks like waiting for a job gets the rule that replaces the wait."""
-    return f"{reason}; {WAIT_HINT}" if always or _WAIT_FORM.search(command) else reason
+    return f"{reason}; {hint}" if always or _WAIT_FORM.search(command) else reason
 
 
 def guard_bash(site: Site, role: str, data: dict) -> dict | None:
     ti = data.get("tool_input") or {}
+    hint = wait_hint_text(site)
+    wait = lambda reason, cmd, always=False: _wait_hint(reason, cmd, always, hint)  # noqa: E731
     original = ti.get("command") or ""
     command = _LITERAL_SUBST.sub("LITERAL", original)  # checked form; the original runs
     command = re.sub(r"\$\(\s*pwd\s*\)", "$PWD", command)  # same value as $PWD, which is not a command
     if ti.get("run_in_background"):
-        return _deny(_wait_hint("no hidden background work in the session; submit computation with `dureh slurm submit`",
-                                original, always=True))
+        return _deny(wait("no hidden background work in the session; submit computation with `dureh slurm submit`",
+                          original, always=True))
     if "`" in command or "$(" in command:
         if role != "desk":
-            return _deny(_wait_hint("command substitution cannot be checked; run the parts as separate commands", original))
+            return _deny(wait("command substitution cannot be checked; run the parts as separate commands", original))
     try:
         segs = _segments(command)
     except ValueError as exc:
-        return _deny(_wait_hint(f"cannot parse the command ({exc}); simplify it", original))
+        return _deny(wait(f"cannot parse the command ({exc}); simplify it", original))
     cwd = Path(data.get("cwd") or site.root)
     scheduler_only = _scheduler_only(site)
     words_only = [s for s in segs if s[0] not in _SEPARATORS]
     if any(s == ["&"] for s in segs):
-        return _deny(_wait_hint("no background jobs (`&`) in the session; use the scheduler", original))
+        return _deny(wait("no background jobs (`&`) in the session; use the scheduler", original))
     agent_id = data.get("agent_id")
     led = Ledger(site)
     agent_wi = _bind(led, role, data, "first-tool") if agent_id else None
@@ -1066,10 +1126,10 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
                              "or another path), so the hook can set your identity")
         if role != "desk" and (first in _INTERPRETERS or re.match(r"python3?\.\d+$", first)) \
                 and any(w in ("<<", "<<-", "<<<") for w in words):
-            return _deny(_wait_hint(f"a heredoc or here-string fed to `{first}` runs its body, which cannot be checked; "
-                                    "write a script file in your scope and run it", original))
+            return _deny(wait(f"a heredoc or here-string fed to `{first}` runs its body, which cannot be checked; "
+                              "write a script file in your scope and run it", original))
         if first in ALWAYS_DENY_FIRST:
-            return _deny(_wait_hint(ALWAYS_DENY_FIRST[first], original))
+            return _deny(wait(ALWAYS_DENY_FIRST[first], original))
         if any(fnmatchcase(first, pat) for pat in scheduler_only):
             return _deny(f"`{first}` runs only as a scheduler job; use `dureh slurm submit`")
         if first == "git" and "push" in words[1:3]:

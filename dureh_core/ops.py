@@ -377,6 +377,32 @@ def each_level(site: Site) -> str:
     return lv
 
 
+WATCH_MODES = ("monitor", "on-demand", "off")
+
+
+def watch_mode(site: Site) -> str:
+    """Config `slurm.watch` (release 45): how the desk learns that a job ended. `monitor` (the default, the
+    behaviour before the key existed): a standing `slurm watch` Monitor. `on-demand`: no standing Monitor; a short
+    job is waited for with `slurm wait --run`, a long one is checked with `slurm status` (or one `slurm watch
+    --once` pass) at the next turn or when the Director asks. `off`: no job-end notification at all; job states
+    are read with `slurm status`. Only generated text follows the mode: `slurm watch|wait|status` work in every mode."""
+    mode = str((site.config.get("slurm") or {}).get("watch") or "monitor")
+    if mode not in WATCH_MODES:
+        fail(f"config slurm.watch must be one of {', '.join(WATCH_MODES)}: {mode!r}")
+    return mode
+
+
+def job_end_phrase(site: Site) -> str:
+    """How tool output names the moment a job's end is noticed, in the site's `slurm.watch` mode."""
+    try:
+        mode = watch_mode(site)
+    except DurehError:
+        mode = "monitor"
+    if mode == "monitor":
+        return "when `slurm watch` reports the job ended"
+    return "once the job has ended (the desk sees it with `slurm status`)"
+
+
 def file_entities(stem: str) -> dict:
     """{sub, ses} labels of a BIDS file stem (`sub-01_ses-1_task-rest_run-01_bold`)."""
     return {m.group(1): m.group(2) for m in FILE_ENTITY_RE.finditer(stem)}
