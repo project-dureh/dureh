@@ -246,10 +246,10 @@ class Each(SiteCase):
     def test_purge_removes_array_task_logs_and_item_list(self):
         run = self.submit(each="a,b,c")
         logs = self.site_root / "logs" / "slurm" / self.w
-        mine = [logs / f"dureh-{self.w}-4300_{i}.{x}" for i in range(3) for x in ("out", "err")]
+        mine = [logs / f"{self.s.session_name}-{self.w}-4300_{i}.{x}" for i in range(3) for x in ("out", "err")]
         for f in mine:
             f.write_text("x")
-        keep = logs / f"dureh-{self.w}-4399_0.out"
+        keep = logs / f"{self.s.session_name}-{self.w}-4399_0.out"
         keep.write_text("another job")
         wf.dispatch_stop(self.s, "desk", self.w, "test")
         out = wf.purge(self.s, "desk", self.w)

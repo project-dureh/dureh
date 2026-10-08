@@ -47,6 +47,18 @@ Director, 2026-10-05: scheduler stdout/stderr belong in the site's log dir only.
   with its tmux pane log `<NAME>.pane.log` and, while closing, the close marker `<NAME>.close` that makes the job
   end itself (`dureh day close`, `dureh site session release`; docs/workday.md "Closing the session job").
 
+## Job names (release 44)
+
+- **`slurm submit`** names the job `<prefix>-<WI>`, the prefix being config `slurm.job_prefix`, else the site's
+  session name (the `<name>` of its session job `cc-<name>`: config `session.name`, else the site folder name).
+  When the script carries its own `#SBATCH -J/--job-name` (or an `--sbatch-arg -J/--job-name` is given), the
+  harness passes no `--job-name`, so the script's name stands (a command-line option would override it). The run
+  record's `job_name` holds the name the job got; `slurm status|wait` and `purge` fill `%x` from it.
+- **`verify --wi`** names its checks job `<prefix>-verify-<WI>`.
+- A prefix holds letters, digits, `.`, `_`, `+` and `-` and starts with a letter or digit; anything else is refused.
+- Records written before release 44 named every job `dureh-<WI>`; their log names are still found from that.
+- The scheduler logs keep the rule above whatever the name: always under `<log_dir>/<WI>/`, never the site root.
+
 ## Jobs end outside agent turns: `dureh slurm watch` (release 30, provisional names)
 
 Measured 2026-10-04 at UNC_Lee_CAMRI-ORG: agents cannot wait for a job inside their session (background waits,
@@ -139,7 +151,7 @@ dureh verify --wi <WI> [--local]
   (a `cluster` profile or any `slurm` setting) and `sbatch` is on the site's PATH, else `local` (tests and
   installs without a cluster keep working). `--local` runs the checks in the calling process whatever the
   config says (escape hatch; recorded as `runner_override: true`).
-- **Job.** ONE job per verification: `sbatch --parsable --job-name=dureh-verify-<WI> --time=<checks.time, else
+- **Job.** ONE job per verification: `sbatch --parsable --job-name=<slurm.job_prefix, else the session name>-verify-<WI> --time=<checks.time, else
   slurm.time, else 01:00:00> --chdir=<work root> --export=ALL [--account/--partition from slurm]
   [checks.sbatch_args...] --output=<log_dir>/<WI>/verify-<utc ts>.out --error=... <log_dir>/<WI>/verify-<utc ts>.sh`. The work root is the WI worktree (the target root
   when the role has none), the environment the site's (`site.env()`, `PYTHONDONTWRITEBYTECODE=1`,
@@ -262,7 +274,7 @@ with `--reason`.
   `logs/slurm/<WI>/each-<utc ts>.items` (fixed for the run) and a wrapper `each-<utc ts>.sbatch` next to it that
   carries the script's `#SBATCH` lines, maps `$SLURM_ARRAY_TASK_ID` to the item (exit 98 when a task has no item)
   and runs the script with its own interpreter. With `--module` the module wrapper does the same mapping.
-- **Logs.** `<slurm.log_dir>/<WI>/%x-%A_%a.out|.err` (one pair per task: `dureh-<WI>-<array job>_<task>.out`); a
+- **Logs.** `<slurm.log_dir>/<WI>/%x-%A_%a.out|.err` (one pair per task: `<job name>-<array job>_<task>.out`); a
   script's own `-o/-e` name is kept as a basename there, with `_%a` added (and `%j` turned into `%A`) when it has no `%a`.
 - **Record.** `array: {job_id, items, count, items_file, wrapper, env, level}`, plus `each_file` (the resolved `@file`),
   `max_parallel` and `sbatch_args` (reused by `--resubmit-failed`).

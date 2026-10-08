@@ -125,7 +125,7 @@ class Ops(SiteCase):
         run = ops.slurm_submit(s, "desk", w, str(script))
         self.assertTrue(run["payload"]["log_out"].endswith("%x-%j.out"))
         logs = self.site_root / "logs" / "slurm" / w
-        mine = [logs / f"dureh-{w}-4244.out", logs / f"dureh-{w}-4244.err"]
+        mine = [logs / f"{s.session_name}-{w}-4244.out", logs / f"{s.session_name}-{w}-4244.err"]
         for f in mine:
             f.write_text("x")
         away = self.tmp / "away"

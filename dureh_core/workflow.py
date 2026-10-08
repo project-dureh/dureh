@@ -1025,7 +1025,7 @@ def _submit_checks_job(site: Site, wi: str, cwd: Path, troot: Path, checks: list
     script.write_text(_checks_script(wi, cwd, troot, site.root, prefix, checks), encoding="utf-8")
     script.chmod(0o755)
     wall = str(cfg.get("time") or slurm.get("time") or CHECKS_TIME_DEFAULT)
-    cmd = ["sbatch", "--parsable", f"--job-name=dureh-verify-{wi}", f"--time={wall}", f"--chdir={cwd}",
+    cmd = ["sbatch", "--parsable", f"--job-name={ops.job_prefix(site)}-verify-{wi}", f"--time={wall}", f"--chdir={cwd}",
            "--export=ALL"]
     for key, flag in (("account", "--account"), ("partition", "--partition")):
         if slurm.get(key):
@@ -1438,7 +1438,8 @@ def _wi_job_logs(site: Site, led: Ledger, wi: str, rec: dict) -> tuple[list[Path
                               "array": {"count": jb.get("count") or 0} if jb.get("kind") == "array" else None})
         for p in views:
             job = str(p["job_id"]).split(";")[0].strip()
-            jname = p.get("job_name") or _scan_opt([str(w) for w in p.get("command") or []], "-J", "--job-name") or f"dureh-{wi}"
+            jname = p.get("job_name") or _scan_opt([str(w) for w in p.get("command") or []], "-J", "--job-name") \
+                or f"dureh-{wi}"  # records before release 44 always named the job dureh-<WI>
             candidates: list[str] = []
             arr = p.get("array") or {}
             tasks: list[int | None] = list(range(int(arr.get("count") or 0))) if arr else [None]

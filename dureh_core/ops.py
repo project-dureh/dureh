@@ -353,6 +353,20 @@ LOOP_RULE = ("workflows loop at file level (Director 2026-10-06): use --each-fro
              "or --single --reason '<why one job>'")
 
 
+JOB_PREFIX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+
+
+def job_prefix(site: Site) -> str:
+    """The prefix of the scheduler job names the harness gives (`<prefix>-<WI>`, `<prefix>-verify-<WI>`): config
+    `slurm.job_prefix`, else the site's session name (the company part of its session job `cc-<name>`)."""
+    raw = (site.config.get("slurm") or {}).get("job_prefix")
+    prefix = str(raw if raw is not None else site.session_name).strip()
+    if not JOB_PREFIX_RE.match(prefix):
+        fail(f"config slurm.job_prefix (else the session name) {prefix!r} is not a job name prefix: use letters, digits,"
+             " '.', '_', '+' or '-', starting with a letter or digit")
+    return prefix
+
+
 def each_level(site: Site) -> str:
     """Config `slurm.each_level`: the level workflow steps loop at (default `file`; Director 2026-10-06: 모든 workflow는
     file 기준으로 loop). A coarser `--level` needs `--reason`, a bare single job `--single --reason`; `any` switches the
@@ -717,7 +731,12 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
         fail("--each makes the job array itself; remove --array from the script and the sbatch arguments")
     deps = _after_deps(led, after) if after else []
     cfg = site.config.get("slurm") or {}
-    cmd = ["sbatch", "--parsable", f"--job-name=dureh-{wi}"]
+    cmd = ["sbatch", "--parsable"]
+    # the job's name: the script's own #SBATCH -J (or an sbatch argument) wins, else `<job prefix>-<WI>`
+    own_name = _sbatch_opt(path, extra, "-J", "--job-name")
+    job_name = own_name or f"{job_prefix(site)}-{wi}"
+    if own_name is None:
+        cmd.append(f"--job-name={job_name}")
     for key, flag in (("account", "--account"), ("partition", "--partition")):
         if cfg.get(key):
             cmd.append(f"{flag}={cfg[key]}")
@@ -768,7 +787,7 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
         array["wrapper"] = job_file
     cmd += extra + log_args + [job_file]
     payload = {"run_type": "slurm", "status": "not-run" if dry_run else "submitted", "command": cmd,
-               "script_sha256": sha256_file(path), "script": str(path), "logs": str(logs),
+               "script_sha256": sha256_file(path), "script": str(path), "logs": str(logs), "job_name": job_name,
                "chdir": chdir, "log_out": log_out, "log_err": log_err, "sbatch_args": extra,
                "level": array["level"] if array else ("group" if deps else "single"), **(extra_payload or {})}
     if reason:
@@ -1313,8 +1332,9 @@ def _log_hint(site: Site, run: dict) -> dict:
     p = run["payload"]
     job = str(p.get("job_id") or "").split(";")[0].strip()
     first = (p.get("jobs") or [{}])[0]
-    name = first.get("name") or (_scan_opt([str(w) for w in p.get("command") or []], "-J", "--job-name")
-                                 if not p.get("via") else None) or f"dureh-{run['wi']}"
+    name = first.get("name") or p.get("job_name") or (_scan_opt([str(w) for w in p.get("command") or []], "-J",
+                                                                "--job-name") if not p.get("via") else None) \
+        or f"dureh-{run['wi']}"  # records before release 44 always named the job dureh-<WI>
     out = {}
     for key in ("log_out", "log_err"):
         if p.get(key):

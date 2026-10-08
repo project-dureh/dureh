@@ -25,6 +25,7 @@ examples. Harness defaults are generic; a startup package supplies its own value
 | `containers.module`, `containers.build_args`, `containers.time`, `containers.mem` | see docs/containers.md | container build jobs |
 | `slurm.account`, `slurm.partition`, `slurm.time` | unset | sbatch defaults (a script or argument `--time` wins) |
 | `slurm.log_dir` | `logs/slurm` | where scheduler logs go (docs/slurm.md) |
+| `slurm.job_prefix` | the session name (`session.name`, else the site folder name) | prefix of the job names the harness gives: `<prefix>-<WI>` for `slurm submit`, `<prefix>-verify-<WI>` for the checks job of `verify --wi`. A script's own `#SBATCH -J/--job-name` (or `--sbatch-arg -J`) wins for `slurm submit` (docs/slurm.md "Job names") |
 | `slurm.each_env` | DUREH_ITER names | the variable names an `--each` task gets its item under |
 | `slurm.via_timeout` | `600` | seconds a `--via` module command may take to submit and exit |
 | `modules[].id`, `path`, `source`, `rev`, `branch`, `env_rebuild` | written by `site link-module` | the site's modules |

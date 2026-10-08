@@ -98,7 +98,7 @@ class ContainerBuild(SiteCase):
         self.assertIn("APPTAINER_TMPDIR=\"${TMPDIR:-", text)
         self.assertEqual((script.parent / "camri.def").read_text(), (self.proj / RECIPE.split("lna/")[1]).read_text())
         args = (self.fake / "sbatch.args").read_text()
-        self.assertIn(f"--job-name=dureh-{self.w}", args)
+        self.assertIn(f"--job-name={self.site().session_name}-{self.w}", args)
         self.assertIn(f"--output={self.site_root}/logs/slurm/{self.w}/", args)
         self.assertEqual(p["script_sha256"], containers.sha256_file(script))
 

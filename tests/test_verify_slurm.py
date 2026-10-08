@@ -105,7 +105,7 @@ class VerifyChecksJob(SiteCase):
         args = (self.fake / "sbatch.args").read_text().splitlines()
         self.assertEqual(len(args), 1, "one job per verification")
         a = args[0].split()
-        self.assertIn(f"--job-name=dureh-verify-{self.wi}", a)
+        self.assertIn(f"--job-name={self.s.session_name}-verify-{self.wi}", a)
         self.assertIn("--time=00:20:00", a)
         self.assertIn("--mem=8G", a)
         self.assertIn("--account=acct-x", a)

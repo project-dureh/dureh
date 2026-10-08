@@ -58,6 +58,34 @@ class SlurmLogs(SiteCase):
         self.assertIn(f"--error={self.logs}/%x-%j.err", a)
         self.assertEqual(err, "")
 
+    def test_job_name_defaults_to_the_session_name(self):
+        # release 44: `<session name>-<WI>`, the company part of the session job `cc-<name>`, not `dureh-<WI>`
+        p, _ = self.submit(self.script())
+        self.assertIn(f"--job-name={self.s.session_name}-{self.w}", self.last_args())
+        self.assertEqual(p["job_name"], f"{self.s.session_name}-{self.w}")
+
+    def test_config_job_prefix_overrides_the_session_name(self):
+        self.config(job_prefix="lab-x")
+        p, _ = self.submit(self.script())
+        self.assertIn(f"--job-name=lab-x-{self.w}", self.last_args())
+        self.assertEqual(p["job_name"], f"lab-x-{self.w}")
+        self.config(job_prefix="bad name")
+        with self.assertRaisesRegex(DurehError, "job_prefix"):
+            self.submit(self.script())
+
+    def test_the_scripts_own_job_name_is_kept(self):
+        for directive in ("-J step-one", "--job-name=step-one"):
+            p, _ = self.submit(self.script(directive))
+            a = self.last_args()
+            self.assertFalse([x for x in a if x.startswith("--job-name") or x == "-J"], a)
+            self.assertEqual(p["job_name"], "step-one")
+            self.assertIn(f"--output={self.logs}/%x-%j.out", a, "logs stay in the log dir whatever the name")
+        p, _ = self.submit(self.script(), extra=["-J", "from-arg"])
+        self.assertEqual(p["job_name"], "from-arg")
+        self.assertEqual([x for x in self.last_args() if x.startswith("--job-name")], [])
+        hint = ops._log_hint(self.s, {"wi": self.w, "payload": {**p, "job_id": "4600"}})
+        self.assertEqual(hint["log_out"], f"{self.logs}/from-arg-4600.out")
+
     def test_relative_output_is_redirected_with_a_warning(self):
         p, err = self.submit(self.script("--output=dureh-%x-%j.out", "--error=dureh-%x-%j.err"))
         a = self.last_args()
@@ -121,7 +149,7 @@ class SlurmLogs(SiteCase):
         self.config(log_dir="scratch/joblogs")
         p, _ = self.submit(self.script("--output=run-%x-%j.out"), items=["sub-01", "sub-02"])
         d = self.site_root / "scratch" / "joblogs" / self.w
-        mine = [d / f"run-dureh-{self.w}-4600_{i}.out" for i in (0, 1)]
+        mine = [d / f"run-{self.s.session_name}-{self.w}-4600_{i}.out" for i in (0, 1)]
         for f in mine:
             f.write_text("x")
         keep = self.site_root / "projects" / "lna" / "keep.out"
@@ -154,8 +182,8 @@ class SlurmLogs(SiteCase):
         (self.fake / "sacct").chmod(0o755)
         run = [r for r in Ledger(self.s).load("run") if r["wi"] == self.w][-1]
         ev = ops.slurm_status(self.s, "desk", run["id"])
-        self.assertEqual(ev["logs"], {"log_out": f"{self.logs}/dureh-{self.w}-4600.out",
-                                      "log_err": f"{self.logs}/dureh-{self.w}-4600.err"})
+        name = f"{self.s.session_name}-{self.w}"
+        self.assertEqual(ev["logs"], {"log_out": f"{self.logs}/{name}-4600.out", "log_err": f"{self.logs}/{name}-4600.err"})
 
 
 if __name__ == "__main__":
