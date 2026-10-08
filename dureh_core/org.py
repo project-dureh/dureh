@@ -1,14 +1,35 @@
 """Runtime-neutral organization: roles, dispatch authority, tiers, write scopes."""
 from __future__ import annotations
 
-import fnmatch
+import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 from . import yamlsub
 from .util import fail
 
 HARNESS_ROOT = Path(__file__).resolve().parent.parent
+
+
+@lru_cache(maxsize=None)
+def _scope_regex(glob: str) -> re.Pattern:
+    """Compile a write-scope glob segment by segment: `*` and `?` stay inside one path segment, `**` as a
+    whole segment spans any depth (one or more segments at the end, zero or more in the middle)."""
+    parts = glob.split("/")
+    out = []
+    for i, part in enumerate(parts):
+        last = i == len(parts) - 1
+        if part == "**":
+            out.append(".+" if last else "(?:[^/]+/)*")
+            continue
+        seg = "".join("[^/]*" if c == "*" else "[^/]" if c == "?" else re.escape(c) for c in part)
+        out.append(seg if last else seg + "/")
+    return re.compile("".join(out))
+
+
+def scope_match(path: str, glob: str) -> bool:
+    return _scope_regex(glob).fullmatch(path) is not None
 
 
 @dataclass
@@ -96,11 +117,11 @@ class Org:
 
     def scope_allows(self, role_name: str, logical_path: str) -> bool:
         role = self.role(role_name)
-        return any(fnmatch.fnmatchcase(logical_path, s) for s in role.write_scopes if not s.startswith("site:"))
+        return any(scope_match(logical_path, s) for s in role.write_scopes if not s.startswith("site:"))
 
     def site_scope_allows(self, role_name: str, site_rel: str) -> bool:
         role = self.role(role_name)
-        return any(fnmatch.fnmatchcase(site_rel, s[5:]) for s in role.write_scopes if s.startswith("site:"))
+        return any(scope_match(site_rel, s[5:]) for s in role.write_scopes if s.startswith("site:"))
 
     def dispatcher_of(self, role_name: str) -> list[str]:
         return [r.name for r in self.roles.values() if role_name in r.may_dispatch]

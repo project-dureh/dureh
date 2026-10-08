@@ -11,6 +11,9 @@
 #   harness           the DUREH harness repository (via a WI worktree only)
 #   package           the startup package repository (via a WI worktree only)
 # Writes inside a WI worktree are mapped back to the WI's target first.
+# Globs are segment-aware: `*` and `?` match within one path segment and never
+# cross `/`; a whole `**` segment matches any depth below (one or more segments
+# at the end of a pattern, zero or more in the middle).
 schema_version: 1
 max_depth: 2
 roles:

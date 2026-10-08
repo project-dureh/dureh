@@ -15,11 +15,11 @@ class PipelineRunnerScope(unittest.TestCase):
             self.assertTrue(self.org.scope_allows("pipeline-runner", rel), rel)
 
     def test_other_project_code_and_data_stay_refused(self):
-        # fnmatch "*" spans "/", so `projects/*/README.md` also admits a nested README.md (as with py-writer's
-        # uv.lock scope); everything else under code/, the data and the manifest stay out.
+        # scope globs are segment-aware: `projects/*/README.md` is the project's top-level README only
         for rel in ("projects/lna/code/run.sh", "projects/lna/code/containers/fsl.def", "projects/lna/code/readme.txt",
                     "projects/lna/sourcedata/sub-01/anat.nii.gz", "projects/lna/derivatives/x",
-                    "README.md", "modules/camri/src/x.py", "projects/lna/camri-manifest.yaml"):
+                    "README.md", "projects/lna/sourcedata/README.md", "projects/lna/code/notebooks",
+                    "modules/camri/src/x.py", "projects/lna/camri-manifest.yaml"):
             self.assertFalse(self.org.scope_allows("pipeline-runner", rel), rel)
 
 
