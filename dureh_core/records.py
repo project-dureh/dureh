@@ -48,6 +48,31 @@ TRANSITIONS = {
 }
 ONLY_BY = {("verified", "approved"): "wi.reopened"}  # transitions only one event type may make
 ACTIVE = {"dispatched", "staged", "rework", "verified"}
+TITLE_CHARS = 40  # UR-20261008-02: a WI named to the Director carries a short title, at most this long
+WI_MENTION = re.compile(r"(?<![\w-])(WI-\d{4,})(?![\w-])(?!\s*\()")
+
+
+def short_title(payload: dict) -> str:
+    """The short title of a work item: its `label` (`wi new --label`), else its title cut to TITLE_CHARS."""
+    text = " ".join(str(payload.get("label") or payload.get("title") or "").split())
+    return text if len(text) <= TITLE_CHARS else text[:TITLE_CHARS - 3].rstrip() + "..."
+
+
+def wi_label(wi: str, payload: dict | None) -> str:
+    """`WI-0138 (framework design doc)`: how a WI id is shown to the Director (UR-20261008-02)."""
+    short = short_title(payload or {})
+    return f"{wi} ({short})" if short else wi
+
+
+def titled_text(text: str, labels: dict[str, str]) -> str:
+    """Director-facing text with each bare WI id followed by its short title. Ids inside `backquotes` (commands to
+    copy), ids already followed by a parenthesis, and unknown ids are left as they are."""
+    parts = text.split("`")
+    for i in range(0, len(parts), 2):
+        parts[i] = WI_MENTION.sub(lambda m: labels.get(m.group(1), m.group(1)), parts[i])
+    return "`".join(parts)
+
+
 _RECORD_CACHE: dict[str, dict[str, tuple[tuple[int, int], str]]] = {}  # dir -> file name -> (size, mtime), json
 
 
@@ -185,6 +210,10 @@ class Ledger:
                 payload.update(e["payload"].get("fields") or {})
             out[rec["id"]] = payload
         return out
+
+    def labels(self, events: list[dict] | None = None) -> dict[str, str]:
+        """{WI id: `WI-xxxx (short title)`} for every work item (UR-20261008-02)."""
+        return {wi: wi_label(wi, p) for wi, p in self.work_item_payloads(events).items()}
 
     def get(self, kind: str, record_id: str) -> dict:
         path = self.site.record_dir(kind) / f"{record_id}.json"

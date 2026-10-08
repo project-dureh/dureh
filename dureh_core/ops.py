@@ -317,6 +317,7 @@ def status(site: Site) -> dict:
         "last_session": sessions[-1]["ts"] if sessions else None,
         "index_fresh": led.index_fresh(),
         "workday": _workday(site),
+        "labels": led.labels(),  # UR-20261008-02: `WI-xxxx (short title)` wherever the text names a WI
     }
 
 
@@ -365,6 +366,10 @@ def render_status(st: dict) -> str:
     for b in st.get("bundles_to_close") or []:
         counts = ", ".join(f"{k} {v}" for k, v in sorted(b["counts"].items()))
         lines.append(f"Bundle to close (manager not needed): {b['wi']} {b['role']} items {counts} -> {b['action']}")
+    from .records import titled_text
+
+    labels = st.get("labels") or {}
+    lines = [titled_text(x, labels) for x in lines]  # the lists below carry the full title already
     for k, v in st["by_status"].items():
         lines.append(f"[{k}]")
         lines += [f"  {x}" for x in v]

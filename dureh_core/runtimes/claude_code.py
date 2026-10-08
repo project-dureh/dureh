@@ -417,6 +417,9 @@ def _claude_md(site: Site) -> str:
               "Depth is fixed at two: desk -> manager -> worker. One work item = one worker type. Verification is the checker's alone.", "",
               "## How you work", "",
               f"All harness tools are subcommands of `{dureh}` ({', '.join(TOOL_NAMES)}). Run `{dureh} --help` for syntax.", "",
+              "When you name a WI to the Director, add its short title: `WI-0138 (framework design doc)` (harness output for the"
+              " Director already does: status, reports, Slack posts, `upstream message`; `wi new --label` sets a short title of at"
+              " most 40 characters, else the title is cut to 40).", "",
               f"1. Turn a Director request into work items: `{dureh} wi new --title ... --goal ... --role <role> --target <target> --acceptance ...`."
               " A bundle is a manager-owned item; its children set `--parent`."
               " `--check` commands run with the WI worktree (the target repository's root) as the working directory, or the target root when the role has no worktree;"

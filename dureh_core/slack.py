@@ -44,7 +44,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .records import Ledger
+from .records import Ledger, titled_text
 from .site import Site
 from .util import fail
 
@@ -304,10 +304,15 @@ def _send(cfg: dict, text: str, thread_ts: str | None = None) -> str:
     return str(resp.get("ts") or (resp.get("message") or {}).get("ts") or "")
 
 
+def _titled(site: Site, text: str) -> str:
+    """UR-20261008-02: every bare WI id in a Director-facing post carries its short title."""
+    return titled_text(text, Ledger(site).labels())
+
+
 def post(site: Site, actor: str, text: str, dry_run: bool = False) -> dict:
     _require_desk(site, actor)
     cfg = config(site)
-    text = _clean(text)
+    text = _clean(_titled(site, text))
     if dry_run:
         thread, info = _target(site, actor, cfg, dry_run=True)
         body = payload(cfg, text, thread or "(the new day thread)")
@@ -399,7 +404,7 @@ def ask(site: Site, actor: str, kind: str, text: str | None = None, no_consult: 
         text = f"*오늘 계획* ({plan.get('date')})\n목표: {plan.get('goal')}\n\n{plan.get('plan', '').strip()}"
     _token(cfg)
     text, consult = _consult_gate(site, actor, cfg, text, no_consult, ASK_CONSULT_WAIT if wait is None else wait)
-    body = text.strip() + "\n\n" + ASK_LINE
+    body = _titled(site, text.strip()) + "\n\n" + ASK_LINE
     body = _clean(body)
     # the request expires at the end of the company's day (the session clock; without a session, the config window
     # or the hours from now); a day-plan request also carries `until`, after which silence counts as approval
@@ -911,4 +916,6 @@ def report(site: Site, actor: str, kind: str, text: str, wait: float = CONSULT_W
         elif d == "slack-ask":
             out["slack"] = ask(site, actor, "day-plan", text or None)
     out["session"] = "session" in dests
+    if out["session"] and body:
+        out["text"] = _titled(site, body)  # what the desk delivers, with WI titles (UR-20261008-02)
     return out

@@ -28,12 +28,14 @@ def wi_new(site: Site, actor: str, title: str, goal: str, role: str, target: str
            lane: str = "work", bundle: str | None = None, value: str | None = None, checks: list[str] | None = None,
            outputs: list[str] | None = None, constraints: list[str] | None = None, parent: str | None = None,
            source: str | None = None, academic: bool = False, fix_for: str | None = None,
-           checks_runner_choice: str | None = None, requirements: str | None = None) -> dict:
+           checks_runner_choice: str | None = None, requirements: str | None = None,
+           label: str | None = None) -> dict:
     """Create a work item. `fix_for` names the WI whose problem this one fixes (recorded as `fix_for`): after the
     day's end time a fix for a day plan item goes on under the finish-plan rule (workday.py).
     `checks_runner_choice` (`--checks-runner local`, release 45) runs this item's checks in the verify process;
     every declared check must match config `checks.local_allow`. `requirements` (`--requirements <file>`, release
-    45) pins a requirements file inside the site by its sha256; the brief carries one line naming it."""
+    45) pins a requirements file inside the site by its sha256; the brief carries one line naming it. `label`
+    (`--label`, UR-20261008-02) is the short title shown with the WI id to the Director instead of the cut title."""
     org = site.org
     if org.role(actor).kind != "desk":
         fail("only the desk creates work items")
@@ -67,6 +69,13 @@ def wi_new(site: Site, actor: str, title: str, goal: str, role: str, target: str
         payload["checks_runner"] = _wi_runner_choice(site, checks_runner_choice, payload["checks"])
     if requirements:
         payload["requirements"] = requirements_pin(site, requirements)
+    if label is not None:
+        from .records import TITLE_CHARS
+
+        label = " ".join(label.split())
+        if not label or len(label) > TITLE_CHARS:
+            fail(f"--label must be 1-{TITLE_CHARS} characters: {label!r}")
+        payload["label"] = label
     draft = {"id": "WI-0000", "payload": payload}
     n, limit = brief_bytes(site, draft), _brief_limit(site, r)
     if n > limit:

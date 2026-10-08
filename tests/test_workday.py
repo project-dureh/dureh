@@ -901,7 +901,7 @@ class Workday(SiteCase):
         self.assertEqual((st["phase"], st["overtime"], st["overtime_started"], st["overtime_plan"]),
                          ("on-duty", [other], True, None))
         self.assertNotIn("overtime_plan_missing", st, "no nagging before the end time")
-        self.assertIn(f"; overtime: 1 item ({other}), plan missing", render_status(status(self.s)))
+        self.assertIn(f"; overtime: 1 item ({other} (X)), plan missing", render_status(status(self.s)))
         # the shared predicate's reasons
         fix = wf.wi_new(self.s, "desk", "fix X", "g", "pm-modules", "modules/demo", ["ok"], fix_for=other)["id"]
         wf.wi_approve(self.s, "desk", fix, "ok")
@@ -940,7 +940,7 @@ class Workday(SiteCase):
         self.assertEqual((rec2["payload"]["pre_approved"], rec2["payload"]["phase"]), (True, "past-end"))
         self.assertEqual(workday.status(self.s)["overtime"], sorted([other, third]))
         self.assertIsNone(workday.gate(self.s, third))
-        self.assertIn(f"; overtime: 2 items ({', '.join(sorted([other, third]))}), plan recorded 17:01",
+        self.assertIn(f"; overtime: 2 items ({other} (X), {third} (Y)), plan recorded 17:01",
                       render_status(status(self.s)))
         # the end report lists the Director's items with their outcomes and the overtime plan
         self.verify(self.wi)
@@ -966,7 +966,7 @@ class Workday(SiteCase):
         st = workday.status(self.s)
         self.assertEqual((st["overtime_plan"]["plan"], st["overtime_plan"]["goal"], st["overtime_plan"]["at"][11:16]),
                          (f1.read_text(), "X done", "16:00"))
-        self.assertIn(f"; overtime: 1 item ({other}), plan recorded 16:00", render_status(status(self.s)))
+        self.assertIn(f"; overtime: 1 item ({other} (X)), plan recorded 16:00", render_status(status(self.s)))
         self.at(T0 + timedelta(hours=8, minutes=1))
         self.assertIsNone(self.spawn(other))
         self.assertIsNone(workday.gate(self.s, other), "the plan came with the approval: nothing waits")
@@ -991,7 +991,7 @@ class Workday(SiteCase):
         st = workday.status(self.s)
         self.assertEqual((st["phase"], st["finishing"], st["open"]), ("past-end", True, [self.wi]))
         self.assertEqual(st["reason"], f"end time passed 17:00; finishing the plan (1 item open: {self.wi})")
-        self.assertIn(f"Workday: past-end (09:00-17:00); end time passed 17:00; finishing the plan (1 item open: {self.wi})",
+        self.assertIn(f"Workday: past-end (09:00-17:00); end time passed 17:00; finishing the plan (1 item open: {self.wi} (W))",
                       render_status(status(self.s)))
         self.assertEqual(self.overtime_events(), [], "nothing recorded before the first work unit")
         self.assertIsNone(self.spawn(), "a plan item goes on after the end time")
@@ -1007,7 +1007,7 @@ class Workday(SiteCase):
         st = workday.status(self.s)
         self.assertTrue(st["overtime_plan_missing"])
         self.assertIn("overtime plan missing", st["warning"])
-        self.assertIn(f"; overtime: 1 item ({self.wi}), plan missing", render_status(status(self.s)))
+        self.assertIn(f"; overtime: 1 item ({self.wi} (W)), plan missing", render_status(status(self.s)))
         with self.assertRaisesRegex(DurehError, "required"):
             workday.overtime_plan(self.s, "desk", " ")
         self.at(T0 + timedelta(hours=8, minutes=5))
@@ -1023,7 +1023,7 @@ class Workday(SiteCase):
         st = workday.status(self.s)
         self.assertNotIn("overtime_plan_missing", st)
         self.assertEqual(st["overtime_plan"]["record"], plan_rec["id"])
-        self.assertIn(f"; overtime: 1 item ({self.wi}), plan recorded 17:05", render_status(status(self.s)))
+        self.assertIn(f"; overtime: 1 item ({self.wi} (W)), plan recorded 17:05", render_status(status(self.s)))
         # new work outside the plan is still refused; the Director's explicit overtime admits it
         out = self.spawn(other)
         self.assertTrue(denied(out))

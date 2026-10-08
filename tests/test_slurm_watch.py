@@ -420,8 +420,8 @@ class Lanes(WatchCase):
         self.assertEqual((st["lane_refusals"]["count"], st["lane_refusals"]["last"]["wi"], st["lane_refusals"]["last"]["holders"]),
                          (1, c, [a, b]))
         text = ops.render_status(st)
-        self.assertIn(f"Lane refusals (24h): 1; last {c} by desk at", text)
-        self.assertIn(f"Lane: {a} researcher [dispatched] held by researcher agent running on {a}", text)
+        self.assertIn(f"Lane refusals (24h): 1; last {c} (C) by desk at", text)  # UR-20261008-02 titles
+        self.assertIn(f"Lane: {a} (A) researcher [dispatched] held by researcher agent running on {a} (A)", text)
         rows = self.led.sql("SELECT wi, actor FROM records WHERE type='lane.refused'")
         self.assertEqual(rows, [{"wi": c, "actor": "desk"}])
         self.led.event("agent.finished", "researcher", a, {"agent_id": "a-a"})

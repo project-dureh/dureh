@@ -29,3 +29,19 @@ dureh wi amend --wi <WI> --memo "<Director's words>" --requirements notes/<file>
 
 See docs/workday.md ("What the plan approval covers"): a verified item that is not promoted goes back to
 `approved` with a `wi.reopened` event; promoted items never change.
+
+## WI titles for the Director (UR-20261008-02)
+
+Director, 2026-10-08: whenever a WI is named to the Director, a short title goes with it, for example
+`WI-0138 (framework design doc)`.
+
+- **Short title.** `wi new --label "<text>"` (1-40 characters) sets it; without a label it is the title cut to 40
+  characters (`...` marks the cut). `wi show --summary` prints it as `label`, and `wi new` prints the new item that way.
+- **Harness output.** `dureh status` (gate lines, lanes, lane refusals, orphaned items, bundles to close, the
+  upstream and workday lines; the per-status lists already carry the full title), `day status`, Slack posts
+  (`slack post`, `report`, the day-plan `slack ask`), the session text `report` returns (`text`), and `upstream
+  message` (also what `upstream send` delivers) render each bare WI id as `WI-xxxx (short title)`. Ids inside
+  backquotes (commands to copy), ids already followed by a parenthesis, and unknown ids stay as they are.
+  `day plan` and `day end` record a `titles` map ({WI: short title}) for the WIs they name (plan items,
+  proposed overtime, the day's job runs, items finished past the end time).
+- **Desk.** The generated CLAUDE.md says: "When you name a WI to the Director, add its short title".

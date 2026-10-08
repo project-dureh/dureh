@@ -48,7 +48,7 @@ class Orphans(OrphanCase):
         self.assertEqual(o[self.bundle]["agent"], "ended")
         self.assertEqual(o[self.bundle]["children_running"], [self.items[0]])
         text = render_status(status(self.s))
-        self.assertIn(f"{self.bundle} pm-modules agent ended; still running: {self.items[0]}", text)
+        self.assertIn(f"{self.bundle} (B) pm-modules agent ended; still running: {self.items[0]} (item 1)", text)
 
     def test_dispatched_item_whose_agent_never_started(self):
         self.spawn("pm-modules", "py-writer", wf.dispatch_brief(self.s, self.items[1], "pm-modules")["brief"], "a-pm")
@@ -85,7 +85,7 @@ class BundleWithoutManager(OrphanCase):
         self.assertEqual((b["wi"], b["staged"], b["counts"]), (self.bundle, [self.items[1]], {"staged": 1, "verified": 1}))
         self.assertIn(f"dispatch brief --wi {self.items[1]} --role checker", b["action"])
         text = render_status(st)
-        self.assertIn(f"Bundle to close (manager not needed): {self.bundle} pm-modules items staged 1, verified 1", text)
+        self.assertIn(f"Bundle to close (manager not needed): {self.bundle} (B) pm-modules items staged 1, verified 1", text)
         self.assertNotIn("Orphaned:", text)
         # the desk does it all: checker for the staged item, then stage and recount the bundle
         wf.dispatch_brief(self.s, self.items[1], "desk", as_role="checker")

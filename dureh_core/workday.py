@@ -34,7 +34,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import claude_usage
-from .records import Ledger
+from .records import Ledger, short_title, titled_text
 from .site import Site
 from .util import DurehError, fail
 
@@ -794,7 +794,14 @@ def plan(site: Site, actor: str, goal: str, text: str, items: list[str] | None =
     payload = {"date": _now().date().isoformat(), "goal": goal, "plan": text, "usage_at_plan": u, "heads": heads(site)}
     if items:
         payload["items"] = sorted(set(items))
+    payload["titles"] = _titles(led, plan_items({"payload": payload}))  # UR-20261008-02
     return led.event("day.planned", actor, None, payload)
+
+
+def _titles(led: Ledger, wis) -> dict[str, str]:
+    """{WI: short title} of the existing work items among `wis` (UR-20261008-02: reports name WIs with titles)."""
+    payloads = led.work_item_payloads()
+    return {w: short_title(payloads[w]) for w in sorted(set(wis)) if w in payloads}
 
 
 def approve(site: Site, actor: str, memo: str, via: str | None = None, extra: dict | None = None) -> dict:
@@ -873,7 +880,7 @@ def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], e
     if d.get("finishing") and not stop and not early.strip():
         n = len(d["open"])
         fail(f"end time passed {d['end'][11:16]}, but the plan is not finished ({n} item{'s' if n != 1 else ''} open: "
-             f"{', '.join(d['open'])}). Director rule 2026-10-06: fix the problems and finish today's plan; the harness "
+             f"{titled_text(', '.join(d['open']), Ledger(site).labels())}). Director rule 2026-10-06: fix the problems and finish today's plan; the harness "
              "records the overtime. The end report is written when the plan is done or a stop hits (today's usage at "
              "the daily share, data at risk, the session job's wall time). An item that cannot proceed today: stop it "
              "at a safe point (`dureh dispatch stop --wi <WI> --reason ...`) so the report says why; to end anyway: "
@@ -895,6 +902,10 @@ def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], e
 
     plan_ev = next((e for e in evs if e["id"] == d["plan"]), None)
     report["jobs"] = day_jobs(site, (plan_ev["ts"], plan_ev["id"]) if plan_ev else None)  # Director 2026-10-06
+    named = list(overtime) + [r["wi"] for r in report["jobs"]["runs"] if r.get("wi")]
+    named += plan_items(plan_ev) if plan_ev else []
+    named += [x["wi"] for x in (past or {}).get("items", []) + (past or {}).get("director", [])]
+    report["titles"] = _titles(led, named)  # UR-20261008-02
     rec = led.event("day.ended", actor, None, report, [d["plan"]])
     return {**rec, "next": "give the Director this report; record accepted overtime with "
                            "`dureh day overtime --items ... --memo \"<Director's words>\"`, else `dureh day close`"}

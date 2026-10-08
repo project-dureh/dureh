@@ -176,7 +176,14 @@ def _open_request_files(site: Site) -> list[Path]:
 
 
 def message(site: Site) -> str:
-    """Paste-ready text the Director forwards upstream. Reads the UR files only; writes nothing."""
+    """Paste-ready text the Director forwards upstream. Reads the UR files only; writes nothing. Every bare WI id
+    in it carries its short title (UR-20261008-02)."""
+    from .records import titled_text
+
+    return titled_text(_message(site), Ledger(site).labels())
+
+
+def _message(site: Site) -> str:
     dep = site.root / "deployment.json"
     rev = ""
     if dep.is_file():

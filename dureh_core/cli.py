@@ -116,12 +116,13 @@ def cmd_hook(a):
 
 
 def cmd_wi_new(a):
+    from .records import wi_label
     from .workflow import wi_new
 
     r = wi_new(_site(a), _actor(a), a.title, a.goal, a.role, a.target, a.acceptance, a.lane, a.bundle, a.value,
                a.check, a.output, a.constraint, a.parent, None, a.academic, fix_for=a.fix_for,
-               checks_runner_choice=a.checks_runner, requirements=a.requirements)
-    print(f"{r['id']} created (proposed; needs Gate 1): {r['payload']['title']}")
+               checks_runner_choice=a.checks_runner, requirements=a.requirements, label=a.label)
+    print(f"{wi_label(r['id'], r['payload'])} created (proposed; needs Gate 1): {r['payload']['title']}")
 
 
 def cmd_wi_approve(a):
@@ -141,7 +142,7 @@ def cmd_wi_amend(a):
 
 
 def cmd_wi_show(a):
-    from .records import Ledger
+    from .records import Ledger, wi_label
 
     led = Ledger(_site(a))
     out = []
@@ -149,7 +150,8 @@ def cmd_wi_show(a):
         rec = led.get("work-item", wi)
         evs = led.events(wi)
         if a.summary:
-            out.append({"wi": wi, "title": rec["payload"]["title"], "role": rec["payload"]["role"],
+            out.append({"wi": wi, "label": wi_label(wi, rec["payload"]), "title": rec["payload"]["title"],
+                        "role": rec["payload"]["role"],
                         "status": led.wi_status(wi)["status"],
                         "last_events": [f"{e['ts'][11:19]} {e['type']} {e['actor']}" for e in evs[-5:]]})
         else:
@@ -512,7 +514,10 @@ def cmd_day(a):
         if a.json:
             _print(st)
         else:
+            from .records import Ledger, titled_text
+
             text = workday.render(st)
+            text = titled_text(text, Ledger(site).labels()) if text else text
             _print(text if st.get("enabled") else "\n".join(filter(None, [text, "Workday: off (the Director switches it on)"])))
     elif c == "plan":
         text = Path(a.file).read_text(encoding="utf-8") if a.file else sys.stdin.read()
@@ -808,6 +813,8 @@ def parser() -> argparse.ArgumentParser:
     wi = sub.add_parser("wi", help="work items").add_subparsers(dest="wi_command", required=True)
     x = add(wi, "new", cmd_wi_new, "create a work item (desk)")
     x.add_argument("--title", required=True)
+    x.add_argument("--label", help="short title (at most 40 characters) shown with the WI id to the Director;"
+                                   " default: the title, cut to 40 characters")
     x.add_argument("--goal", required=True)
     x.add_argument("--role", required=True)
     x.add_argument("--target", required=True, help="harness | package | site | modules/<name> | projects/<name>")

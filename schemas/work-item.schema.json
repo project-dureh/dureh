@@ -173,6 +173,12 @@
               "type": "integer"
             }
           }
+        },
+        "label": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     }

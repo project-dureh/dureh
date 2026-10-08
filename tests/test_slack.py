@@ -74,7 +74,7 @@ class SlackCase(SlackBase):
         self.assertEqual((d["channel"], d["thread_ts"]), (CFG["channel"], CFG["thread_ts"]))
         self.assertEqual(d["username"], "desk (example-org)")
         self.assertEqual(d["icon_emoji"], ":brain:")
-        self.assertEqual(d["text"], "*출근* 오늘 계획: WI-0001")
+        self.assertEqual(d["text"], "*출근* 오늘 계획: WI-0001 (A bootstrap proposal)")  # UR-20261008-02
         self.assertNotIn(FAKE_TOKEN, out)
 
     def test_no_flag_changes_channel_or_thread(self):
@@ -257,7 +257,7 @@ class SlackApproval(ApprovalBase):
         res = self.ask()
         self.assertEqual(res["ts"], ASK_TS)
         text = self.calls[-1]["data"]["text"]
-        self.assertIn("1. WI-0001 정리", text)
+        self.assertIn("1. WI-0001 (A bootstrap proposal) 정리", text)  # UR-20261008-02: titles in Slack
         self.assertTrue(text.endswith(slack.ASK_LINE))
         self.assertEqual(self.calls[-1]["data"]["thread_ts"], CFG["thread_ts"])
         ev = self.events("slack.approval.requested")
