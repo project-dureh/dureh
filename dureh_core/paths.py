@@ -16,10 +16,6 @@ from .site import Site
 from .util import is_within, read_json
 
 
-# Never-versioned project directories (project template: checkpoints/ and cache/ are regenerable scratch).
-UNTRACKED_TARGET_DIRS = ("checkpoints", "cache")
-
-
 @dataclass
 class Target:
     zone: str            # see classify()
@@ -172,9 +168,10 @@ def write_decision(site: Site, role: str, raw: str | Path, cwd: Path | None = No
         return False, f"{role} may not write {t.logical}"
     if t.zone == "target":
         root = target_root(site, "/".join(t.logical.split("/")[:2]))
-        inner = t.logical.split("/", 2)[2] if t.logical.count("/") >= 2 else ""
-        untracked = inner.split("/")[0] in UNTRACKED_TARGET_DIRS
-        if root is not None and (root / ".git").exists() and not (untracked and r.isolation == "scratch"):
+        # a role without a WI worktree (isolation scratch) writes its scope in the target's main tree, tracked files
+        # included (review 2026-10-07 #8: the runner's regenerated notebooks and README); every other role writes a
+        # git-tracked target only through its WI worktree
+        if root is not None and (root / ".git").exists() and r.isolation != "scratch":
             return False, "git-tracked targets are written only inside the WI worktree"
         if org.scope_allows(role, t.logical):
             return True, f"within {role} scope ({t.logical})"

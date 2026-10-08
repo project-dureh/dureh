@@ -714,7 +714,9 @@ def _render_brief(site: Site, rec: dict, role: str, wt: dict, entry: dict,
     if p.get("outputs"):
         lines.append("Declared outputs (relative to your work root): " + ", ".join(p["outputs"]))
     if r.isolation == "scratch":
-        lines.append(f"Work root: {target_root(site, p['target'])} (no worktree; write only under its checkpoints/ or cache/)")
+        own = [x.split("/", 2)[2] for x in r.write_scopes if x.count("/") >= 2 and not x.startswith("site:")]
+        lines.append(f"Work root: {target_root(site, p['target'])} (no worktree; write only {', '.join(own) or 'nothing'}"
+                     " there)")
     skill = _skill_for(site, role, p.get("value"))
     if skill:
         lines.append(f"Skill: read {skill}")
