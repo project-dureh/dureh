@@ -15,7 +15,7 @@ from pathlib import Path
 from .paths import target_root
 from .records import Ledger
 from .site import Site
-from .util import fail, git, sha256_file, times_word
+from .util import fail, git, is_within, sha256_file, times_word
 
 BRIEF_TAG = "DUREH-BRIEF"
 # interpreter caches, the virtualenv and the `.venv.stale-<time>` copies a rebuild (or the rename step) moved aside
@@ -28,11 +28,12 @@ def wi_new(site: Site, actor: str, title: str, goal: str, role: str, target: str
            lane: str = "work", bundle: str | None = None, value: str | None = None, checks: list[str] | None = None,
            outputs: list[str] | None = None, constraints: list[str] | None = None, parent: str | None = None,
            source: str | None = None, academic: bool = False, fix_for: str | None = None,
-           checks_runner_choice: str | None = None) -> dict:
+           checks_runner_choice: str | None = None, requirements: str | None = None) -> dict:
     """Create a work item. `fix_for` names the WI whose problem this one fixes (recorded as `fix_for`): after the
     day's end time a fix for a day plan item goes on under the finish-plan rule (workday.py).
     `checks_runner_choice` (`--checks-runner local`, release 45) runs this item's checks in the verify process;
-    every declared check must match config `checks.local_allow`."""
+    every declared check must match config `checks.local_allow`. `requirements` (`--requirements <file>`, release
+    45) pins a requirements file inside the site by its sha256; the brief carries one line naming it."""
     org = site.org
     if org.role(actor).kind != "desk":
         fail("only the desk creates work items")
@@ -64,6 +65,8 @@ def wi_new(site: Site, actor: str, title: str, goal: str, role: str, target: str
         payload["outputs"] = list(outputs)
     if checks_runner_choice:
         payload["checks_runner"] = _wi_runner_choice(site, checks_runner_choice, payload["checks"])
+    if requirements:
+        payload["requirements"] = requirements_pin(site, requirements)
     draft = {"id": "WI-0000", "payload": payload}
     n, limit = brief_bytes(site, draft), _brief_limit(site, r)
     if n > limit:
@@ -76,6 +79,40 @@ def wi_new(site: Site, actor: str, title: str, goal: str, role: str, target: str
             fail(f"bundle {parent} brief would be {n} bytes, over the {limit}-byte limit with this item; "
                  "shorten the item titles or split the bundle")
     return led.new_work_item(actor, payload)
+
+
+REQUIREMENTS_BYTES_DEFAULT = 65536
+
+
+def requirements_pin(site: Site, raw: str) -> dict:
+    """`--requirements <file>` (release 45, 6g): a file inside the site (relative paths are taken from the site
+    root), at most `limits.requirements_bytes` (default 65536), recorded as {path (site-relative), sha256, bytes}.
+    Only the brief's one line naming it counts toward the brief limit; the file itself does not."""
+    p = Path(raw).expanduser()
+    p = (p if p.is_absolute() else site.root / p).resolve()
+    if not is_within(p, site.root.resolve()):
+        fail(f"--requirements must name a file inside the site ({site.root}): {raw}")
+    if not p.is_file():
+        fail(f"--requirements: no such file: {p}")
+    size = p.stat().st_size
+    limit = int(site.limit("requirements_bytes", REQUIREMENTS_BYTES_DEFAULT))
+    if size > limit:
+        fail(f"--requirements: {p} is {size} bytes, over the {limit}-byte limit (limits.requirements_bytes)")
+    return {"path": p.relative_to(site.root.resolve()).as_posix(), "sha256": sha256_file(p), "bytes": size}
+
+
+def requirements_problem(site: Site, wi: str, payload: dict) -> str | None:
+    """Why a WI's pinned requirements file no longer matches its record (missing or a different sha256), or None."""
+    req = payload.get("requirements")
+    if not req:
+        return None
+    p = site.root / req["path"]
+    now = sha256_file(p) if p.is_file() else None
+    if now == req["sha256"]:
+        return None
+    what = "is missing" if now is None else f"changed (sha256 {now[:12]}, recorded {req['sha256'][:12]})"
+    return (f"{wi}: the requirements file {p} {what} since it was pinned; nothing was recorded. Restore it, or pin the"
+            f" new content with `dureh wi amend --wi {wi} --memo \"<Director's words>\" --requirements {req['path']}`")
 
 
 def _brief_limit(site: Site, role) -> int:
@@ -460,7 +497,7 @@ def _pending_rebase(site: Site, wi: str) -> str | None:
     return None
 
 
-AMENDABLE = ("acceptance", "checks", "constraints", "outputs", "checks_runner")
+AMENDABLE = ("acceptance", "checks", "constraints", "outputs", "checks_runner", "requirements")
 
 
 def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: str | None = None,
@@ -498,9 +535,10 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
         fail(f"{wi} belongs to bundle {parent}, which is {led.wi_status(parent)['status']}; re-open the bundle first")
     only_adds = bool(adds) and not any(v is not None for v in fields.values()) and rebase is None
     # release 45: the checks runner alone may change on a staged item (it changes where checks run, not the work)
-    only_runner = not adds and rebase is None and [k for k, v in fields.items() if v is not None] == ["checks_runner"]
+    only_runner = not adds and rebase is None and [k for k, v in fields.items() if v is not None] in (["checks_runner"],
+                                                                                                       ["requirements"])
     if st == "staged" and only_runner and pending_verify(led, wi):
-        fail(f"{wi} has a submitted verify job; collect it before changing its checks runner")
+        fail(f"{wi} has a submitted verify job; collect it before changing its checks runner or requirements")
     if st == "staged" and not (only_adds or only_runner):
         fail(f"{wi} is staged; only --add-constraint (which appends) is allowed on a staged item. To change"
              f" acceptance, checks, constraints, outputs or the base: `dureh dispatch stop --wi {wi} --reason ...`, then"
@@ -513,7 +551,9 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
     bad = [k for k in fields if k not in AMENDABLE]
     if bad:
         fail(f"cannot amend {', '.join(bad)}; a different goal, role or target is a new work item")
-    fields = {k: (v if k == "checks_runner" else list(v)) for k, v in fields.items() if v is not None}
+    fields = {k: (v if k in ("checks_runner", "requirements") else list(v)) for k, v in fields.items() if v is not None}
+    if "requirements" in fields:
+        fields["requirements"] = requirements_pin(site, fields["requirements"])
     if adds:
         fields["constraints"] = list(fields.get("constraints", rec["payload"].get("constraints") or [])) + adds
     if "acceptance" in fields and not fields["acceptance"]:
@@ -528,7 +568,8 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
             fail(f"{wi} targets {rec['payload']['target']}, which is not a git repository")
         rebase_onto = git(["rev-parse", rebase or "HEAD"], root)
     if not fields and not rebase_onto and not reopen:
-        fail("nothing to amend: give --acceptance, --check, --constraint, --add-constraint, --output or --rebase")
+        fail("nothing to amend: give --acceptance, --check, --constraint, --add-constraint, --output, --checks-runner,"
+             " --requirements or --rebase")
     draft = {"id": wi, "payload": {**rec["payload"], **fields}}
     role = site.org.role(rec["payload"]["role"])
     n, limit = brief_bytes(site, draft), _brief_limit(site, role)
@@ -580,6 +621,9 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None) -> 
         if led.wi_status(bundle)["status"] != "dispatched":
             fail(f"bundle {bundle} is not dispatched to {by}")
     st = led.wi_status(wi)["status"]
+    problem = requirements_problem(site, wi, p)
+    if problem:
+        fail(problem.replace("nothing was recorded", "no brief was prepared"))
     supersedes = None
     if checking:
         if st != "staged":
@@ -734,6 +778,10 @@ def _render_brief(site: Site, rec: dict, role: str, wt: dict, entry: dict,
     scopes = [s for s in r.write_scopes if not s.startswith("site:")]
     if scopes:
         lines.append("You may write only: " + ", ".join(scopes))
+    if p.get("requirements"):
+        req = p["requirements"]
+        lines.append(f"Requirements (read first; part of the acceptance): {site.root / req['path']}"
+                     f" (sha256 {req['sha256'][:12]}, {req['bytes']} bytes; do not edit it)")
     lines.append("Acceptance:")
     lines += [f"- {a}" for a in p["acceptance"]]
     if p.get("constraints"):
@@ -1166,6 +1214,9 @@ def _verify_context(site: Site, actor: str, wi: str) -> dict:
     status = led.wi_status(wi)["status"]
     if status != "staged":
         fail(f"{wi} is {status}; only staged work can be verified")
+    problem = requirements_problem(site, wi, p)
+    if problem:  # release 45 (6g): the work was briefed against other requirements
+        fail(problem)
     wt = site.worktrees / wi
     troot = target_root(site, p["target"]) or site.root
     cwd = wt if wt.is_dir() else troot

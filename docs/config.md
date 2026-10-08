@@ -32,6 +32,7 @@ examples. Harness defaults are generic; a startup package supplies its own value
 | `slurm.via_timeout` | `600` | seconds a `--via` module command may take to submit and exit |
 | `checks.local_allow` | `[]` | globs of declared checks an item may run in the verify process with `wi new/amend --checks-runner local` (release 45; docs/slurm.md "Per-item local runner"); empty refuses the per-item choice |
 | `checks.local_timeout` | `60` | seconds per check on the per-item local path |
+| `limits.requirements_bytes` | `65536` | the largest requirements file `wi new/amend --requirements` pins (release 45; docs/work-items.md) |
 | `push.allowed_remotes` | `[]` | remote URLs or names `dureh push` may push to (desk only, with a Director decision bound to the exact revision, remote and ref); empty refuses every push |
 | `session.name` | the site folder name | the site's session name: session job `cc-<name>[-<purpose>]`, pane log, and the default `slurm.job_prefix` (docs/workday.md) |
 | `session.runtime` | `claude-code` | the session runtime the session job starts (`site session plan` and `start`); an unknown name is refused, listing the available ones |

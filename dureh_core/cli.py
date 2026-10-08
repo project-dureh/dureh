@@ -120,7 +120,7 @@ def cmd_wi_new(a):
 
     r = wi_new(_site(a), _actor(a), a.title, a.goal, a.role, a.target, a.acceptance, a.lane, a.bundle, a.value,
                a.check, a.output, a.constraint, a.parent, None, a.academic, fix_for=a.fix_for,
-               checks_runner_choice=a.checks_runner)
+               checks_runner_choice=a.checks_runner, requirements=a.requirements)
     print(f"{r['id']} created (proposed; needs Gate 1): {r['payload']['title']}")
 
 
@@ -135,7 +135,7 @@ def cmd_wi_amend(a):
     from .workflow import wi_amend
 
     fields = {"acceptance": a.acceptance, "checks": a.check, "constraints": a.constraint, "outputs": a.output,
-              "checks_runner": a.checks_runner}
+              "checks_runner": a.checks_runner, "requirements": a.requirements}
     _print(wi_amend(_site(a), _actor(a), a.wi, a.memo, {k: v for k, v in fields.items() if v is not None},
                     a.rebase, add_constraints=a.add_constraint, reopen=a.reopen))
 
@@ -825,6 +825,9 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--checks-runner", choices=["local", "site"],
                    help="local: run this item's checks in the verify process (each must match config checks.local_allow);"
                         " site (default): config checks.runner")
+    x.add_argument("--requirements", metavar="FILE",
+                   help="a requirements file inside the site, pinned by sha256; the brief names it (read first) instead"
+                        " of carrying its text, so only that line counts toward the brief limit")
     x.add_argument("--actor")
     x = add(wi, "approve", cmd_wi_approve, "record the Director's Gate 1 approval (desk)")
     x.add_argument("--wi", required=True)
@@ -844,6 +847,8 @@ def parser() -> argparse.ArgumentParser:
                    help="move the base to REV (default: the target's current HEAD); the next brief tells the worker to rebase")
     x.add_argument("--checks-runner", choices=["local", "site"],
                    help="per-item checks runner, as for wi new (local needs every check in checks.local_allow)")
+    x.add_argument("--requirements", metavar="FILE",
+                   help="pin (or re-pin after a change) the item's requirements file by sha256, as for wi new")
     x.add_argument("--reopen", action="store_true",
                    help="re-open a verified, unpromoted item: the verification is void and it goes back to approved"
                         " for a new dispatch (no dispatch stop); other changes are optional")
