@@ -133,5 +133,72 @@ class SiteMailbox(SiteCase):
             self.assertEqual(run("upstream", "send"), 2)
 
 
+class MailboxWatch(SiteMailbox):
+    """Release 44: `upstream inbox --watch` prints each unread message once and records nothing."""
+
+    def snapshot(self):
+        rec = self.site_root / "state" / "records"
+        return sorted(str(p) for p in rec.rglob("*") if p.is_file())
+
+    def test_unread_then_new_each_once_and_nothing_recorded(self):
+        old = self.from_upstream("reply", "\n  first answer line  \nmore")
+        up.inbox(self.s, "desk", record=True)  # received before the watch: never shown
+        self.from_upstream("merge-window", "open for release 44")
+        self.from_upstream("landed", "x" * 200)
+        before = self.snapshot()
+        lines, rounds = [], []
+
+        def sleep(_):
+            rounds.append(1)
+            if len(rounds) == 1:
+                self.from_upstream("approval", "go ahead")
+
+        n = up.watch_inbox(self.s, "desk", 30, emit=lines.append, sleep=sleep, rounds=3)
+        self.assertEqual(n, 3)
+        self.assertEqual(len(lines), 3, lines)
+        self.assertEqual(lines[0], "upstream merge-window x: open for release 44")
+        self.assertTrue(lines[1].startswith("upstream landed x: xxx") and lines[1].endswith("...") and len(lines[1]) < 200)
+        self.assertEqual(lines[2], "upstream approval x: go ahead")
+        self.assertFalse(any(old in line for line in lines))
+        self.assertEqual(self.snapshot(), before, "the watch records nothing")
+        self.assertEqual(len(up.inbox(self.s, "desk")), 3, "still unread for inbox --record")
+
+    def test_cli_watch_is_allowed_under_observe_and_refuses_record(self):
+        self.from_upstream("reply", "hello")
+        out, err = io.StringIO(), io.StringIO()
+        orig = up.watch_inbox
+        up.watch_inbox = lambda site, actor, interval, emit: orig(site, actor, interval, emit=emit, rounds=1)
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cli.main(["--site", str(self.site_root), "--observe", "upstream", "inbox", "--watch"])
+                bad = cli.main(["--site", str(self.site_root), "upstream", "inbox", "--watch", "--record"])
+        finally:
+            up.watch_inbox = orig
+            os.environ.pop("DUREH_OBSERVE", None)
+        self.assertEqual(code, 0, err.getvalue())
+        self.assertEqual(out.getvalue(), "upstream reply x: hello\n")
+        self.assertEqual(bad, 2)
+
+    def test_refused_without_the_exchange(self):
+        cfg = json.loads((self.site_root / "config.json").read_text())
+        del cfg["upstream"]
+        (self.site_root / "config.json").write_text(json.dumps(cfg))
+        with self.assertRaisesRegex(DurehError, "upstream.exchange is not set"):
+            up.watch_inbox(Site(self.site_root), "desk", rounds=1)
+
+    def test_generated_desk_text_only_with_the_exchange(self):
+        from dureh_core.runtimes import claude_code
+
+        md = claude_code._claude_md(self.s)
+        self.assertIn("upstream inbox --watch` running as a Monitor", md)
+        self.assertIn("upstream send --kind idle", md)
+        self.assertIn("adapter sync --harness <checkout>", md)
+        cfg = json.loads((self.site_root / "config.json").read_text())
+        del cfg["upstream"]
+        (self.site_root / "config.json").write_text(json.dumps(cfg))
+        self.assertNotIn("--watch` running as a Monitor (item 10)", claude_code._claude_md(Site(self.site_root)))
+        self.assertNotIn("inbox --watch", claude_code._claude_md(Site(self.site_root)))
+
+
 if __name__ == "__main__":
     unittest.main()

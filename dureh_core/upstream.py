@@ -456,6 +456,42 @@ def inbox(site: Site, actor: str, record: bool = False) -> list[dict]:
     return new
 
 
+def _watch_line(m: dict) -> str:
+    text = m.get("text") or ""
+    mid = _header(text).get("id") or Path(m["file"]).stem
+    first = next((ln.strip() for ln in m["body"].splitlines() if ln.strip()), "")
+    if len(first) > 160:
+        first = first[:157] + "..."
+    return f"upstream {m.get('kind') or 'message'} {mid}: {first}"
+
+
+def watch_inbox(site: Site, actor: str, interval: float = 30, emit=print, sleep=None,
+                rounds: int | None = None) -> int:
+    """`upstream inbox --watch`: poll <exchange>/<mailbox>/from-upstream/ and emit one line per message not yet
+    received (the `upstream.received` records `inbox --record` writes): the unread ones once at start, then each new
+    one, every message at most once per process. Records nothing; `inbox --record` stays the explicit read. Runs
+    until stopped (rounds: tests only). Returns the number of lines emitted."""
+    import time
+
+    sleep = sleep or time.sleep
+    box = exchange_dir(site) / "from-upstream"  # refuses without upstream.exchange
+    shown: set[str] = set()
+    n = done = 0
+    while True:
+        seen = _received(site)
+        for p in _messages(box):
+            if p.name in seen or p.name in shown:
+                continue
+            text = p.read_text(encoding="utf-8", errors="replace")
+            emit(_watch_line({"file": p.name, "kind": _header(text).get("kind"), "body": _body(text), "text": text}))
+            shown.add(p.name)
+            n += 1
+        done += 1
+        if rounds is not None and done >= rounds:
+            return n
+        sleep(max(float(interval), 5.0))
+
+
 LANDED_CHECKOUT = re.compile(r"adapter sync --harness\s+([^\s`'\"]+)")
 
 

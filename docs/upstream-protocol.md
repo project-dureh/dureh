@@ -88,6 +88,20 @@ stays where it is.
   an `approval` as a decision `by: Director` with the Director's words as the memo and
   `binding: {via: upstream, file}`. Upstream merges, pushes and cuts releases on its own (the Director's charter, 2026-10-03: anything but `main`);
   the site switches release itself in the merge window; changes to `main` stay the Director's.
+- `dureh upstream inbox --watch [--interval S]` (release 44; default 30 s, at least 5) polls `from-upstream/` and
+  prints one line per message not yet received (the same `upstream.received` records `inbox --record` writes),
+  flushed as it goes: `upstream <kind> <id>: <first body line, trimmed>`, for example
+  `upstream merge-window <id>: open ...`, `upstream landed <id>: ...`, `upstream reply <id>: ...`,
+  `upstream approval <id>: ...`. At start it prints the already-unread messages once, then only new ones; each
+  message at most once per watch process. It records nothing (no received mark, no record, no index rebuild), so
+  it is allowed under `--observe`; `inbox --record` stays the explicit read, and `--watch --record` is refused.
+  Without `upstream.exchange` it is refused like `send`.
+- Only when `upstream.exchange` is set, the generated desk instructions tell the desk to keep the watch running
+  as a Monitor from the start of the day (re-armed when the Monitor expires, stopped at day end with the other
+  Monitors) and, on each line, to run `upstream inbox --record` and act by kind: `merge-window` open: dispatch
+  nothing new, let agents reach a safe point, `upstream send --kind idle`; `landed` naming a release checkout:
+  `adapter sync --harness <checkout>`, `verify --self`, report; `reply`/`approval`: recorded by `--record`, a
+  one-line notice to the Director. Without the exchange the generated text does not mention the watch.
 - `dureh status` shows `Upstream: collaborating` while a request is open or a merge window is in play, with
   the open requests, blocked WIs, the merge window (`closed`, `requested`, `open (site idle)`) and unread
   upstream messages. An upstream `merge-window` message whose body starts with `open` requests a window;

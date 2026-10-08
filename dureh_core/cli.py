@@ -555,6 +555,11 @@ def cmd_upstream(a):
     elif a.upstream_command == "send":
         _print(upstream.send(site, actor, a.kind, a.body_file))
     elif a.upstream_command == "inbox":
+        if a.watch:
+            if a.record:
+                fail("--watch records nothing; run `upstream inbox --record` for each line it prints")
+            upstream.watch_inbox(site, actor, a.interval, emit=lambda line: print(line, flush=True))
+            return
         msgs = upstream.inbox(site, actor, a.record)
         if not msgs:
             print("no new messages from upstream")
@@ -774,7 +779,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--site", help="installed site directory (or DUREH_SITE)")
     p.add_argument("--observe", action="store_true",
                    help="read-only: allow only status, wi show/list, ledger query, upstream list/message/inbox (without "
-                        "--record), path-refs, usage, verify --self, day status, site session status; never record "
+                        "--record; --watch included), path-refs, usage, verify --self, day status, site session status; never record "
                         "anything (or DUREH_OBSERVE=1)")
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -1127,8 +1132,12 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--kind", default="request", choices=["request", "reply", "idle", "notice", "landed"])
     x.add_argument("--body-file")
     x.add_argument("--actor")
-    x = add(up, "inbox", cmd_upstream, "new messages from upstream; --record marks them received and keeps approvals")
+    x = add(up, "inbox", cmd_upstream, "new messages from upstream; --record marks them received and keeps approvals;"
+                                        " --watch polls and prints one line per unread message (records nothing)")
     x.add_argument("--record", action="store_true")
+    x.add_argument("--watch", action="store_true", help="keep polling (run as a Monitor); one line per message not yet"
+                                                         " received, each at most once; records nothing")
+    x.add_argument("--interval", type=float, default=30, help="seconds between polls with --watch (default 30, min 5)")
     x.add_argument("--actor")
     x = add(up, "status", cmd_upstream, "record a Status transition for an upstream request (desk)")
     x.add_argument("--ur", required=True)
