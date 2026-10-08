@@ -4,12 +4,21 @@ DUREH is a desk-led, unbundled, reversibility-aware, evidence-accumulating harne
 
 ## Quick start
 
+Releases are annotated tags `rYYYY.MM.DD-N` (for example `r2026.10.07-1`) on the `phase-1-harness` branch, cut by
+`tools/release.py`; the repository's default branch `main` is not kept current, so install from a release tag.
+
 ```sh
-./install.sh --startup ../camri-org --site /path/to/new-site --preset presets/example.json
+git clone git@github.com:dvm-shlee/dureh.git dureh && cd dureh
+git tag --list 'r*' --sort=-v:refname | head -1   # the newest release, e.g. r2026.10.07-1
+git checkout --detach r2026.10.07-1               # the release to install
+./install.sh --startup /path/to/<package> --site /path/to/new-site --preset presets/example.json
 cd /path/to/new-site && claude          # the desk session; hooks and agents are generated
 bin/dureh status                        # the same tools the agents use
 bin/dureh verify --self                 # harness unit tests plus site consistency checks
 ```
+
+`<package>` is a startup package directory (a checkout holding `startup.yaml`); a relative `--startup` path is taken
+from the directory you run `install.sh` in, so from the clone a sibling checkout is `../<package>`.
 
 Installation requires an absent or empty destination and a startup package with `startup.yaml` and no state. It copies the package without following symlinks, links read-only references, asks or reads persona answers, creates fresh site state (a git repository, or a DataLad dataset when configured), records the package's bootstrap proposals as work items awaiting Gate 1, generates the Claude Code adapter, runs the self-test, and writes a private `deployment.json` that pins harness, package, and state revisions.
 
