@@ -3,8 +3,8 @@
 `config.json` is written by `dureh install` from the harness defaults, the startup package's `config_defaults` and the
 install preset (in that order of precedence: the preset wins, then the package, then the harness). It is read-only for
 agents; the desk edits it in a merge window or with the Director's OK (upstream edits a company's config as harness
-work, rule 1 of the workspace). This page lists the keys that matter to `slurm`, `container` and the project guidance;
-the Slack and workday keys are in docs/slack.md and docs/workday.md.
+work, rule 1 of the workspace). This page lists the keys that matter to `slurm`, `container`, `push`, the session job and the project
+guidance; the Slack and workday keys are in docs/slack.md and docs/workday.md.
 
 ## Rule: no company names in harness code (UP-0069, Director 2026-10-06)
 
@@ -26,8 +26,13 @@ examples. Harness defaults are generic; a startup package supplies its own value
 | `slurm.account`, `slurm.partition`, `slurm.time` | unset | sbatch defaults (a script or argument `--time` wins) |
 | `slurm.log_dir` | `logs/slurm` | where scheduler logs go (docs/slurm.md) |
 | `slurm.job_prefix` | the session name (`session.name`, else the site folder name) | prefix of the job names the harness gives: `<prefix>-<WI>` for `slurm submit`, `<prefix>-verify-<WI>` for the checks job of `verify --wi`. A script's own `#SBATCH -J/--job-name` (or `--sbatch-arg -J`) wins for `slurm submit` (docs/slurm.md "Job names") |
+| `slurm.each_level` | `file` | the level workflow steps loop at (`file`, `session`, `subject`, or `any` to switch the rule off): a bare single job needs `--single --reason`, a coarser `--each-from-bids --level` needs `--reason` (docs/slurm.md "loop rule") |
 | `slurm.each_env` | DUREH_ITER names | the variable names an `--each` task gets its item under |
 | `slurm.via_timeout` | `600` | seconds a `--via` module command may take to submit and exit |
+| `push.allowed_remotes` | `[]` | remote URLs or names `dureh push` may push to (desk only, with a Director decision bound to the exact revision, remote and ref); empty refuses every push |
+| `session.name` | the site folder name | the site's session name: session job `cc-<name>[-<purpose>]`, pane log, and the default `slurm.job_prefix` (docs/workday.md) |
+| `session.runtime` | `claude-code` | the session runtime the session job starts (`site session plan` and `start`); an unknown name is refused, listing the available ones |
+| `session.handoff` | `state/memory/handoff.md` | the desk's handoff file (relative: under the site) that `day close` requires to exist and to be newer than today's start |
 | `modules[].id`, `path`, `source`, `rev`, `branch`, `env_rebuild` | written by `site link-module` | the site's modules |
 | `modules[].root_env`, `modules[].rev_env` | unset | names a `--module` job exports the pinned tree and revision under |
 | `modules[].cli` | the id | the command word that selects this entry for `slurm submit --via` |

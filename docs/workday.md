@@ -113,7 +113,7 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    tasks and of jobs, every job id (an array as `<id>_[0-N]` plus each task id), the exact command recorded at
    submit time, the state summary from the recorded states (`slurm watch|status|wait`; the scheduler is not asked
    at day end) and the log dir, plus the totals and the line `jobs today: N runs, M tasks, K failed`. The Slack
-   end-report summary (`dureh slack report --kind end-report`: the first paragraph) carries that line.
+   end-report summary (`dureh report --kind end-report`: the first paragraph) carries that line.
 7. **Close.** In this order: the desk stops every Monitor and background task, writes the handoff
    (`state/memory/handoff.md`), runs `dureh day close`, and then does nothing more. `day close` checks that no
    agent runs and the handoff is fresh, records `day.closed`, and releases the session job as described in

@@ -38,7 +38,7 @@ Hooks and the path checks are workflow controls. They are not an operating-syste
 
 ## Tools
 
-`wi`, `dispatch`, `verify`, `ledger`, `status`, `slurm` (scheduler jobs, optionally on a pinned read-only module tree with `--module`, docs/slurm.md), `container` (image builds as scheduler jobs, docs/containers.md), `path-refs`, `purge`, `push`, `usage`, `slack` (desk only: reports to the company's Slack thread, day-plan approval by reaction, opinions, consult agent, docs/slack.md), `report` (desk only: one routing table for where a report goes, docs/slack.md) (plus `install`, `adapter sync`, `hook`). Records are one JSON file per record under `state/records/<kind>/`, validated against `schemas/`, never rewritten; work-item status is a projection of events. The SQLite index is node-local and rebuildable.
+`wi`, `dispatch`, `verify`, `ledger`, `status`, `slurm` (scheduler jobs, optionally on a pinned read-only module tree with `--module`, docs/slurm.md), `container` (image builds as scheduler jobs, docs/containers.md), `path-refs`, `purge`, `push`, `usage`, `slack` (desk only: reports to the company's Slack thread, day-plan approval by reaction, opinions, consult agent, docs/slack.md), `report` (desk only: one routing table for where a report goes, docs/slack.md), `event` (append or list events), `site` (Director-side site setup: modules, projects, workday switches, cluster profile, the session job; docs/workday.md), `day` (workday mode: plan, approval, decisions, end report, overtime, close; docs/workday.md), `upstream` (harness requests routed to the harness developers, docs/upstream-protocol.md), `authorize-write` (check a role's write to a site path), `worktree` (repair WI worktrees and their `.venv`), `promote` (data-steward: verified checkpoints or a report into a derivatives subdataset, docs/promote.md), `artifact` (harness-mediated artifact writes) (plus `install`, `adapter sync`, `hook`). `--observe` runs only the read-only commands (status, `wi show|list`, `ledger query`, `upstream list|message|inbox`, `path-refs`, `usage`, `verify --self`, `day status`, `site session status`) and records nothing. Records are one JSON file per record under `state/records/<kind>/`, validated against `schemas/`, never rewritten; work-item status is a projection of events. The SQLite index is node-local and rebuildable.
 
 ## Status
 
@@ -47,7 +47,7 @@ Hooks and the path checks are workflow controls. They are not an operating-syste
 | Phase 0 decisions and Phase 1 acceptance plan | Documented in `PHASE-0.md` |
 | Install, records, index, WI lifecycle, role-scoped writes | Implemented; unit and acceptance results in `acceptance/` |
 | Claude Code adapter and hooks (dispatch, identity, guards, session) | Implemented; live-runtime results in `acceptance/` |
-| Slurm, push, purge, path-refs, usage, exam scorer | Implemented; Slurm tested with a fake scheduler only |
+| Slurm, push, purge, path-refs, usage, exam scorer | Implemented; unit tests use a fake scheduler; Slurm (session jobs, `slurm submit/watch`, verify jobs) is in daily use on a lab cluster, with measurements in docs/slurm.md and docs/workday.md |
 | DataLad state backend | Implemented; RIA sibling and two-host sync not tested |
 | Console, OOD/Apptainer/Docker deployment, recovery from a snapshot, second runtime | Proposed / not implemented |
 

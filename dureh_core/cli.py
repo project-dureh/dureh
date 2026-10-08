@@ -768,12 +768,14 @@ def cmd_artifact_write(a):
 
 # ------------------------------------------------------------------- parser
 def parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="dureh", description="DUREH harness tools: wi, dispatch, verify, ledger, status, "
-                                "slurm, container, path-refs, purge, push, usage, upstream, promote, worktree, day, slack, report (plus install, adapter, hook).")
+    p = argparse.ArgumentParser(prog="dureh", description="DUREH harness tools: wi, dispatch, verify, ledger, event, status, "
+                                "slurm, container, path-refs, purge, push, usage, site, day, upstream, slack, report, "
+                                "authorize-write, worktree, promote, artifact (plus install, adapter, hook).")
     p.add_argument("--site", help="installed site directory (or DUREH_SITE)")
     p.add_argument("--observe", action="store_true",
-                   help="read-only: allow only status, wi show/list, ledger query, upstream list/message, path-refs, usage, "
-                        "verify --self; never record anything (or DUREH_OBSERVE=1)")
+                   help="read-only: allow only status, wi show/list, ledger query, upstream list/message/inbox (without "
+                        "--record), path-refs, usage, verify --self, day status, site session status; never record "
+                        "anything (or DUREH_OBSERVE=1)")
     sub = p.add_subparsers(dest="command", required=True)
 
     def add(parent, name, func, help_):
