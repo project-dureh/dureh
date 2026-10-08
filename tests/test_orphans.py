@@ -7,7 +7,7 @@ from dureh_core import workflow as wf
 from dureh_core.ops import render_status, status
 
 
-class Orphans(SiteCase):
+class OrphanCase(SiteCase):
     def setUp(self):
         super().setUp()
         self.install()
@@ -34,6 +34,8 @@ class Orphans(SiteCase):
     def orphans(self):
         return {o["wi"]: o for o in status(self.s)["orphaned"]}
 
+
+class Orphans(OrphanCase):
     def test_running_agents_are_not_orphans(self):
         self.assertEqual(self.orphans(), {})
 
@@ -58,6 +60,54 @@ class Orphans(SiteCase):
         self.event("SubagentStop", "pm-modules", "a-pm")
         self.assertIn("dispatch brief", self.orphans()[self.bundle]["action"])
         wf.dispatch_brief(self.s, self.bundle, "desk")
+
+
+class BundleWithoutManager(OrphanCase):
+    """Release 45 (6h): a bundle whose manager ended and whose items are all settled is not an orphan any more;
+    status says how the desk closes it without re-dispatching the manager."""
+
+    def settle(self, wi, verified=True):
+        from dureh_core.records import Ledger
+
+        led = Ledger(self.s)
+        led.event("wi.dispatched", "desk", wi, {"role": "py-writer"})
+        wf.wi_stage(self.s, "desk", wi, "done")
+        if verified:
+            self.assertEqual(wf.verify_wi(self.s, "checker", wi)["result"], "pass")
+
+    def test_settled_bundle_is_listed_to_close_not_orphaned(self):
+        self.settle(self.items[0])
+        self.settle(self.items[1], verified=False)
+        self.event("SubagentStop", "pm-modules", "a-pm")
+        st = status(self.s)
+        self.assertEqual(st["orphaned"], [])
+        (b,) = st["bundles_to_close"]
+        self.assertEqual((b["wi"], b["staged"], b["counts"]), (self.bundle, [self.items[1]], {"staged": 1, "verified": 1}))
+        self.assertIn(f"dispatch brief --wi {self.items[1]} --role checker", b["action"])
+        text = render_status(st)
+        self.assertIn(f"Bundle to close (manager not needed): {self.bundle} pm-modules items staged 1, verified 1", text)
+        self.assertNotIn("Orphaned:", text)
+        # the desk does it all: checker for the staged item, then stage and recount the bundle
+        wf.dispatch_brief(self.s, self.items[1], "desk", as_role="checker")
+        self.assertEqual(wf.verify_wi(self.s, "checker", self.items[1])["result"], "pass")
+        self.assertIn(f"wi stage --wi {self.bundle}", status(self.s)["bundles_to_close"][0]["action"])
+        wf.wi_stage(self.s, "desk", self.bundle, "closed by the desk")
+        self.assertEqual(wf.verify_wi(self.s, "desk", self.bundle)["result"], "pass")
+        self.assertEqual(status(self.s)["bundles_to_close"], [])
+
+    def test_bundle_with_open_items_stays_orphaned(self):
+        self.settle(self.items[0])
+        self.event("SubagentStop", "pm-modules", "a-pm")
+        self.assertIn(self.bundle, self.orphans())  # items[1] is approved: the manager still has work
+        self.assertEqual(status(self.s)["bundles_to_close"], [])
+
+    def test_idle_for_merge_window(self):
+        from dureh_core.upstream import _live_agents
+
+        for wi in self.items:
+            self.settle(wi)
+        self.event("SubagentStop", "pm-modules", "a-pm")
+        self.assertEqual(_live_agents(status(self.s)), [])
 
 
 if __name__ == "__main__":

@@ -427,6 +427,10 @@ def _claude_md(site: Site) -> str:
               " (the verification is void, the item is approved again for a new dispatch; no `dispatch stop`).",
               f"5. Gate 2: after the checker verified the item, report it to the Director and promote with `{dureh} wi promote --wi <WI> --memo ...`."
               f" For a bundle the manager staged, run `{dureh} verify --wi <bundle>` (a recount of its items' states); promoting the bundle merges any verified items not yet promoted."
+              " A bundle whose manager ended needs no manager to collect a verify job: dispatch the checker for the staged item yourself"
+              f" (`{dureh} dispatch brief --wi <item> --role checker`); re-dispatch the manager only for rework. When status lists"
+              f" `Bundle to close` (manager ended, every item staged, verified, promoted or stopped), close it yourself: `{dureh} wi stage --wi <bundle> --summary ...`,"
+              f" then `{dureh} verify --wi <bundle>`."
               " Items whose target is `harness` or `package` are not merged: promotion leaves an opaque `contrib/c-<id>` branch for upstream to review"
               " (and notifies upstream through the mailbox when one is configured). WI branches are named `wi/<site-id>/<WI>`; older `wi/<WI>` branches keep working.",
               f"6. Findings are records, not work items: `{dureh} ledger add finding --summary ... --evidence-level measured|reviewed|inferred|proposed`.",

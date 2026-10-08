@@ -45,19 +45,31 @@ def _deferred_start(led: Ledger, dispatched: dict, events: list[dict] | None = N
                and e["payload"].get("agent_id") not in done for e in all_events)
 
 
-def orphaned(led: Ledger, wis: list[dict]) -> list[dict]:
+BUNDLE_SETTLED = ("staged", "verified", "promoted", "stopped")  # child states that need no manager
+
+
+def orphaned(led: Ledger, wis: list[dict], closable: list | None = None) -> list[dict]:
+    """Dispatched items whose agent is gone. Release 45 (6h): a bundle whose manager ended and whose every item is
+    staged, verified, promoted or stopped needs no manager any more: the desk dispatches the checker for a staged
+    item and closes the bundle itself. Such a bundle is not listed here but appended to `closable` (when given)."""
     dispatched = [w["id"] for w in wis if w["status"] == "dispatched"]
     if not dispatched:
         return []
     events = led.events()
     state = {wi: agent_state(led, wi, events) for wi in dispatched}
     payloads = led.work_item_payloads(events)
+    status_of = {w["id"]: w["status"] for w in wis}
     out = []
     for wi in dispatched:
         if state[wi] in ("running", "starting"):
             continue
         kids = [w["id"] for w in wis if (payloads.get(w["id"]) or {}).get("parent") == wi]
         running = [k for k in kids if state.get(k) in ("running", "starting")]
+        manager = led.site.org.role(payloads[wi]["role"]).is_manager
+        if manager and state[wi] == "ended" and kids and all(status_of.get(k) in BUNDLE_SETTLED for k in kids):
+            if closable is not None:
+                closable.append(_bundle_to_close(wi, payloads[wi]["role"], {k: status_of[k] for k in kids}))
+            continue
         if state[wi] == "not started":
             action = (f"if no agent is starting, re-dispatch with `dispatch brief --wi {wi}` (allowed once the dispatch is"
                       f" {int(led.site.limit('dispatch_start_grace_seconds', 120))} s old; it supersedes the one that never"
@@ -72,6 +84,20 @@ def orphaned(led: Ledger, wis: list[dict]) -> list[dict]:
 
 
 LIVE_AGENT = ("running", "starting")
+
+
+def _bundle_to_close(wi: str, role: str, kids: dict[str, str]) -> dict:
+    """What the desk does with a bundle whose manager ended and whose items are all settled (release 45, 6h)."""
+    staged = sorted(k for k, v in kids.items() if v == "staged")
+    if staged:
+        action = ("dispatch the checker for " + ", ".join(f"`dispatch brief --wi {k} --role checker`" for k in staged)
+                  + f"; then close the bundle: `wi stage --wi {wi} --summary ...`, `verify --wi {wi}`")
+    else:
+        action = f"close it: `wi stage --wi {wi} --summary ...`, then `verify --wi {wi}` (a recount) and Gate 2"
+    counts: dict[str, int] = {}
+    for v in kids.values():
+        counts[v] = counts.get(v, 0) + 1
+    return {"wi": wi, "role": role, "children": kids, "counts": counts, "staged": staged, "action": action}
 
 
 def _recorded_states(events: list[dict]) -> dict[str, tuple[str, bool]]:
@@ -271,6 +297,7 @@ def status(site: Site) -> dict:
     lanes = lane_holders(site, led, wis)
     reorg = [f for f in led.load("finding") if "reorg" in (f["payload"].get("tags") or [])]
     sessions = led.load("session")
+    closable: list[dict] = []
     return {
         "site": str(site.root),
         "package": (site.config.get("startup") or {}).get("id"),
@@ -279,7 +306,8 @@ def status(site: Site) -> dict:
         "by_status": {k: [f"{w['id']} {w['role']}: {w['title']}" for w in v] for k, v in sorted(by_status.items())},
         "awaiting_gate1": [w["id"] for w in wis if w["status"] == "proposed"],
         "awaiting_gate2": [w["id"] for w in wis if w["status"] == "verified"],
-        "orphaned": orphaned(led, wis),
+        "orphaned": orphaned(led, wis, closable),
+        "bundles_to_close": closable,
         "upstream": _upstream(site),
         "active_lanes": f"{len(lanes)}/{site.limit('max_concurrent_lanes', 2)}",
         "lanes": lanes,
@@ -334,6 +362,9 @@ def render_status(st: dict) -> str:
     for o in st.get("orphaned") or []:
         still = f"; still running: {', '.join(o['children_running'])}" if o["children_running"] else ""
         lines.append(f"Orphaned: {o['wi']} {o['role']} agent {o['agent']}{still} -> {o['action']}")
+    for b in st.get("bundles_to_close") or []:
+        counts = ", ".join(f"{k} {v}" for k, v in sorted(b["counts"].items()))
+        lines.append(f"Bundle to close (manager not needed): {b['wi']} {b['role']} items {counts} -> {b['action']}")
     for k, v in st["by_status"].items():
         lines.append(f"[{k}]")
         lines += [f"  {x}" for x in v]
@@ -1438,8 +1469,8 @@ def _watch_line(led: Ledger, events: list[dict], run: dict, seen: dict, nxt: str
             nxt = f"none (WI {st})"
         elif parent and agent_state(led, parent, events) in LIVE_AGENT:
             nxt = f"the manager of bundle {parent} dispatches the checker for {wi} ({collect})"
-        elif parent:
-            nxt = f"dispatch brief --wi {parent} (bundle; its manager dispatches the checker for {wi}: {collect})"
+        elif parent:  # release 45 (6h): the desk dispatches the checker itself; the manager is only for rework
+            nxt = f"dispatch brief --wi {wi} --role checker ({collect}; bundle {parent}, its manager is not needed)"
         else:
             nxt = f"dispatch brief --wi {wi} --role checker ({collect})"
     elif agent_s.endswith(":running") or agent_s.endswith(":starting"):

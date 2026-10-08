@@ -230,7 +230,7 @@ def message(site: Site) -> str:
 
 
 def _live_agents(st: dict) -> list[str]:
-    orphaned = {o["wi"] for o in st["orphaned"]}
+    orphaned = {o["wi"] for o in st["orphaned"]} | {b["wi"] for b in st.get("bundles_to_close") or []}
     return [d.split(":")[0] for d in st["by_status"].get("dispatched", []) if d.split(" ")[0] not in orphaned]
 
 
@@ -245,6 +245,9 @@ def _activity(site: Site) -> list[str]:
     lines = ["SITE ACTIVITY", f"- active lanes {st['active_lanes']}; agents running: {', '.join(live) or 'none'}"]
     if running:
         lines.append(f"- orphaned: {', '.join(running)}")
+    closable = [b["wi"] for b in st.get("bundles_to_close") or []]
+    if closable:
+        lines.append(f"- bundles to close (manager not needed): {', '.join(closable)}")
     lines += [f"- merge window: {'ready (no running agents)' if ready else 'not ready; the desk reports when idle'}", ""]
     return lines
 

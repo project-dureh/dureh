@@ -208,7 +208,14 @@ dureh verify --wi <WI> --collect [RUN]   # checker, re-dispatched: record the ve
   declared checks, or `checks.runner: local`) it verifies synchronously as before.
 - **Watch.** `slurm watch` tracks pending verify jobs with the other jobs; when one ends it records the final
   state and prints `next=dispatch brief --wi <WI> --role checker (checker collects verify run <id>)` (for a bundle
-  item: its manager dispatches the checker).
+  item while its manager runs: the manager dispatches the checker; release 45: when the manager has ended, the
+  same `dispatch brief --wi <item> --role checker` by the desk, with no manager re-dispatch in between).
+- **Bundles without their manager (release 45, 6h).** A bundle whose manager ended and whose every item is
+  staged, verified, promoted or stopped is not reported as orphaned: `dureh status` prints `Bundle to close
+  (manager not needed): <bundle> ... -> dispatch the checker for <staged item> ...; then close the bundle: wi
+  stage --wi <bundle>, verify --wi <bundle>` (the desk may stage a bundle and run its recount). It holds no lane
+  and does not keep a merge window or `day close` from seeing the site idle. The manager is re-dispatched only
+  when an item needs rework or dispatch.
 - **Collect** reads each check's `.exit/.ms/.out` files and records the verification exactly as the synchronous
   path (`verification.recorded`, then `wi.verified` or `rework.requested`; the record adds `collected_from`). It is
   refused, recording nothing, while the job is pending or running, when the WI head or its declared checks changed

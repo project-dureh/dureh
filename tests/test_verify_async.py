@@ -156,8 +156,11 @@ class AsyncVerify(SiteCase):
         lines = ops.watch_round(self.s, "desk", reported)
         self.assertEqual(len(lines), 1, lines)
         self.assertIn(f"run={sub['run']} job=5100 wi={wi}", lines[0])
-        self.assertIn(f"state=COMPLETED next=dispatch brief --wi {self.bundle} (bundle; its manager dispatches the checker"
-                      f" for {wi}: checker collects verify run {sub['run']})", lines[0])
+        # release 45 (6h): the bundle's manager is not running, so the desk dispatches the checker itself
+        self.assertIn(f"state=COMPLETED next=dispatch brief --wi {wi} --role checker (checker collects verify run"
+                      f" {sub['run']}; bundle {self.bundle}, its manager is not needed)", lines[0])
+        brief = wf.dispatch_brief(self.s, wi, "desk", as_role="checker")["brief"]  # the desk may: no manager hop
+        self.assertIn(f"verify --wi {wi} --collect", brief)
         self.assertEqual(ops.watch_round(self.s, "desk", set()), [], "recorded once")
         r = wf.verify_collect(self.s, "checker", wi)  # uses the state the watch recorded
         self.assertEqual(r["result"], "pass")
