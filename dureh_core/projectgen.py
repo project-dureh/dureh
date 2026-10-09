@@ -35,6 +35,15 @@ def _template(site: Site) -> Path:
     return site.startup / rel / TEMPLATE_FILE
 
 
+def _compute_line(site: Site) -> str:
+    tools = site.scheduler_tools()
+    if not tools:
+        return "Computation runs only as scheduler jobs (`dureh slurm submit`)."
+    return ("Agents never call scheduler commands directly; computation runs as scheduler jobs through `dureh slurm submit`"
+            " or the package's scheduler tools ("
+            + "; ".join(f"{t['name']}: " + ", ".join(f"`{c}`" for c in t["commands"]) for t in tools) + ").")
+
+
 def _claude_md(site: Site, name: str, root: Path) -> str | None:
     tpl = _template(site)
     if not tpl.is_file():
@@ -50,7 +59,7 @@ def _claude_md(site: Site, name: str, root: Path) -> str | None:
              " through that site: a work item, its worktree (or a declared scratch scope) and its records.",
              "- Gate 1: the Director approves every work item before it is dispatched.",
              "- Gate 2: the Director approves promotion of a verified work item.",
-             "- Computation runs only as scheduler jobs (`dureh slurm submit`)."]
+             "- " + _compute_line(site)]
     if protected:
         lines += ["", "## Protected paths", ""]
         lines += [f"- `{'/'.join(r['path'].split('/')[2:]) or '.'}` {r['level']}" + (f": {r['why']}" if r.get("why") else "")

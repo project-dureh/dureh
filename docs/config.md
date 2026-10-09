@@ -31,7 +31,7 @@ Tests prove the mechanism with the neutral example package `tests/fixtures/examp
 | `slurm.each_env` | DUREH_ITER names | the variable names an `--each` task gets its item, level, index and item-grammar fields under |
 | `slurm.watch` | `monitor` for a site without the key; `on-demand` written by `install` for a new site (release 46) | how the desk learns that a job ended (release 45; docs/slurm.md "Watch modes"): `monitor` keeps a standing `slurm watch` Monitor, `on-demand` keeps none (`slurm wait --run` for short jobs, `slurm status` at a later turn for long ones), `off` names only `slurm status`. Only generated text (CLAUDE.md, role files, hints) follows it; another value fails `adapter sync` |
 | `slurm.external_jobs` | `true` | with `slurm.external_match` set, `dureh status` asks `squeue -u $USER` for jobs no harness record owns and lists the matching ones as `External jobs` (release 45; docs/slurm.md); `false` never asks |
-| `slurm.external_match` | absent (none listed) | release 46: name patterns of the external jobs to list (an include list, e.g. a module framework's job-name prefix); empty or absent lists none and asks `squeue` nothing. Replaces `slurm.external_ignore`, which is ignored with a warning for one release |
+| `slurm.external_match` | absent: the union of the package's `scheduler_tools[].job_match` (none without tools) | release 46: name patterns of the external jobs to list (an include list, e.g. a module framework's job-name prefix); empty or absent lists none and asks `squeue` nothing. Replaces `slurm.external_ignore`, which is ignored with a warning for one release |
 | `slurm.via_timeout` | `600` | seconds a `--via` module command may take to submit and exit |
 | `checks.local_allow` | `[]` | globs of declared checks an item may run in the verify process with `wi new/amend --checks-runner local` (release 45; docs/slurm.md "Per-item local runner"); empty refuses the per-item choice |
 | `checks.local_timeout` | `60` | seconds per check on the per-item local path |
@@ -82,6 +82,9 @@ labels:
   item_grammar: {<level>: <regex with named groups>}       # --each item levels and fields
 templates: {project: templates/project}            # holds CLAUDE.md.template for linked projects
 guards: {scheduler_only_commands: [...]}           # additive only
+scheduler_tools:                                   # the company's own scheduling commands (compute route B)
+  - {name: <word>, commands: [<Bash command glob>, ...], exclude: [<glob>, ...], job_match: [<job-name glob>, ...],
+     description: <text>}
 config_defaults: {project, containers, slurm, checks, env, limits, guards, modules, index}
 lessons | bootstrap | dependencies | state: as before
 organization: {managers, workers}                  # release 46 only: an enable list over the roles; then `roles` rules
@@ -96,6 +99,18 @@ organization: {managers, workers}                  # release 46 only: an enable 
   promotion, `--metadata`, `--kind report`); landing results in a final area is the company's own tooling. `dureh wi
   promote` (Gate 2, `contrib/` branches) is unrelated and stays. `labels.layout.final` is only a label (`path-refs`
   skips it).
+- **Scheduler tools** (Director, 2026-10-09, compute route B). A company whose own framework schedules its own
+  compute declares it in `scheduler_tools:`. There is no capability gate: any agent may run a declared command (the
+  framework's workflows submit to Slurm themselves and must keep working). The guard matches the parsed command
+  segment it already sees (after `&&`/`;`, `NAME=value` prefixes and wrappers such as `timeout`); a matching
+  command is not held by the package's `scheduler_only_commands`. `exclude` globs (internal entry points) win over
+  `commands` and are refused for every agent (`guard.denied`). Direct `sbatch`/`srun`/`salloc`/`scancel` and
+  container runtimes stay denied; a `commands` glob may not start with one of them (or with `dureh`), so a
+  container-runtime launcher in front of the tool is refused at validation. Each `job_match` is non-empty. The
+  tools' jobs are the package's: `status` lists them as `Package jobs` (name, state, time; the harness writes no
+  `run` record), `day close` warns while any is queued or running, and `slurm.external_match` defaults to the union
+  of `job_match`. The desk, worker and project texts name the tools instead of "only through `dureh slurm submit`";
+  without tools the texts are as before.
 - **Default org** (`org/roles.yaml`): `desk`, a generic `manager` (dispatches `worker`, `checker`), a generic
   `worker` (module `src/`, `tests/`, `docs/`), and `checker` (`verify`). A package's `roles` add roles or replace
   `manager`/`worker`; `checker` may only be re-skinned (skill, instructions, texts) and keeps `verify` and no write

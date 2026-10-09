@@ -123,6 +123,20 @@ External jobs (2, no harness record): 1001 manual-test RUNNING 0:12:01; 1002_2 f
 - `dureh day close` warns about them (result `warning`, `external_jobs` in `day.closed`) and does not refuse.
 - The harness never cancels such a job: it is not the harness's to end.
 
+### Package scheduler tools (release 46, Director 2026-10-09)
+
+A package may declare `scheduler_tools:` (docs/config.md): the company framework's own commands that submit its
+jobs. Any agent may run a declared command; `exclude` globs are refused for everyone; `sbatch`/`srun` and container
+runtimes stay denied. `squeue` jobs whose name matches a tool's `job_match` are listed by `status` as
+
+```
+Package jobs (1, scheduler tools): 700001 exflow-step-a RUNNING 0:10 [exflow]
+```
+
+separately from external jobs (which, without `slurm.external_match` in the site config, default to the same
+union and so stay empty). The harness writes no `run` record for them; `day close` warns while any is queued or
+running.
+
 ### Watch modes: config `slurm.watch` (release 45)
 
 Measured 2026-10-08 at a company site: a standing watch Monitor expires and must be re-armed; about ten re-arms

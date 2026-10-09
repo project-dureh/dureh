@@ -1037,7 +1037,7 @@ def close(site: Site, actor: str, note: str, cancel_now: bool = False) -> dict:
             fail(f"the handoff {handoff} predates today's start ({d['start']}); update it before closing")
     led = Ledger(site)
     extra = {}
-    if ext and ext["count"]:  # release 45: a warning, never a refusal (they may be meant to run overnight)
+    if ext and (ext["count"] or ext.get("tool_count")):  # a warning, never a refusal (they may run overnight)
         extra = {"external_jobs": ext}
     rec = led.event("day.closed", actor, None, {"note": note, "idle": checked or None, "checked": checked,
                                                "handoff": str(handoff), **extra}, [d["plan"]])

@@ -138,7 +138,7 @@ def _agent_file(site: Site, role, project: str | None = None) -> str:
             f"- Write only: {', '.join(scopes) if scopes else 'no files (records through dureh tools only)'}."
             " Inside a WI worktree, paths are relative to the work item target.",
             "- Reference paths are read-only. Heavy computation runs only through the scheduler, never in the session.",
-            TESTS_RULE,
+            _tests_rule(site),
             "- Search only inside your WI worktree, the site, scratch space or the harness: a `find`, `grep -r`, `rg`, `du`,"
             " `ls -R` or `tree` rooted elsewhere (`/`, `/work`, `/nas`, `/proj`, `/home`, `~`) is refused. Do not leave"
             " processes running when you end: whatever still runs then is killed and recorded.",
@@ -235,6 +235,33 @@ def _item_names_text(site: Site) -> str:
     n = _item_names(site)
     what = {"item": "item", "by": "level", "index": "index"}
     return ", ".join(f"`${v}` ({what.get(k, k + ' field of the item grammar')})" for k, v in n.items())
+
+
+def compute_rule(site: Site, dureh) -> str:
+    """How compute reaches the scheduler: `dureh slurm submit` or the package's scheduler tools (Director 2026-10-09,
+    compute route B: the company framework submits its own jobs; any agent may run its declared commands). Without
+    tools: today's text."""
+    tools = site.scheduler_tools()
+    if not tools:
+        return f"Compute runs only as scheduler jobs through `{dureh} slurm submit`."
+    listed = "; ".join(f"{t['name']} (" + ", ".join(f"`{c}`" for c in t["commands"])
+                       + (f": {t['description']}" if t.get("description") else "") + ")" for t in tools)
+    excluded = [c for t in tools for c in t.get("exclude") or []]
+    return ("Agents never call scheduler commands (`sbatch`, `srun`, ...) or container runtimes directly. Compute runs"
+            f" as scheduler jobs through `{dureh} slurm submit` or the package's scheduler tools: {listed}."
+            + (" Never run " + ", ".join(f"`{c}`" for c in excluded) + " (internal entry points; refused)." if excluded else "")
+            + " Their jobs are the package's (status lists them as `Package jobs`; the tool keeps their records, the"
+            " harness writes none).")
+
+
+def _tests_rule(site: Site) -> str:
+    tools = site.scheduler_tools()
+    if not tools:
+        return TESTS_RULE
+    return TESTS_RULE.replace("other computation goes through `dureh slurm submit`.",
+                              "other computation goes through `dureh slurm submit` or the package's scheduler tools ("
+                              + "; ".join(t["name"] + ": " + ", ".join(f"`{c}`" for c in t["commands"]) for t in tools)
+                              + "), never `sbatch`/`srun` directly.")
 
 
 TESTS_RULE = ("- Test suites are scheduler work too: never run `pytest`, `python -m unittest discover` or a module's test"
@@ -472,7 +499,7 @@ def _claude_md(site: Site) -> str:
               f" (or `--target <target>` for a main tree's `.venv`); it rebuilds the environment with `env_rebuild` from config.json."
               f" After the site moved or was renamed, `{dureh} worktree repair --all` does this for every worktree and environment at once (`--dry-run` first)."
               " Never edit `.git` files or rebuild environments by hand.",
-              f"8. Compute runs only as scheduler jobs through `{dureh} slurm submit`. {JOBS_RULE}{_loop_policy_text(site)} {_log_rule(site)}"
+              f"8. {compute_rule(site, dureh)} {JOBS_RULE}{_loop_policy_text(site)} {_log_rule(site)}"
               + _job_end_rule(site, dureh) +
               f" re-dispatch the owning WI: `{dureh} dispatch brief --wi <WI>` (for an item of a bundle whose manager"
               " ended, re-dispatch the bundle so its manager re-dispatches the item; an ended verify job is collected by the checker,"
@@ -1142,6 +1169,27 @@ def _read_check(site: Site, first: str, words: list[str], cwd: Path) -> str | No
     return None
 
 
+def _cmd_match(text: str, glob: str) -> bool:
+    return fnmatchcase(text, glob) or (glob.endswith(" *") and fnmatchcase(text, glob[:-2]))
+
+
+def scheduler_tool_for(site: Site, words: list[str]) -> tuple[dict | None, dict | None]:
+    """(tool, excluded) for one command segment as the guard parsed it (separators split, `NAME=value` prefixes and
+    wrappers stripped): the package scheduler tool one of whose `commands` globs matches, and the tool whose
+    `exclude` glob matches (exclude wins; Director 2026-10-09, compute route B)."""
+    tools = site.scheduler_tools()
+    if not tools or not words:
+        return None, None
+    text = " ".join(words)
+    for t in tools:
+        if any(_cmd_match(text, g) for g in t.get("exclude") or []):
+            return None, t
+    for t in tools:
+        if any(_cmd_match(text, g) for g in t.get("commands") or []):
+            return t, None
+    return None, None
+
+
 def _marked(original: str, agent_id: str, simple: bool) -> str:
     """The command with DUREH_AGENT_ID in its environment, so leftovers can be found when the agent ends."""
     ident = f"DUREH_AGENT_ID={shlex.quote(agent_id)}"
@@ -1231,7 +1279,10 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
                               "write a script file in your scope and run it", original))
         if first in ALWAYS_DENY_FIRST:
             return _deny(wait(ALWAYS_DENY_FIRST[first], original))
-        if any(fnmatchcase(first, pat) for pat in scheduler_only):
+        tool, excluded = scheduler_tool_for(site, words)
+        if excluded is not None:
+            return _deny(f"`{excluded['name']}` declares this command internal (scheduler_tools exclude); no agent runs it")
+        if tool is None and any(fnmatchcase(first, pat) for pat in scheduler_only):
             return _deny(f"`{first}` runs only as a scheduler job; use `dureh slurm submit`")
         if first == "git" and "push" in words[1:3]:
             return _deny("pushes go through `dureh push` with a Director decision bound to the revision")

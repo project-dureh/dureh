@@ -317,10 +317,11 @@ def external_jobs(site: Site, led: Ledger | None = None) -> dict | None:
     cfg = site.config.get("slurm") or {}
     if cfg.get("external_jobs", True) is False:
         return None
-    match = cfg.get("external_match") or []
-    if isinstance(match, str):
-        match = [match]
-    if not match:
+    tools = site.scheduler_tools()
+    union = [g for t in tools for g in t.get("job_match") or []]
+    match = cfg["external_match"] if "external_match" in cfg else union  # default: the scheduler tools' jobs
+    match = [match] if isinstance(match, str) else list(match or [])
+    if not match and not tools:
         return None
     import getpass
 
@@ -337,16 +338,21 @@ def external_jobs(site: Site, led: Ledger | None = None) -> dict | None:
     own_job = os.environ.get("SLURM_JOB_ID")
     if own_job:
         owned.add(_base_job(own_job))
-    out = []
+    out, ours = [], []
     for line in proc.stdout.splitlines():
         parts = line.strip().split("|")
         if len(parts) < 4 or not parts[0]:
             continue
         job, name, state, used = (x.strip() for x in parts[:4])
-        if _base_job(job) in owned or not any(fnmatch.fnmatchcase(name, str(g)) for g in match):
+        if _base_job(job) in owned:
             continue
-        out.append({"job_id": job, "name": name, "state": state, "time": used})
-    return {"jobs": out[:EXTERNAL_LIMIT], "count": len(out)}
+        tool = next((t["name"] for t in tools if any(fnmatch.fnmatchcase(name, str(g)) for g in t["job_match"])), None)
+        if tool:  # the package's own jobs (its scheduler tool keeps their records; the harness writes none)
+            ours.append({"job_id": job, "name": name, "state": state, "time": used, "tool": tool})
+        elif any(fnmatch.fnmatchcase(name, str(g)) for g in match):
+            out.append({"job_id": job, "name": name, "state": state, "time": used})
+    return {"jobs": out[:EXTERNAL_LIMIT], "count": len(out), "tool_jobs": ours[:EXTERNAL_LIMIT],
+            "tool_count": len(ours)}
 
 
 def config_warnings(site: Site) -> list[str]:
@@ -370,12 +376,20 @@ def config_warnings(site: Site) -> list[str]:
 
 
 def render_external(ext: dict | None) -> str | None:
-    if not ext or not ext["count"]:
+    if not ext or not (ext["count"] or ext.get("tool_count")):
         return None
-    more = ext["count"] - len(ext["jobs"])
-    return (f"External jobs ({ext['count']}, no harness record): "
-            + "; ".join(f"{j['job_id']} {j['name']} {j['state']} {j['time']}" for j in ext["jobs"])
-            + (f"; ... and {more} more" if more > 0 else ""))
+    lines = []
+    if ext.get("tool_count"):
+        more = ext["tool_count"] - len(ext["tool_jobs"])
+        lines.append(f"Package jobs ({ext['tool_count']}, scheduler tools): "
+                     + "; ".join(f"{j['job_id']} {j['name']} {j['state']} {j['time']} [{j['tool']}]" for j in ext["tool_jobs"])
+                     + (f"; ... and {more} more" if more > 0 else ""))
+    if ext["count"]:
+        more = ext["count"] - len(ext["jobs"])
+        lines.append(f"External jobs ({ext['count']}, no harness record): "
+                     + "; ".join(f"{j['job_id']} {j['name']} {j['state']} {j['time']}" for j in ext["jobs"])
+                     + (f"; ... and {more} more" if more > 0 else ""))
+    return "\n".join(lines)
 
 
 def _upstream(site: Site) -> dict:

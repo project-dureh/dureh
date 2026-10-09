@@ -223,6 +223,12 @@ class Site:
 
         return labels(self.package_manifest())
 
+    def scheduler_tools(self) -> list[dict]:
+        """The package's scheduler tools (package.scheduler_tools); none for schema 1."""
+        from .package import scheduler_tools
+
+        return scheduler_tools(self.package_manifest())
+
     def protected(self) -> list[dict]:
         """The package's protected paths [{path, level, why}] (package.protected_rules); none for schema 1."""
         from .package import protected_rules

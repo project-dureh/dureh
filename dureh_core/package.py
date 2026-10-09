@@ -30,7 +30,11 @@ DEFAULT_LAYOUT = {"staging": "checkpoints", "final": None, "reports": "reports"}
 # top-level keys of a schema-2 startup.yaml; anything else is warned about in release 46 (refused from release 49)
 KNOWN_KEYS = ("schema_version", "package", "desk", "roles", "values", "skills", "policies", "protected", "labels",
               "templates", "guards", "config_defaults", "lessons", "bootstrap", "dependencies", "organization", "state",
-              "projects")
+              "projects", "scheduler_tools")
+# commands no agent runs directly, whatever a package declares (the Bash guard's always-deny list and the harness's
+# scheduler-only defaults): a scheduler tool's command may not start with one of them
+HARNESS_DIRECT_COMMANDS = ("sbatch", "srun", "salloc", "scancel", "nohup", "setsid", "disown", "screen", "tmux",
+                           "apptainer", "singularity", "docker", "podman", "dureh", "bin/dureh", "dureh.py")
 ROLE_KEYS = ("kind", "tier", "description", "output", "never", "isolation", "write_scopes", "may_dispatch",
              "capabilities", "project", "skill", "instructions", "value")
 CHECKER_RESKIN_KEYS = ("skill", "instructions", "description", "output", "never", "project")
@@ -174,6 +178,47 @@ def _check_protected(raw) -> None:
             fail(f"{where}.level must be no-read, read-only or none, not {r.get('level')!r}")
 
 
+def scheduler_tools(manifest: dict | None) -> list[dict]:
+    """The package's scheduler tools [{name, commands, exclude, job_match, description}] (Director 2026-10-09,
+    compute route B): the company's own commands that schedule its own compute. Schema 2 only."""
+    if manifest is None or schema_of(manifest) == 1:
+        return []
+    return [dict(t) for t in manifest.get("scheduler_tools") or []]
+
+
+def _check_scheduler_tools(raw) -> None:
+    from fnmatch import fnmatchcase
+
+    if raw in (None, []):
+        return
+    if not isinstance(raw, list):
+        fail("startup.yaml scheduler_tools must be a list of {name, commands, exclude, job_match, description}")
+    names = set()
+    for i, t in enumerate(raw):
+        where = f"startup.yaml scheduler_tools[{i}]"
+        if not isinstance(t, dict) or set(t) - {"name", "commands", "exclude", "job_match", "description"}:
+            fail(f"{where} must be {{name, commands, exclude, job_match, description}}")
+        if not isinstance(t.get("name"), str) or not WORD_RE.match(t["name"]) or t["name"] in names:
+            fail(f"{where}.name must be a distinct word")
+        names.add(t["name"])
+        cmds = t.get("commands")
+        if not isinstance(cmds, list) or not cmds or not all(isinstance(c, str) and c.split() for c in cmds):
+            fail(f"{where}.commands must be a non-empty list of Bash command globs, e.g. [\"<tool> workflow *\"]")
+        for cmd in cmds:
+            first = cmd.split()[0]
+            if any(c in first for c in "*?["):
+                fail(f"{where}.commands: {cmd!r} must start with a command word, not {first!r}")
+            base = first.rsplit("/", 1)[-1]
+            if any(fnmatchcase(base, h) or fnmatchcase(first, h) for h in HARNESS_DIRECT_COMMANDS):
+                fail(f"{where}.commands: {cmd!r} may not start with {first!r}: agents never run it directly (harness rule)")
+        ex = t.get("exclude") or []
+        if not isinstance(ex, list) or not all(isinstance(c, str) and c.strip() for c in ex):
+            fail(f"{where}.exclude must be a list of Bash command globs")
+        jm = t.get("job_match")
+        if not isinstance(jm, list) or not jm or not all(isinstance(x, str) and x.strip() for x in jm):
+            fail(f"{where}.job_match must be a non-empty list of job-name globs")
+
+
 def _check_policies(raw) -> None:
     if raw in (None, {}):
         return
@@ -230,6 +275,7 @@ def check(manifest: dict, root: Path | None = None) -> list[str]:
             warnings.append(f"startup.yaml protected: `{r['path']} none` lies under no stricter rule of the package"
                             " (it lifts nothing)")
     _check_policies(manifest.get("policies"))
+    _check_scheduler_tools(manifest.get("scheduler_tools"))
     if manifest.get("organization"):
         warnings.append("startup.yaml organization.managers/workers is an enable list for release 46 only; from the"
                         " next release the package's `roles` is authoritative")
