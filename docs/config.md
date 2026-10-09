@@ -31,7 +31,7 @@ Tests prove the mechanism with the neutral example package `tests/fixtures/examp
 | `slurm.each_env` | DUREH_ITER names | the variable names an `--each` task gets its item, level, index and item-grammar fields under |
 | `slurm.watch` | `monitor` for a site without the key; `on-demand` written by `install` for a new site (release 46) | how the desk learns that a job ended (release 45; docs/slurm.md "Watch modes"): `monitor` keeps a standing `slurm watch` Monitor, `on-demand` keeps none (`slurm wait --run` for short jobs, `slurm status` at a later turn for long ones), `off` names only `slurm status`. Only generated text (CLAUDE.md, role files, hints) follows it; another value fails `adapter sync` |
 | `slurm.external_jobs` | `true` | with `slurm.external_match` set, `dureh status` asks `squeue -u $USER` for jobs no harness record owns and lists the matching ones as `External jobs` (release 45; docs/slurm.md); `false` never asks |
-| `slurm.external_match` | absent: the union of the package's `scheduler_tools[].job_match` (none without tools) | release 46: name patterns of the external jobs to list (an include list, e.g. a module framework's job-name prefix); empty or absent lists none and asks `squeue` nothing. Replaces `slurm.external_ignore`, which is ignored with a warning for one release |
+| `slurm.external_match` | absent: the union of the package's `scheduler_tools[].job_match` (none without tools) | release 46: name patterns of the external jobs to list (an include list, e.g. a module framework's job-name prefix); empty or absent lists none and asks `squeue` nothing. Replaces `slurm.external_ignore` (ignored with a warning in 46-48; refused from release 49: `adapter sync` and `verify --self` fail, `status` warns) |
 | `slurm.via_timeout` | `600` | seconds a `--via` module command may take to submit and exit |
 | `checks.local_allow` | `[]` | globs of declared checks an item may run in the verify process with `wi new/amend --checks-runner local` (release 45; docs/slurm.md "Per-item local runner"); empty refuses the per-item choice |
 | `checks.local_timeout` | `60` | seconds per check on the per-item local path |
@@ -89,7 +89,6 @@ scheduler_tools:                                   # the company's own schedulin
      description: <text>}
 config_defaults: {project, containers, slurm, checks, env, limits, guards, modules, index}
 lessons | bootstrap | dependencies | state: as before
-organization: {managers, workers}                  # release 46 only: an enable list over the roles; then `roles` rules
 ```
 
 - **Capabilities** (closed set): `submit_jobs` (`slurm submit/status/wait/resubmit-failed`, `run.status`,
@@ -117,17 +116,17 @@ organization: {managers, workers}                  # release 46 only: an enable 
   `worker` (module `src/`, `tests/`, `docs/`), and `checker` (`verify`). A package's `roles` add roles or replace
   `manager`/`worker`; `checker` may only be re-skinned (skill, instructions, texts) and keeps `verify` and no write
   scopes. Every manager and every verify role is dispatched by the desk. A package without `roles` runs on the four.
-- **Validation** (3.4): unknown top-level keys warn (refused from release 49); `harness_min` above this release
+- **Validation** (3.4): unknown top-level keys refuse (since release 49; they warned in 46-48); `harness_min` above this release
   refuses; roles: kind, tier, `may_dispatch` only on managers and only to workers (depth desk -> manager -> worker),
   known targets, every dispatching manager can dispatch a verify role, at least one verify role, a verify role has no
   write scopes; write scopes are segment-aware globs under `modules/`, `projects/`, `package/`, `harness/` and none
   covers a protected path; capabilities from the closed set; skills and the
   project template exist inside the package; no symlinks; protected levels are `no-read`, `read-only` or `none`
   (a `none` rule that overlaps no stricter rule of the package warns).
-- **Schema 1** still loads in release 46 with a warning: its `organization` enable list resolves against the
-  generic roles plus `org/legacy/schema1-roles.yaml` (pm-modules, py-writer, doc-writer, researcher), names that no
-  longer exist are dropped with a warning, and its labels are the pre-46 words (`LEGACY_LABELS`). Both go when schema
-  1 is refused.
+- **Schema 1 is refused** (release 49; it loaded with a warning in release 46 only): a `startup.yaml` without
+  `schema_version: 2` fails install, `adapter sync` and `verify --self` with a pointer to this section. The
+  `organization` enable list (`managers`/`workers`) is refused too: the package's `roles` is authoritative. A
+  `values[].manager` must name a role of the organization.
 
 ### Protected paths
 

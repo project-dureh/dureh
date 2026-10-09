@@ -116,8 +116,8 @@ External jobs (2, no harness record): 1001 manual-test RUNNING 0:12:01; 1002_2 f
   job, and the calling job (`$SLURM_JOB_ID`: the session itself).
 - **Release 46: an include list.** Only jobs whose name matches config `slurm.external_match` (a list of name
   patterns, e.g. `["<prefix>-*"]` for a module framework's own job names) are listed; empty or absent lists none,
-  and `squeue` is not asked at all. The old `slurm.external_ignore` is ignored with a warning (status, `adapter
-  sync`, `verify --self`) for one release.
+  and `squeue` is not asked at all. The old `slurm.external_ignore` was ignored with a warning in releases 46-48; from
+  release 49 it is refused (`adapter sync` fails, `verify --self` fails, `status` warns): remove the key.
 - At most 10 are listed, the rest counted (`... and N more`). When `squeue` is missing or fails, nothing is
   listed and nothing fails. Config `slurm.external_jobs: false` never asks.
 - `dureh day close` warns about them (result `warning`, `external_jobs` in `day.closed`) and does not refuse.
@@ -354,7 +354,7 @@ Release 46 removed the harness's own item walker (the old dataset walker and its
   item plain (the harness parses no grammar itself). One level per array: mixing is refused. Recorded as
   `array.level`. Example (the neutral example package): `sample: '^sample-(?P<sample>[A-Za-z0-9]+)$'` and
   `batch: '^sample-(?P<sample>[A-Za-z0-9]+)_batch-(?P<batch>[A-Za-z0-9]+)$'` make `sample-01` a `sample` item with
-  field `sample=01`. A schema-1 package keeps the grammar the harness had before release 46 (release 46 only).
+  field `sample=01`.
 - **Item mapping and names.** The job script runs once per task with the item, the array level (`by`), its 0-based
   index and each grammar field exported (a field the item lacks is exported empty). The names are the site's:
   config `slurm.each_env` = `{"item": NAME, "index": NAME, "by": NAME, <field>: NAME ...}` (`by` and the fields
