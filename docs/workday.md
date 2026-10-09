@@ -308,7 +308,10 @@ shebang names an interpreter that does not exist, `bin/activate` names another d
 from config.json (or `env.rebuild`), one whose target has none is `skipped: no env_rebuild`. The rebuild starts
 from nothing: the old directory is moved to `.venv.stale-<time>` first (a `uv sync` into it keeps the installed
 scripts and their old shebangs) and removed once the rebuild succeeds; it stays, named in the error, when the
-rebuild fails. A worktree with no `.venv` at all gets one created the same way. `--prune-stale` lists the
+rebuild fails. A worktree with no `.venv` at all gets one created the same way. Release 47: a WI worktree's
+missing `.venv`, or a stale (or `--force`d) shared-form one, is provisioned as `dispatch brief` does it (the
+shared form when its `uv.lock` matches the main tree's and the main env is usable, else `env_rebuild` within
+`env.rebuild_timeout`; docs/slurm.md "Worktree environment at dispatch"); an own `.venv` is rebuilt as before. `--prune-stale` lists the
 `.venv.stale-*` copies under `worktrees/*`, the main trees and `scratch/exec` with their size (`--target` for one
 main tree) and removes them with `--remove`, one `env.repaired` record (`env: pruned`) each; a plain `.venv` is
 never touched, and `verify` ignores the copies as it ignores `.venv`. The pass never stops at an error: one line

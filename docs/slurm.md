@@ -291,6 +291,43 @@ dureh verify --wi <WI> --collect [RUN]   # checker, re-dispatched: record the ve
   target has `env_rebuild`, the worktree's own `.venv` built first (`rebuild`: inside the checks job for the slurm
   runner, exit 95 when it fails; in the verify process for the local runner); else nothing (`none`, as before). No
   desk repair is needed for a new worktree; a stale `.venv` is still refused with the `worktree repair` hint.
+- **Worktree environment at dispatch (release 47, UR-20261009-01).** The worker's own commands need an environment
+  too, so `dispatch brief` gives a new (or reused, `.venv`-less) WI worktree of a module or project target that
+  has `env_rebuild` its `.venv` before the brief returns (`workflow.provision_worktree_env`); a target without
+  `env_rebuild` gets nothing, as before.
+  - **Shared form** when the worktree's `uv.lock` is byte-identical to the main tree's (the `shared-venv` rule
+    above) and the main tree's `.venv` exists and is not stale: `<worktree>/.venv` is a small virtualenv of the same
+    base interpreter (`python -m venv --without-pip`, no network, about a second) whose site-packages holds one
+    `_dureh_shared.pth`: the worktree's package directory first, then the main tree's site-packages (its own
+    `.pth` files included, so editable installs of other modules resolve). `.venv/bin/python`, `source
+    .venv/bin/activate` and `uv run --no-sync` (uv finds the project `.venv`) import the worktree's code with the
+    main tree's dependencies; a plain `uv run` syncs first, which installs the full lock into the worktree's
+    `.venv` (network and time; the brief says to use `--no-sync`). Nothing in it points at the main environment as a target: `sys.prefix` is the worktree's
+    `.venv`, so a `uv sync`/`uv add`/`pip install` in the worktree installs into the worktree's own `.venv` and
+    never writes into the shared one (it only reads it). A `DUREH-SHARED` file in the `.venv` names the shared
+    environment and the worktree it was made for.
+  - **Own environment** otherwise (the lock differs, or the main env is missing or stale): `env_rebuild` runs in
+    the worktree (without the caller's `VIRTUAL_ENV`/`UV_PROJECT_ENVIRONMENT`), bounded by config
+    `env.rebuild_timeout` (default 900 s). On failure or timeout the brief is refused with the error and the
+    `dureh worktree repair --wi <WI>` hint, a half-built `.venv` is moved to `.venv.stale-<time>-partial`, and the
+    failure is recorded as `worktree.env-failed`.
+  - The dispatch output prints `# worktree env: <venv> shares <main env>` (or `built with ... in N s`) above the
+    spawn line, `dispatch.prepared` records `worktree_env`, and the brief carries one `Python env:` line (outside
+    the brief budget, as the verification block). A worktree that already has a `.venv` keeps it.
+  - Why not a `.venv` symlink to the main env: uv and pip follow it, so a `uv sync` in the worktree would write
+    into the main tree's environment. Why not env hints only: an agent's shell does not keep exported variables
+    between commands, so every command would need them; a `.venv` is what the worker's tools already look for.
+  - Checks: `verify --wi` treats the shared form as no own environment: `shared-venv` (main env activated,
+    `UV_NO_SYNC=1`, worktree code first) while the locks match; once the worker changed `uv.lock`, `rebuild`
+    replaces the shared form with the worktree's own `.venv` (`rm -rf` of it in the checks job, before
+    `env_rebuild`). The shared form is stale when its main env is stale or gone or the worktree moved; `verify`
+    refuses it with the `worktree repair` hint, and `worktree repair --wi`/`--all` provisions it again (shared
+    when the locks match and the main env is usable, else `env_rebuild`), recorded with `env_mode`.
+  - **No environment (release 47).** A module or project target with `env_rebuild` whose checks would run in
+    its main tree without a `.venv` (no worktree) is refused: `worktree env missing: run worktree repair`,
+    nothing recorded, instead of running a bare python.
+  - Trade-off as for `--module` shared-venv: the worktree sees the main env live; a dependency change in the
+    main tree reaches it, and package metadata reports the main tree's install.
 - The synchronous `verify --wi` stays for the local runner and small checks. Never run verify in the background.
 
 ## One array per step: `--each`, `--after`, `--resubmit-failed` (release 26; release 46: package labels)

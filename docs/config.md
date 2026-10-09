@@ -42,6 +42,8 @@ Tests prove the mechanism with the neutral example package `tests/fixtures/examp
 | `session.runtime` | `claude-code` | the session runtime the session job starts (`site session plan` and `start`); an unknown name is refused, listing the available ones |
 | `session.handoff` | `state/memory/handoff.md` | the desk's handoff file (relative: under the site) that `day close` requires to exist and to be newer than today's start |
 | `modules[].id`, `path`, `source`, `rev`, `branch`, `env_rebuild` | written by `site link-module` | the site's modules |
+| `env.rebuild` | unset | the site-wide `env_rebuild` for a module or project entry without its own |
+| `env.rebuild_timeout` | `900` | seconds the `env_rebuild` that `dispatch brief` (and `worktree repair` re-provisioning a worktree) runs for a new WI worktree may take; on timeout the brief is refused with the `worktree repair` hint (release 47; docs/slurm.md "Worktree environment at dispatch") |
 | `modules[].root_env`, `modules[].rev_env` | unset | names a `--module` job exports the pinned tree and revision under |
 | `modules[].cli` | the id | the command word that selects this entry for `slurm submit --via` |
 | `modules[].submit` | `{}` | `{record_arg, log_arg, after_arg, items_arg}`: the options of the module's own submit command the harness may add (docs/slurm.md "via") |
