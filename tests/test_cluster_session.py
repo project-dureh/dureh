@@ -121,13 +121,13 @@ class ClusterSession(SiteCase):
         self.assertEqual(rt.launch_command(self.s, "overtime", rt.first_prompt(self.s, "overtime")),
                          ["claude", "--remote-control", "site", "--permission-mode", "auto", "Tester, 추가근무 출근"])
         self.config(session={"command": ["/opt/bin/claude", "--verbose"],
-                             "options": {"model": "opus", "remote_control": "camri-{purpose}"},
+                             "options": {"model": "opus", "remote_control": "exmod-{purpose}"},
                              "flags": {"model": "--model"}, "prompts": {"desk": "{name}, 출근 ({site})", "overtime": False}})
         rt = sessions.get(self.s)
         self.assertEqual(rt.first_prompt(self.s, "desk"), "Tester, 출근 (site)")
         self.assertIsNone(rt.first_prompt(self.s, "overtime"))
         self.assertEqual(rt.launch_command(self.s, "desk", rt.first_prompt(self.s, "desk")),
-                         ["/opt/bin/claude", "--verbose", "--remote-control", "camri-desk", "--permission-mode", "auto",
+                         ["/opt/bin/claude", "--verbose", "--remote-control", "exmod-desk", "--permission-mode", "auto",
                           "--model", "opus", "Tester, 출근 (site)"])
         self.assertTrue(any("not on PATH" in p for p in rt.check(self.s)))
         self.config(session={"options": {"effort": "high"}})
@@ -196,9 +196,9 @@ class ClusterSession(SiteCase):
         logs = self.site_root / "logs" / "session"
         self.assertEqual(sessions.close_marker(self.s, "4711"), logs / "cc-site-4711.close")
         self.assertEqual(sessions.close_marker(self.s, "4712", "overtime"), logs / "cc-site-overtime-4712.close")
-        self.config(session={"name": "camri"})
-        self.assertEqual(sessions.close_marker(self.s, "4711"), logs / "cc-camri-4711.close")
-        self.assertIn("NAME=cc-camri-\"${SLURM_JOB_ID:-local}\"", sessions.plan(self.s))
+        self.config(session={"name": "exmod"})
+        self.assertEqual(sessions.close_marker(self.s, "4711"), logs / "cc-exmod-4711.close")
+        self.assertIn("NAME=cc-exmod-\"${SLURM_JOB_ID:-local}\"", sessions.plan(self.s))
 
     @unittest.skipUnless(shutil.which("tmux"), "tmux is not on this machine")
     def test_hold_loop_ends_a_real_tmux_session_on_the_close_marker(self):
@@ -274,7 +274,7 @@ class ClusterSession(SiteCase):
         self.assertEqual(self.cmd_argv(out)[-1], "O'Brien \"Z\" $USER, 추가근무 출근")
 
     def test_overtime_first_prompt_without_a_persona_name(self):
-        for data in ({"lab": "CAMRI"}, {"name": "  "}, None):
+        for data in ({"lab": "EXMOD"}, {"name": "  "}, None):
             self.persona(data)
             self.assertEqual(self.cmd_argv(sessions.plan(self.s, "overtime"))[-1], "데스크, 추가근무 출근", data)
         (self.site_root / "state" / "persona" / "persona.json").write_text("{not json")

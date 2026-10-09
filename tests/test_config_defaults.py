@@ -1,6 +1,7 @@
-"""UP-0069: company values (manifest name, pipeline version key, derivative naming, container cache variable) are
-config keys with generic harness defaults; a startup package seeds its own through `config_defaults` in startup.yaml,
-merged at install below the preset and added to an existing site's config.json by `adapter sync` (missing keys only)."""
+"""UP-0069: company values (manifest name, container cache variable, module submit options) are config keys with
+generic harness defaults; a startup package seeds its own through `config_defaults` in startup.yaml, merged at install
+below the preset and added to an existing site's config.json by `adapter sync` (missing keys only; release 46: read
+from the installed package, which `adapter sync` re-copies from the committed source first)."""
 import json
 import os
 from pathlib import Path
@@ -10,17 +11,14 @@ from dureh_core.site import CONTAINER_DEFAULTS, PROJECT_DEFAULTS
 from dureh_core.util import DurehError
 from tests.helpers import SiteCase
 
-# the block a company's startup package needs (proposals/module-submit-contract.md (b))
-CAMRI_DEFAULTS = """config_defaults:
+# the kind of block a package needs (proposals/module-submit-contract.md (b)), with neutral names
+EXAMPLE_DEFAULTS = """config_defaults:
   project:
-    manifest: camri-manifest.yaml
-    pipeline_version_key: camri_version
-    derivative_entry: "{family}_camri_{species}_{suffix}"
+    manifest: example-manifest.yaml
   containers:
-    cache_env: CAMRI_CONTAINER_CACHE
-    manifest_globs: ["*manifest*.yaml", "*manifest*.yml", "*manifest*.json"]
+    cache_env: EXAMPLE_IMAGE_CACHE
   modules:
-    - id: camri
+    - id: exmod
       submit:
         record_arg: --submission-record
         log_arg: --log-dir
@@ -30,7 +28,7 @@ CAMRI_DEFAULTS = """config_defaults:
 
 
 class ConfigDefaults(SiteCase):
-    def package_defaults(self, block=CAMRI_DEFAULTS):
+    def package_defaults(self, block=EXAMPLE_DEFAULTS):
         m = self.package / "startup.yaml"
         m.write_text(m.read_text() + block)
 
@@ -41,38 +39,34 @@ class ConfigDefaults(SiteCase):
         self.install()
         s = self.site()
         self.assertEqual(s.project_manifest(), "manifest.yaml")
-        self.assertEqual(s.project_setting("pipeline_version_key"), "version")
-        self.assertEqual(s.project_setting("derivative_entry"), "{family}_{species}_{suffix}")
         self.assertEqual(containers.cache_env(s), "DUREH_CONTAINER_CACHE")
-        self.assertEqual(containers.manifest_globs(s), ["manifest.yaml", "*manifest*.yaml", "*manifest*.yml", "*manifest*.json"])
         self.assertNotIn("project", self.cfg())
         os.environ["DUREH_CONTAINER_CACHE"] = str(self.tmp / "cc")
         self.assertEqual(containers.cache_dir(s), self.tmp / "cc")
-        os.environ["CAMRI_CONTAINER_CACHE"] = str(self.tmp / "other")
-        self.assertEqual(containers.cache_dir(s), self.tmp / "cc", "a company's variable is not read unless configured")
+        os.environ["EXAMPLE_IMAGE_CACHE"] = str(self.tmp / "other")
+        self.assertEqual(containers.cache_dir(s), self.tmp / "cc", "a package's variable is not read unless configured")
         for key in PROJECT_DEFAULTS:
             self.assertIsNotNone(s.project_setting(key))
-        self.assertEqual(set(CONTAINER_DEFAULTS), {"cache_env", "manifest_globs"})
+        self.assertEqual(set(PROJECT_DEFAULTS), {"manifest"}, "release 46: no data-flow keys")
+        self.assertEqual(set(CONTAINER_DEFAULTS), {"cache_env"}, "release 46: no image pinning keys")
 
     def test_install_merges_config_defaults_below_the_preset(self):
         self.package_defaults()
         self.install(containers={"module": "", "cache": "images"})
         c = self.cfg()
-        self.assertEqual(c["project"], {"manifest": "camri-manifest.yaml", "pipeline_version_key": "camri_version",
-                                        "derivative_entry": "{family}_camri_{species}_{suffix}"})
-        self.assertEqual(c["containers"], {"module": "", "cache": "images", "cache_env": "CAMRI_CONTAINER_CACHE",
-                                           "manifest_globs": ["*manifest*.yaml", "*manifest*.yml", "*manifest*.json"]},
+        self.assertEqual(c["project"], {"manifest": "example-manifest.yaml"})
+        self.assertEqual(c["containers"], {"module": "", "cache": "images", "cache_env": "EXAMPLE_IMAGE_CACHE"},
                          "the preset's keys win; the package adds the ones it lacks")
-        self.assertEqual(c["modules"], [{"id": "camri", "submit": {"record_arg": "--submission-record", "log_arg": "--log-dir",
+        self.assertEqual(c["modules"], [{"id": "exmod", "submit": {"record_arg": "--submission-record", "log_arg": "--log-dir",
                                                                    "after_arg": "--after", "items_arg": "--items"}}])
         self.assertEqual(c["slurm"], {"account": "acct-x", "partition": "general", "each_level": "any",
-                                      "external_jobs": False},
-                         "untouched keys as before (each_level any and external_jobs false are the test preset's)")
+                                      "external_jobs": False, "watch": "on-demand"},
+                         "untouched keys as before (each_level any and external_jobs false are the test preset's; "
+                         "release 46: a new site watches jobs on demand)")
         s = self.site()
-        self.assertEqual(s.project_manifest(), "camri-manifest.yaml")
-        self.assertEqual(containers.manifest_globs(s), ["camri-manifest.yaml", "*manifest*.yaml", "*manifest*.yml", "*manifest*.json"])
+        self.assertEqual(s.project_manifest(), "example-manifest.yaml")
         os.environ.pop("DUREH_CONTAINER_CACHE", None)
-        os.environ["CAMRI_CONTAINER_CACHE"] = str(self.tmp / "cc")
+        os.environ["EXAMPLE_IMAGE_CACHE"] = str(self.tmp / "cc")
         self.assertEqual(containers.cache_dir(s), self.site_root / "images", "containers.cache wins over the variable")
         c["containers"].pop("cache")
         (self.site_root / "config.json").write_text(json.dumps(c))
@@ -84,22 +78,22 @@ class ConfigDefaults(SiteCase):
         from dureh_core.sitelinks import _config_add
 
         s = self.site()
-        _config_add(s, "modules", {"id": "camri", "path": "modules/camri", "source": "/src/camri", "rev": "a" * 40})
-        entry = [m for m in self.cfg()["modules"] if m["id"] == "camri"]
+        _config_add(s, "modules", {"id": "exmod", "path": "modules/exmod", "source": "/src/exmod", "rev": "a" * 40})
+        entry = [m for m in self.cfg()["modules"] if m["id"] == "exmod"]
         self.assertEqual(len(entry), 1)
-        self.assertEqual((entry[0]["path"], entry[0]["submit"]["items_arg"]), ("modules/camri", "--items"))
+        self.assertEqual((entry[0]["path"], entry[0]["submit"]["items_arg"]), ("modules/exmod", "--items"))
 
     def test_adapter_sync_adds_missing_keys_once_and_keeps_values(self):
         self.install(project={"manifest": "my-manifest.yaml"})
         self.package_defaults()  # the package source gains config_defaults after the site was installed
         s = self.site()
-        added = install.apply_config_defaults(s)
-        self.assertEqual(added, ["project.pipeline_version_key", "project.derivative_entry", "containers",
-                                 "modules[camri]"])
+        self.assertEqual(install.apply_config_defaults(s), [], "only the installed package is read, not the source")
+        install.sync_package(s)  # `adapter sync` re-copies the package first
+        added = install.apply_config_defaults(self.site())
+        self.assertEqual(added, ["containers", "modules[exmod]"])
         c = self.cfg()
         self.assertEqual(c["project"]["manifest"], "my-manifest.yaml", "the site's value stands")
-        self.assertEqual(c["project"]["pipeline_version_key"], "camri_version")
-        self.assertEqual(c["containers"]["cache_env"], "CAMRI_CONTAINER_CACHE")
+        self.assertEqual(c["containers"]["cache_env"], "EXAMPLE_IMAGE_CACHE")
         self.assertEqual(install.apply_config_defaults(self.site()), [], "nothing to add the second time")
         from dureh_core.cli import main
         import contextlib, io
@@ -142,7 +136,7 @@ class ProjectManifestKey(SiteCase):
         self.proj = self.site_root / "projects" / "lna"
         self.proj.mkdir(parents=True)
         (self.proj / "manifest.yaml").write_text("provenance:\n  tool_versions:\n    demo: \"1.0+abc1234\"\n")
-        (self.proj / "camri-manifest.yaml").write_text("provenance:\n  tool_versions:\n    demo: \"1.0+def5678\"\n")
+        (self.proj / "example-manifest.yaml").write_text("provenance:\n  tool_versions:\n    demo: \"1.0+def5678\"\n")
 
     def with_project(self, **project):
         cfg = json.loads((self.site_root / "config.json").read_text())
@@ -152,38 +146,11 @@ class ProjectManifestKey(SiteCase):
 
     def test_pin_follows_the_configured_name(self):
         self.assertEqual(exectree.manifest_pin(self.site(), "projects/lna", "demo"), ("abc1234", "projects/lna/manifest.yaml"))
-        s = self.with_project(manifest="camri-manifest.yaml")
-        self.assertEqual(exectree.manifest_pin(s, "projects/lna", "demo"), ("def5678", "projects/lna/camri-manifest.yaml"))
+        s = self.with_project(manifest="example-manifest.yaml")
+        self.assertEqual(exectree.manifest_pin(s, "projects/lna", "demo"), ("def5678", "projects/lna/example-manifest.yaml"))
         s = self.with_project(manifest=None)
         self.assertEqual(exectree.manifest_pin(s, "projects/lna", "demo"), (None, None))
         self.assertIsNone(s.project_manifest())
         mod = self.make_module("demo")
         with self.assertRaisesRegex(DurehError, "project.manifest is unset.*pass --rev"):
             exectree.prepare(s, "WI-0001", "projects/lna", "demo", None, Path(mod / "tests" / "test_demo.py"), dry_run=True)
-
-    def test_projectgen_uses_the_configured_keys(self):
-        from dureh_core import projectgen as pg
-
-        self.assertEqual(pg._derivative_entry("{family}_{species}_{suffix}", {"family": "f", "species": "rat", "suffix": "bold"}),
-                         "f_rat_bold")
-        self.assertEqual(pg._derivative_entry("{family}_camri_{species}_{suffix}", {"family": "f", "species": "rat", "suffix": "bold"}),
-                         "f_camri_rat_bold")
-        self.assertEqual(pg._derivative_entry("{family}_{nope}", {"family": "f"}), "f_?", "an unknown field never crashes")
-        self.assertIsNone(pg._derivative_entry("", {}))
-        s = self.with_project(manifest=None)
-        self.assertEqual(pg._manifest(s, self.proj), {}, "feature off: no manifest is read")
-        s = self.with_project()  # back to the harness default
-        self.assertEqual(pg._manifest(s, self.proj)["provenance"]["tool_versions"]["demo"], "1.0+abc1234")
-
-    def test_container_manifest_globs_are_config(self):
-        cfg = json.loads((self.site_root / "config.json").read_text())
-        cfg["containers"] = {"manifest_globs": ["pins.json"]}
-        cfg["project"] = {"manifest": "camri-manifest.yaml"}
-        (self.site_root / "config.json").write_text(json.dumps(cfg))
-        self.assertEqual(containers.manifest_globs(self.site()), ["camri-manifest.yaml", "pins.json"])
-        (self.proj / "pins.json").write_text("{}")
-        self.assertEqual([p.name for p in containers._manifests(self.site())], ["camri-manifest.yaml", "pins.json"])
-        cfg["containers"] = {"manifest_globs": "x"}
-        (self.site_root / "config.json").write_text(json.dumps(cfg))
-        with self.assertRaisesRegex(DurehError, "manifest_globs must be a list"):
-            containers.manifest_globs(self.site())

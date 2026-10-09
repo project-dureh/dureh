@@ -10,7 +10,7 @@ from dureh_core import ops
 from dureh_core import workflow as wf
 from dureh_core.records import Ledger
 from dureh_core.util import DurehError
-from tests.helpers import SiteCase
+from tests.helpers import SiteCase, add_runner_roles
 
 
 def _git(cwd, *args):
@@ -20,26 +20,23 @@ def _git(cwd, *args):
 class ModuleExec(SiteCase):
     def setUp(self):
         super().setUp()
-        manifest = self.package / "startup.yaml"
-        manifest.write_text(manifest.read_text()
-                            .replace("managers: [pm-modules]", "managers: [pm-modules, pm-projects]")
-                            .replace("workers: [py-writer,", "workers: [data-steward, pipeline-runner, py-writer,"))
+        add_runner_roles(self.package)
         self.install()
         self.fake = self.tmp / "fakebin"
         self.fake.mkdir()
         (self.fake / "sbatch").write_text("#!/bin/sh\necho \"$@\" >> \"$(dirname \"$0\")/sbatch.args\"\n"
                                           "echo 4242\n")
         (self.fake / "sbatch").chmod(0o755)
-        self.mod = self.site_root / "modules" / "camri"
-        (self.mod / "src" / "camri").mkdir(parents=True)
-        (self.mod / "src" / "camri" / "__init__.py").write_text("V = 1\n")
-        (self.mod / "pyproject.toml").write_text('[project]\nname = "camri"\nversion = "2.0.0a1"\n')
+        self.mod = self.site_root / "modules" / "exmod"
+        (self.mod / "src" / "exmod").mkdir(parents=True)
+        (self.mod / "src" / "exmod" / "__init__.py").write_text("V = 1\n")
+        (self.mod / "pyproject.toml").write_text('[project]\nname = "exmod"\nversion = "2.0.0a1"\n')
         (self.mod / "uv.lock").write_text("version = 1\n# lock A\n")
         _git(self.mod, "init", "-q", "-b", "main")
         _git(self.mod, "add", "-A")
         _git(self.mod, "commit", "-q", "-m", "a")
         self.rev_a = _git(self.mod, "rev-parse", "HEAD")
-        (self.mod / "src" / "camri" / "__init__.py").write_text("V = 2\n")
+        (self.mod / "src" / "exmod" / "__init__.py").write_text("V = 2\n")
         _git(self.mod, "commit", "-qam", "b")
         self.rev_b = _git(self.mod, "rev-parse", "HEAD")
         (self.mod / ".venv" / "bin").mkdir(parents=True)
@@ -49,49 +46,49 @@ class ModuleExec(SiteCase):
         _git(self.proj, "init", "-q", "-b", "main")
         _git(self.proj, "add", "-A")
         _git(self.proj, "commit", "-q", "-m", "m")
-        self.config(root_env="CAMRI_PROJECT")
+        self.config(root_env="EXMOD_PROJECT")
         self.s = self.site()
         self.led = Ledger(self.s)
-        b = wf.wi_new(self.s, "desk", "Bundle", "g", "pm-projects", "projects/lna", ["ok"])["id"]
+        b = wf.wi_new(self.s, "desk", "Bundle", "g", "coordinator", "projects/lna", ["ok"])["id"]
         wf.wi_approve(self.s, "desk", b, "ok")
-        self.led.event("wi.dispatched", "desk", b, {"role": "pm-projects", "brief": "0" * 16, "by": "desk"})
-        self.w = wf.wi_new(self.s, "desk", "Run", "g", "pipeline-runner", "projects/lna", ["ok"], parent=b)["id"]
+        self.led.event("wi.dispatched", "desk", b, {"role": "coordinator", "brief": "0" * 16, "by": "desk"})
+        self.w = wf.wi_new(self.s, "desk", "Run", "g", "runner", "projects/lna", ["ok"], parent=b)["id"]
         wf.wi_approve(self.s, "desk", self.w, "ok")
-        self.led.event("wi.dispatched", "desk", self.w, {"role": "pipeline-runner", "brief": "0" * 16, "by": "desk"})
+        self.led.event("wi.dispatched", "desk", self.w, {"role": "runner", "brief": "0" * 16, "by": "desk"})
         self.script = self.proj / "checkpoints" / "run.sh"
         self.script.parent.mkdir()
         self.script.write_text("#!/bin/bash\n#SBATCH --time=00:10:00\n#SBATCH --mem=1G\n"
-                               "echo \"ROOT=$DUREH_MODULE_ROOT REV=$DUREH_MODULE_REV CP=$CAMRI_PROJECT PP=$PYTHONPATH\"\n"
+                               "echo \"ROOT=$DUREH_MODULE_ROOT REV=$DUREH_MODULE_REV CP=$EXMOD_PROJECT PP=$PYTHONPATH\"\n"
                                "touch \"$DUREH_MODULE_ROOT/x\" 2>/dev/null && echo WRITABLE || echo READONLY\n")
 
     def pin(self, value):
-        (self.proj / "camri-manifest.yaml").write_text(
+        (self.proj / "exmod-manifest.yaml").write_text(
             "project:\n  name: lna\nprovenance:\n  tool_versions:\n    brkraw: null\n"
-            f"    camri: \"2.0.0a1+{value}\"   # pinned\n")
+            f"    exmod: \"2.0.0a1+{value}\"   # pinned\n")
 
     def config(self, **entry):
         cfg = json.loads((self.site_root / "config.json").read_text())
         cfg["env"] = {"path_prepend": [str(self.fake)]}
         cfg["containers"] = {"module": ""}
-        cfg["project"] = {"manifest": "camri-manifest.yaml"}  # UP-0069: the manifest name is config, not code
-        cfg["modules"] = [{"id": "camri", "path": "modules/camri", "env_rebuild": "echo REBUILD-RAN", **entry}]
+        cfg["project"] = {"manifest": "exmod-manifest.yaml"}  # UP-0069: the manifest name is config, not code
+        cfg["modules"] = [{"id": "exmod", "path": "modules/exmod", "env_rebuild": "echo REBUILD-RAN", **entry}]
         (self.site_root / "config.json").write_text(json.dumps(cfg))
         self.s = self.site()
 
     def submit(self, **kw):
-        return ops.slurm_submit(self.s, "pipeline-runner", self.w, str(self.script), module="camri", **kw)
+        return ops.slurm_submit(self.s, "runner", self.w, str(self.script), module="exmod", **kw)
 
     def test_default_rev_from_manifest_and_read_only_tree(self):
         run = self.submit()
         m = run["payload"]["module"]
-        self.assertEqual(m["name"], "camri")
+        self.assertEqual(m["name"], "exmod")
         self.assertEqual(m["rev"], self.rev_a)
         self.assertFalse(m["rev_override"])
         self.assertEqual(m["env_mode"], "shared-venv")
         tree = Path(m["tree"])
         self.assertEqual(tree.parent, self.site_root / "scratch" / "exec")
-        self.assertTrue(tree.name.startswith(f"{self.w}-camri-{self.rev_a[:7]}-"))
-        self.assertEqual((tree / "src" / "camri" / "__init__.py").read_text(), "V = 1\n")
+        self.assertTrue(tree.name.startswith(f"{self.w}-exmod-{self.rev_a[:7]}-"))
+        self.assertEqual((tree / "src" / "exmod" / "__init__.py").read_text(), "V = 1\n")
         for root, dirs, files in os.walk(tree):
             for n in dirs + files + ["."]:
                 self.assertFalse(os.stat(os.path.join(root, n)).st_mode & (stat.S_IWUSR | stat.S_IWGRP | stat.S_IWOTH))
@@ -105,8 +102,8 @@ class ModuleExec(SiteCase):
         # Director 2026-10-04: a configured root_env replaces the DUREH_* names; no rev_env, no rev export
         self.assertNotIn("DUREH_MODULE_ROOT=", text)
         self.assertNotIn("DUREH_MODULE_REV=", text)
-        self.assertIn(f"export CAMRI_PROJECT={tree}", text)
-        self.assertEqual(m["env"], {"root": "CAMRI_PROJECT", "rev": None})
+        self.assertIn(f"export EXMOD_PROJECT={tree}", text)
+        self.assertEqual(m["env"], {"root": "EXMOD_PROJECT", "rev": None})
         self.assertIn(f"export VIRTUAL_ENV={self.mod / '.venv'}", text)
         self.assertIn(f"export PYTHONPATH={tree / 'src'}", text)
         self.assertIn("trap _dureh_exec_cleanup EXIT", text)
@@ -122,12 +119,12 @@ class ModuleExec(SiteCase):
         self.assertFalse(same["payload"]["module"]["rev_override"])
         with self.assertRaisesRegex(DurehError, "does not resolve"):
             self.submit(rev="deadbeef")
-        (self.proj / "camri-manifest.yaml").write_text("project:\n  name: lna\n")
-        with self.assertRaisesRegex(DurehError, "no usable provenance.tool_versions.camri.*--rev"):
+        (self.proj / "exmod-manifest.yaml").write_text("project:\n  name: lna\n")
+        with self.assertRaisesRegex(DurehError, "no usable provenance.tool_versions.exmod.*--rev"):
             self.submit()
         self.assertEqual(self.submit(rev="main")["payload"]["module"]["rev"], self.rev_b)
         with self.assertRaisesRegex(DurehError, "--rev needs --module"):
-            ops.slurm_submit(self.s, "pipeline-runner", self.w, str(self.script), rev="main")
+            ops.slurm_submit(self.s, "runner", self.w, str(self.script), rev="main")
 
     def test_rebuild_when_lock_differs(self):
         (self.mod / "uv.lock").write_text("version = 1\n# lock B\n")
@@ -159,7 +156,7 @@ class ModuleExec(SiteCase):
         run = self.submit()
         tree = Path(run["payload"]["module"]["tree"])
         env = {k: v for k, v in os.environ.items() if not k.startswith("BASH_FUNC_")}
-        env.pop("CAMRI_PROJECT", None)
+        env.pop("EXMOD_PROJECT", None)
         p = subprocess.run(["bash", run["payload"]["wrapper"]], capture_output=True, text=True, env=env)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn(f"ROOT= REV= CP={tree} PP={tree / 'src'}", p.stdout)
@@ -167,8 +164,8 @@ class ModuleExec(SiteCase):
         self.assertFalse(tree.exists(), "the EXIT trap removes the tree")
 
     def test_live_root_assignment_warns_and_no_root_env_warns(self):
-        self.script.write_text("#!/bin/bash\nCAMRI_PROJECT=\"$DUREH_SITE/modules/camri\"\n"
-                               f"export OTHER={self.site_root}/modules/camri\necho hi\n")
+        self.script.write_text("#!/bin/bash\nEXMOD_PROJECT=\"$DUREH_SITE/modules/exmod\"\n"
+                               f"export OTHER={self.site_root}/modules/exmod\necho hi\n")
         run = self.submit()
         warns = run["payload"]["warnings"]
         self.assertTrue(any("line 2" in w and "overrides the pinned tree" in w for w in warns), warns)
@@ -178,11 +175,11 @@ class ModuleExec(SiteCase):
         self.script.write_text("#!/bin/bash\necho hi\n")
         run = self.submit()
         text = Path(run["payload"]["wrapper"]).read_text()
-        self.assertNotIn("CAMRI_PROJECT", text)
+        self.assertNotIn("EXMOD_PROJECT", text)
         self.assertTrue(any("no root_env" in w for w in run["payload"]["warnings"]))
 
     def test_without_module_unchanged(self):
-        run = ops.slurm_submit(self.s, "pipeline-runner", self.w, str(self.script))
+        run = ops.slurm_submit(self.s, "runner", self.w, str(self.script))
         self.assertNotIn("module", run["payload"])
         self.assertNotIn("wrapper", run["payload"])
         self.assertEqual(run["payload"]["command"][-1], str(self.script))
@@ -198,7 +195,7 @@ class ModuleExec(SiteCase):
         run = self.submit()
         tree = Path(run["payload"]["module"]["tree"])
         (Path(f"{tree}.venv") / "bin").mkdir(parents=True)
-        other = self.site_root / "scratch" / "exec" / "WI-9999-camri-abcdef0-x"
+        other = self.site_root / "scratch" / "exec" / "WI-9999-exmod-abcdef0-x"
         other.mkdir()
         wf.dispatch_stop(self.s, "desk", self.w, "test")
         out = wf.purge(self.s, "desk", self.w)
@@ -210,7 +207,7 @@ class ModuleExec(SiteCase):
 
     def test_each_array_shares_the_tree_until_every_task_ended(self):
         # release 26: array tasks share one pinned tree; no task removes it, `slurm wait|status` does at the end
-        self.script.write_text("#!/bin/bash\necho \"ITEM=$DUREH_ITER IDX=$DUREH_ITER_INDEX ROOT=$CAMRI_PROJECT\"\n")
+        self.script.write_text("#!/bin/bash\necho \"ITEM=$DUREH_ITER IDX=$DUREH_ITER_INDEX ROOT=$EXMOD_PROJECT\"\n")
         run = self.submit(each="sub-01,sub-02")
         tree = Path(run["payload"]["module"]["tree"])
         self.assertIn("--array=0-1", " ".join(run["payload"]["command"]))
@@ -224,10 +221,10 @@ class ModuleExec(SiteCase):
         (Path(f"{tree}.venv-0") / "bin").mkdir(parents=True)  # a rebuilt per-task env left by a killed task
         (self.fake / "sacct").write_text("#!/bin/sh\necho '4242_0|RUNNING|0:0'\necho '4242_1|COMPLETED|0:0'\n")
         (self.fake / "sacct").chmod(0o755)
-        ops.slurm_status(self.s, "pipeline-runner", run["id"])
+        ops.slurm_status(self.s, "runner", run["id"])
         self.assertTrue(tree.is_dir())
         (self.fake / "sacct").write_text("#!/bin/sh\necho '4242_0|COMPLETED|0:0'\necho '4242_1|COMPLETED|0:0'\n")
-        ev = ops.slurm_wait(self.s, "pipeline-runner", run["id"], timeout=5, interval=1)
+        ev = ops.slurm_wait(self.s, "runner", run["id"], timeout=5, interval=1)
         self.assertEqual(ev["payload"]["scheduler_state"], "COMPLETED")
         self.assertFalse(tree.exists() or Path(f"{tree}.venv-0").exists() or Path(run["payload"]["wrapper"]).exists())
 
@@ -243,16 +240,16 @@ class ModuleExec(SiteCase):
         run = self.submit(each="a,b", rev=self.rev_b)
         (self.fake / "sacct").write_text("#!/bin/sh\necho '4242_0|COMPLETED|0:0'\necho '4242_1|FAILED|1:0'\n")
         (self.fake / "sacct").chmod(0o755)
-        again = ops.slurm_resubmit_failed(self.s, "pipeline-runner", run["id"])
+        again = ops.slurm_resubmit_failed(self.s, "runner", run["id"])
         self.assertEqual(again["payload"]["module"]["rev"], self.rev_b)
         self.assertEqual(again["payload"]["array"]["items"], ["b"])
 
     def test_configured_rev_env_and_fallback_names(self):
-        self.config(root_env="CAMRI_PROJECT", rev_env="CAMRI_REV")
-        self.script.write_text("#!/bin/bash\necho \"CP=$CAMRI_PROJECT CR=$CAMRI_REV DR=$DUREH_MODULE_ROOT\"\n")
+        self.config(root_env="EXMOD_PROJECT", rev_env="EXMOD_REV")
+        self.script.write_text("#!/bin/bash\necho \"CP=$EXMOD_PROJECT CR=$EXMOD_REV DR=$DUREH_MODULE_ROOT\"\n")
         run = self.submit()
         tree = Path(run["payload"]["module"]["tree"])
-        self.assertEqual(run["payload"]["module"]["env"], {"root": "CAMRI_PROJECT", "rev": "CAMRI_REV"})
+        self.assertEqual(run["payload"]["module"]["env"], {"root": "EXMOD_PROJECT", "rev": "EXMOD_REV"})
         env = {k: v for k, v in os.environ.items() if not k.startswith("BASH_FUNC_")}
         env.pop("DUREH_MODULE_ROOT", None)
         p = subprocess.run(["bash", run["payload"]["wrapper"]], capture_output=True, text=True, env=env)
@@ -263,9 +260,9 @@ class ModuleExec(SiteCase):
         self.assertEqual(run["payload"]["module"]["env"], {"root": "DUREH_MODULE_ROOT", "rev": "DUREH_MODULE_REV"})
         self.assertIn("export DUREH_MODULE_ROOT=", text)
         self.assertIn(f"export DUREH_MODULE_REV={self.rev_a}", text)
-        self.config(rev_env="CAMRI_REV")
+        self.config(rev_env="EXMOD_REV")
         with self.assertRaisesRegex(DurehError, "rev_env needs root_env"):
             self.submit()
-        self.config(root_env="CAMRI_PROJECT", rev_env="bad name")
+        self.config(root_env="EXMOD_PROJECT", rev_env="bad name")
         with self.assertRaisesRegex(DurehError, "rev_env is not a variable name"):
             self.submit()

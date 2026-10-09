@@ -45,7 +45,7 @@ class ScanGuard(SiteCase):
         self.assertIsNone(scan_roots("cat", ["cat", "/etc/hosts"]))
 
     def test_whole_filesystem_scans_are_refused_with_a_hint(self):
-        for c in ("find / -name '*.nii.gz'", "find /work -name x", "find /nas -type d", "find /proj -maxdepth 2",
+        for c in ("find / -name '*.dat'", "find /work -name x", "find /nas -type d", "find /proj -maxdepth 2",
                   "find /home -name x", "find /users -name x", "grep -r foo /work", "grep -rn foo /",
                   "rg foo /proj", "rg --files /nas", "du -sh /work", "ls -R /", "ls -laR /users", "tree /",
                   "tree -L 2 /home", "find ~ -name x", "find $HOME -name x", "find /work/users -name x",

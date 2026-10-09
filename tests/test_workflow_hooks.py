@@ -279,23 +279,23 @@ class Bundle(SiteCase):
 
 
 class ScratchIsolation(SiteCase):
-    def test_pipeline_runner_writes_only_untracked_scratch_in_git_project(self):
+    def test_scratch_role_writes_only_its_scope_in_git_project(self):
+        from helpers import add_runner_roles
+
+        add_runner_roles(self.package)
         self.install()
         proj = self.site_root / "projects" / "p1"
         proj.mkdir(parents=True)
         subprocess.run(["git", "init", "-q", str(proj)], check=True)
-        from dureh_core.org import Org
         from dureh_core.paths import write_decision
-        from helpers import HARNESS
-        # the fixture package does not enable pipeline-runner; check the rule on a full org
+
         s = self.site()
-        s._org = Org.load(HARNESS)
-        ok, _ = write_decision(s, "pipeline-runner", proj / "checkpoints" / "WI-0002" / "job.sh")
+        ok, _ = write_decision(s, "runner", proj / "checkpoints" / "WI-0002" / "job.sh")
         self.assertTrue(ok)
-        ok, _ = write_decision(s, "pipeline-runner", proj / "code" / "job.sh")
+        ok, _ = write_decision(s, "runner", proj / "code" / "job.sh")
         self.assertFalse(ok)
-        ok, _ = write_decision(s, "interpreter", proj / "checkpoints" / "x")
-        self.assertFalse(ok, "worktree roles do not write the main tree, even scratch")
+        ok, _ = write_decision(s, "py-writer", proj / "code" / "notebooks" / "x.py")
+        self.assertFalse(ok, "worktree roles do not write the main tree, even inside their scope")
 
 
 class BashGuard(SiteCase):

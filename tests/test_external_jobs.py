@@ -1,6 +1,7 @@
 """Release 45: `dureh status` lists the site user's scheduler jobs that no harness record owns ("External jobs"),
-and `day close` warns about them without refusing. Fake squeue only (never the real queue); the job ids below
-are made up."""
+and `day close` warns about them without refusing. Release 46: only names matching config `slurm.external_match`
+(an include list) are listed; empty or absent lists none; `slurm.external_ignore` is ignored with a warning. Fake
+squeue only (never the real queue); the job ids below are made up."""
 import json
 import os
 
@@ -18,7 +19,7 @@ class ExternalJobs(SiteCase):
         self.fake = self.tmp / "fakebin"
         self.fake.mkdir()
         self.squeue("")
-        self.config(external_jobs=True)
+        self.config(external_jobs=True, external_match=["*"])
         self.led = Ledger(self.s)
 
     def config(self, **slurm):
@@ -38,6 +39,7 @@ class ExternalJobs(SiteCase):
                                                         **extra})
 
     def test_lists_only_jobs_no_record_owns(self):
+        self.config(external_match=["*-WI-*", "manual-*", "framework-*", "x"])  # not the session jobs cc-*
         self.run_record("900001")
         self.run_record("900002", jobs=[{"job_id": "900003"}])
         self.led.event("session.started", "desk", None, {"job_id": "900004"})
@@ -51,11 +53,35 @@ class ExternalJobs(SiteCase):
         self.assertIn("External jobs (2, no harness record): 900006 manual-test RUNNING 0:12:01;"
                       " 900007_2 framework-step RUNNING 0:05", text)
 
-    def test_own_session_job_and_ignore_globs(self):
+    def test_own_session_job_and_match_list(self):
         os.environ["SLURM_JOB_ID"] = "900010"  # the session itself (a made-up id; SiteCase restores the env)
-        self.config(external_jobs=True, external_ignore=["keep-*"])
-        self.squeue("900010|whatever|RUNNING|1:00\n900011|keep-me|RUNNING|1:00\n900012|cc-x|RUNNING|1:00\n")
+        self.config(external_jobs=True, external_match=["frame-*", "x?"])
+        self.squeue("900010|frame-self|RUNNING|1:00\n900011|keep-me|RUNNING|1:00\n900012|frame-a|RUNNING|1:00\n"
+                    "900013|xy|RUNNING|1:00\n900014|cc-x|RUNNING|1:00\n")
+        self.assertEqual([j["job_id"] for j in ops.external_jobs(self.s)["jobs"]], ["900012", "900013"])
+        self.config(external_match="frame-*")  # one pattern as a string
         self.assertEqual([j["job_id"] for j in ops.external_jobs(self.s)["jobs"]], ["900012"])
+
+    def test_empty_or_absent_match_lists_none_and_asks_nothing(self):
+        self.squeue("900040|anything|RUNNING|1:00\n")
+        for match in ([], None):
+            self.config(external_match=match)
+            (self.fake / "squeue.args").unlink(missing_ok=True)
+            self.assertIsNone(ops.external_jobs(self.s))
+            self.assertFalse((self.fake / "squeue.args").exists(), "squeue is not asked")
+        cfg = json.loads((self.site_root / "config.json").read_text())
+        cfg["slurm"].pop("external_match")
+        (self.site_root / "config.json").write_text(json.dumps(cfg))
+        self.assertIsNone(ops.external_jobs(self.site()))
+
+    def test_external_ignore_is_ignored_with_a_warning(self):
+        self.config(external_match=None, external_ignore=["keep-*"])
+        self.squeue("900050|other|RUNNING|1:00\n")
+        self.assertIsNone(ops.external_jobs(self.s), "the old key lists nothing by itself")
+        warn = [w for w in ops.config_warnings(self.s) if "external_ignore" in w]
+        self.assertEqual(len(warn), 1)
+        self.assertIn("slurm.external_match", warn[0])
+        self.assertIn("Warning: config slurm.external_ignore is ignored", render_status(status(self.s)))
 
     def test_limit_and_count(self):
         self.squeue("".join(f"9001{i:02d}|j{i}|PENDING|0:00\n" for i in range(15)))

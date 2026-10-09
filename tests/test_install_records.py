@@ -32,7 +32,7 @@ class Install(SiteCase):
         self.assertEqual(json.loads((root / "state" / "persona" / "persona.json").read_text())["name"], "Tester")
         self.assertTrue((root / "references" / "old-org").is_symlink())
         self.assertTrue((root / ".claude" / "agents" / "py-writer.md").is_file())
-        self.assertFalse((root / ".claude" / "agents" / "pm-projects.md").exists(), "roles not enabled by the package")
+        self.assertFalse((root / ".claude" / "agents" / "coordinator.md").exists(), "roles the package does not declare")
         self.assertEqual(r["work_items"], ["WI-0001"])
         self.assertEqual(r["selftest"]["result"], "pass", r["selftest"])
         log = subprocess.run(["git", "log", "--oneline"], cwd=root / "state", capture_output=True, text=True).stdout

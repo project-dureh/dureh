@@ -100,7 +100,7 @@ class BashFriction(SiteCase):
     def test_commit_message_from_a_quoted_heredoc(self):
         wt = self.site_root  # the check under test is the substitution, not the worktree rule
         cmd = (f"cd {wt} && git status --short && git commit -m \"$(cat <<'EOF'\n"
-               "camri: add step\n\nUses $(not run) and `backticks` literally.\nEOF\n)\"")
+               "exmod: add step\n\nUses $(not run) and `backticks` literally.\nEOF\n)\"")
         out = self.bash(cmd)  # a worker: other rules may still apply (worktree), the substitution no longer does
         self.assertNotIn("command substitution", str(out))
         self.assertIn("command substitution", str(self.bash("git commit -m \"$(date)\"")))

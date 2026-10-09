@@ -56,14 +56,14 @@ class DataladGuard(SiteCase):
     def test_writes_in_the_own_worktree_or_scratch(self):
         scratch = os.environ["TMPDIR"]
         for c in (f"datalad save -d {self.wa} -m x", f"cd {self.wa} && datalad save -m x", f"datalad -C {self.wa} save",
-                  f"datalad create -d {self.wa} {self.wa}/derivatives/x", f"datalad save --dataset={self.wa} -m x",
+                  f"datalad create -d {self.wa} {self.wa}/published/x", f"datalad save --dataset={self.wa} -m x",
                   f"datalad create {scratch}/ds", f"datalad get -d {self.wa} src"):
             self.assertFalse(denied(self.bash(c)), c)
 
     def test_writes_elsewhere_are_denied(self):
         for c in (f"datalad save -d {self.wb} -m x", f"cd {self.wb} && datalad save", f"datalad -C {self.wb} save",
                   f"datalad save --dataset={self.wb}", f"datalad save -d {self.mod}", f"datalad save -d {self.site_root}",
-                  f"datalad create {self.wb}/derivatives/y", f"datalad -C {self.wb} frobnicate"):
+                  f"datalad create {self.wb}/published/y", f"datalad -C {self.wb} frobnicate"):
             self.assertTrue(denied(self.bash(c)), c)
 
     def test_compute_deletion_and_push_are_refused_even_in_the_own_worktree(self):

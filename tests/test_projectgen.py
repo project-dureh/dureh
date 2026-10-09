@@ -1,87 +1,35 @@
-"""Site WI-0037/0038: generated project-local agent files and project CLAUDE.md."""
+"""Site WI-0037/0038, release 46 (O13): generated project guidance is a generic target scaffold: the package's
+project template plus a short generated block (work through the site, the gates, scheduler jobs, the project's
+protected paths), and agent files for the package roles marked `project: true`. No data-flow text."""
 import json
 import os
-import shutil
 import subprocess
 import unittest
 
-from helpers import SiteCase
+from helpers import ExampleSiteCase
 
 from dureh_core import projectgen as pg
-from dureh_core.records import Ledger
 from dureh_core.sitelinks import _config_add
 
-PROJECT_ROLES = {"data-steward", "pipeline-runner", "interpreter", "doc-writer", "checker"}
-MANIFEST = """schema_version: 1
-template_version: 0.2.0
-project:
-  id: lna
-  title: Rat LNA
-software:
-  camri: 2.0.0a1
-  container_digest: sha256:abc123
-datasets:
-  rawbids: rawbids
-  derivatives: [fmriprep_camri_rat_bold]
-containers:
-  - name: camri
-    digest: sha256:abc123
-external_links:
-  - path: sourcedata/atlases
-    target: /proj/atlases
-"""
-
-
-
-def manifest_v2(links=196):
-    rows = ([f"rawbids/sub-{i:03d}" for i in range(39)]
-            + [f"derivatives/brainmask_camri_rat_bold/sub-{i:03d}/func/m.nii.gz" for i in range(links - 40)]
-            + ["sourcedata/atlases/group-ica/melodic_IC.nii.gz"])
-    link_lines = "".join(f'  - {{path: "{r}", link_target: "/proj/lab/{r}", external: true, traversed: false, size_bytes: 10}}\n'
-                         for r in rows)
-    return ("schema_version: 2\nproject:\n  name: \"lna\"\n"
-            "execution:\n  mode: \"slurm\"\n  slurm:\n    account: \"rc_lab_pi\"\n    partition: \"general\"\n"
-            "source:\n  type: \"bids\"   # note\n  external_root: \"/proj/lab/lna\"\n  size_bytes: 17490933543\n"
-            "pipelines:\n  - family: \"fmriprep\"\n    species: \"rat\"\n    suffix: \"bold\"\n    axes: {}\n"
-            "    camri_version: null\n    workflows:\n      - name: \"fmriprep.brainmask-first\"\n        default: true\n"
-            "        role: \"production\"\n      - name: \"fmriprep.default\"\n        default: false\n        role: \"oracle-test\"\n"
-            "datalad:\n  subdatasets:\n    - path: \"rawbids\"\n      dataset_id: \"r\"\n"
-            "    - path: \"derivatives/brainmask_camri_rat_bold\"\n      dataset_id: \"b\"\n"
-            "    - path: \"derivatives/fmriprep_camri_rat_bold\"\n      dataset_id: \"f\"\n"
-            "provenance:\n  tool_versions:\n    brkraw: null\n    camri: \"2.0.0a0+68b4d2d\"\n    containers:\n"
-            "      - {name: \"afni\", digest: \"sha256:aaa\"}\n      - {name: \"camri\", digest: \"sha256:ccc\"}\n"
-            f"external_links:   # {len(rows)} entries\n{link_lines}")
+PROJECT_ROLES = {"runner", "publisher"}  # example-org marks them `project: true`
 
 
 def git(cwd, *args):
     return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True).stdout.strip()
 
 
-class ProjectGen(SiteCase):
+class ProjectGen(ExampleSiteCase):
     def setUp(self):
         super().setUp()
-        manifest = self.package / "startup.yaml"
-        manifest.write_text(manifest.read_text()
-                            .replace("managers: [pm-modules]", "managers: [pm-modules, pm-projects]")
-                            .replace("workers: [py-writer,",
-                                     "workers: [data-steward, pipeline-runner, interpreter, py-writer,"))
-        tpl = self.package / "templates" / "project"
-        tpl.mkdir(parents=True)
-        (tpl / "CLAUDE.md.template").write_text("# Project agent instructions (template {{template_version}})\n\nFixed text.\n")
         self.install()
         self.s = self.site()
-        self.proj = self.site_root / "projects" / "lna"
+        self.proj = self.site_root / "projects" / "p1"
         self.proj.mkdir(parents=True)
-        (self.proj / "camri-manifest.yaml").write_text(MANIFEST)
+        (self.proj / "manifest.yaml").write_text("schema_version: 1\npipelines: [{family: x}]\n")
         git(self.proj, "init", "-q", "-b", "main")
         git(self.proj, "add", "-A")
         git(self.proj, "commit", "-qm", "init")
-        _config_add(self.s, "projects", {"id": "lna", "path": "projects/lna"})
-        _config_add(self.s, "modules", {"id": "camri", "path": "modules/camri"})
-        cfg = json.loads((self.site_root / "config.json").read_text())
-        cfg["project"] = {"manifest": "camri-manifest.yaml", "pipeline_version_key": "camri_version",
-                          "derivative_entry": "{family}_camri_{species}_{suffix}"}  # UP-0069: company values are config
-        (self.site_root / "config.json").write_text(json.dumps(cfg))
+        _config_add(self.s, "projects", {"id": "p1", "path": "projects/p1"})
         self.s = self.site()
 
     def test_generates_agents_for_project_roles_and_commits(self):
@@ -89,15 +37,34 @@ class ProjectGen(SiteCase):
         self.assertTrue(r[0]["changed"])
         agents = {p.stem for p in (self.proj / ".claude" / "agents").glob("*.md")}
         self.assertEqual(agents, PROJECT_ROLES)
+        self.assertEqual(set(pg.project_roles(self.s)), PROJECT_ROLES)
         self.assertTrue((self.proj / "CLAUDE.md").is_file())
         self.assertTrue((self.proj / ".claude" / ".dureh-generated.json").is_file())
         self.assertEqual(git(self.proj, "status", "--porcelain"), "")
         self.assertIn("dureh", git(self.proj, "log", "-1", "--format=%s"))
 
+    def test_claude_md_is_the_template_plus_a_generic_block(self):
+        pg.generate_projects(self.s)
+        text = (self.proj / "CLAUDE.md").read_text()
+        self.assertTrue(text.startswith("# Project 1.0.0\n\nThis project belongs to the example organization."), text[:80])
+        for part in ("## Working in this project", str(self.site_root), "Gate 1", "Gate 2", "dureh slurm submit",
+                     "## Protected paths", "`inputs/**` no-read", "`published/**` read-only"):
+            self.assertIn(part, text)
+        for gone in ("Data flow", "pipeline", "manifest"):
+            self.assertNotIn(gone, text, "no data-flow text from the project manifest")
+
+    def test_no_template_no_claude_md(self):
+        tpl = self.site_root / "startup" / "templates" / "project" / "CLAUDE.md.template"
+        tpl.chmod(0o644)
+        tpl.unlink()
+        pg.generate_projects(self.site())
+        self.assertFalse((self.proj / "CLAUDE.md").exists())
+        self.assertTrue((self.proj / ".claude" / "agents" / "runner.md").is_file())
+
     def test_scopes_are_project_relative_and_files_say_guidance_only(self):
         pg.generate_projects(self.s)
-        text = (self.proj / ".claude" / "agents" / "data-steward.md").read_text()
-        self.assertIn("derivatives/**", text)
+        text = (self.proj / ".claude" / "agents" / "runner.md").read_text()
+        self.assertIn("checkpoints/**", text)
         self.assertNotIn("projects/*/", text)
         self.assertIn("guidance only", text)
         self.assertIn(str(self.site_root), text)
@@ -113,10 +80,10 @@ class ProjectGen(SiteCase):
         from dureh_core.selftest import session_checks
 
         pg.generate_projects(self.s)
-        p = self.proj / ".claude" / "agents" / "interpreter.md"
+        p = self.proj / ".claude" / "agents" / "publisher.md"
         p.write_text(p.read_text() + "\nmy note\n")
-        self.assertEqual(pg.project_drift(self.s), ["projects/lna: generated file was edited by hand: .claude/agents/interpreter.md"])
-        self.assertTrue(any("projects/lna" in line for line in session_checks(self.s)))
+        self.assertEqual(pg.project_drift(self.s), ["projects/p1: generated file was edited by hand: .claude/agents/publisher.md"])
+        self.assertTrue(any("projects/p1" in line for line in session_checks(self.s)))
 
     def test_existing_hand_written_files_are_left_untouched(self):
         (self.proj / "CLAUDE.md").write_text("mine\n")
@@ -126,26 +93,17 @@ class ProjectGen(SiteCase):
         self.assertEqual((self.proj / "CLAUDE.md").read_text(), "mine\n")
         self.assertIn("CLAUDE.md", r[0]["skipped"])
 
-    def test_claude_md_is_filled_from_manifest_and_records(self):
-        led = Ledger(self.s)
-        from dureh_core import workflow as wf
-
-        b = wf.wi_new(self.s, "desk", "B", "g", "pm-projects", "projects/lna", ["ok"])["id"]
-        w = wf.wi_new(self.s, "desk", "Promote", "g", "data-steward", "projects/lna", ["ok"], parent=b)["id"]
-        led.append("run", "promotion", "data-steward", w, {
-            "run_type": "promotion", "status": "completed", "source": "checkpoints/fmriprep/x",
-            "dataset": "derivatives/fmriprep_camri_rat_bold", "dest": ["derivatives/fmriprep_camri_rat_bold/x"],
-            "from_run": "run-1", "job_id": "4242", "commit": "c0ffee"})
+    def test_files_of_roles_no_longer_marked_are_removed(self):
         pg.generate_projects(self.s)
-        text = (self.proj / "CLAUDE.md").read_text()
-        self.assertTrue(text.startswith("# Project agent instructions (template 0.2.0)"))
-        for part in ("rawbids -> checkpoints -> derivatives -> reports", "camri 2.0.0a1", "sha256:abc123",
-                     "sourcedata/atlases -> /proj/atlases", "derivatives/fmriprep_camri_rat_bold",
-                     f"{w} (data-steward), run run-1, job 4242, commit c0ffee", "Gate 1", "dureh promote"):
-            self.assertIn(part, text)
+        m = self.site_root / "startup" / "startup.yaml"
+        m.chmod(0o644)
+        m.write_text(m.read_text().replace("    project: true\n    output: The project catalog", "    output: The project catalog"))
+        r = pg.generate_projects(self.site())
+        self.assertEqual(r[0]["removed"], [".claude/agents/publisher.md"])
+        self.assertFalse((self.proj / ".claude" / "agents" / "publisher.md").exists())
 
     def test_saves_in_a_datalad_project(self):
-        from test_promote import TOOLS, run
+        from helpers import TOOLS, run
 
         if not TOOLS:
             self.skipTest("datalad and git-annex not available: not run")
@@ -158,33 +116,6 @@ class ProjectGen(SiteCase):
         self.assertEqual(git(dl, "status", "--porcelain"), "")
         self.assertIn("dureh: regenerate", git(dl, "log", "-1", "--format=%s"))
 
-    def test_reads_manifest_schema_v2(self):
-        (self.proj / "camri-manifest.yaml").write_text(manifest_v2())
-        pg.generate_projects(self.s)
-        text = (self.proj / "CLAUDE.md").read_text()
-        self.assertTrue(text.startswith("# Project agent instructions (template manifest schema 2)"), text[:80])
-        for part in ("source: bids at /proj/lab/lna (17.5 GB, external)",
-                     "196 links: 39 under rawbids/, 156 under derivatives/brainmask_camri_rat_bold/, 1 under sourcedata/atlases/",
-                     "rawbids/sub-000 -> /proj/lab/rawbids/sub-000",
-                     "camri 2.0.0a0+68b4d2d", "container afni: sha256:aaa", "container camri: sha256:ccc",
-                     "pipeline fmriprep (rat, bold): camri_version not yet registered",
-                     "fmriprep.brainmask-first (default, production)",
-                     "mode slurm, account rc_lab_pi, partition general",
-                     "derivatives/brainmask_camri_rat_bold:", "derivatives/fmriprep_camri_rat_bold:",
-                     "produced by pipeline fmriprep (rat, bold)"):
-            self.assertIn(part, text)
-        for wrong in ("None -> None", "not pinned", "not set", "template unknown", "none declared"):
-            self.assertNotIn(wrong, text)
-
-    def test_link_summary_does_not_grow_with_links(self):
-        sizes = []
-        for n in (60, 196, 2000):
-            (self.proj / "camri-manifest.yaml").write_text(manifest_v2(n))
-            pg.generate_projects(self.s)
-            sizes.append(len((self.proj / "CLAUDE.md").read_bytes()))
-        self.assertLessEqual(max(sizes) - min(sizes), 16, sizes)
-        self.assertFalse(pg.generate_projects(self.s)[0]["changed"], "second sync is a no-op")
-
     def test_link_project_generates(self):
         from dureh_core import sitelinks
 
@@ -192,10 +123,10 @@ class ProjectGen(SiteCase):
         orig = pg.generate_projects
         pg.generate_projects = lambda site, only=None: calls.append(only) or []
         try:
-            sitelinks._after_link(self.s, "lna")
+            sitelinks._after_link(self.s, "p1")
         finally:
             pg.generate_projects = orig
-        self.assertEqual(calls, ["lna"])
+        self.assertEqual(calls, ["p1"])
 
 
 if __name__ == "__main__":

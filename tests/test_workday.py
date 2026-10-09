@@ -863,10 +863,10 @@ class Workday(SiteCase):
         # overtime pre-approval (UR-20261006-01) and the overtime plan (Director, 2026-10-06)
         self.assertIn("may be recorded while on-duty as soon as the Director approves", text)
         self.assertIn("day overtime-plan --file <plan>", text)
-        # the job report at day end and the file-level loop rule (Director, 2026-10-06)
+        # the job report at day end; release 46: the generic loop text (a package adds its own rule's words)
         self.assertIn("jobs today: N runs, M tasks, K failed", text)
-        self.assertIn("Every workflow step loops at file level", text)
-        self.assertIn("--each-from-bids <dataset> --level file --suffix", text)
+        self.assertIn("Loop with one array per step", text)
+        self.assertNotIn("file level", text)
 
     # ------------------------------------------------------------ finish the plan (Director, 2026-10-06)
     def overtime_events(self):
@@ -1231,8 +1231,8 @@ class Workday(SiteCase):
                                                    "raw": "CANCELLED by 1|0:0|00:01:00"}, [single["id"]])
         via = led.append("run", "slurm", "desk", self.wi, {
             "run_type": "slurm", "status": "submitted", "job_id": "5000", "level": "file", "logs": "/x/logs/WI",
-            "command": ["camri", "run", "pipe", "step", "--level", "file", "--submit", "--detach", "--record", "/x/r.json"],
-            "via": {"text": "camri run pipe step --level file --submit --detach", "command": ["camri", "run", "pipe", "step"]},
+            "command": ["exmod", "run", "pipe", "step", "--level", "file", "--submit", "--detach", "--record", "/x/r.json"],
+            "via": {"text": "exmod run pipe step --level file --submit --detach", "command": ["exmod", "run", "pipe", "step"]},
             "jobs": [{"job_id": "5000", "kind": "array", "count": 2, "items": ["s1", "s2"], "level": "file"},
                      {"job_id": "5001", "kind": "single"}],
             "array": {"job_id": "5000", "items": ["s1", "s2"], "count": 2, "level": "file"}})
@@ -1257,9 +1257,9 @@ class Workday(SiteCase):
         self.assertEqual((s["level"], s["reason"], s["job_ids"], s["state"], s["states"]),
                          ("single", "merge", ["4301"], "CANCELLED by 1", {"completed": 0, "failed": 0, "cancelled": 1, "other": 0}))
         self.assertEqual((v["kind"], v["step"], v["tasks"], v["jobs"], v["job_ids"], v["state"], v["states"]["other"]),
-                         ("via", "camri run pipe step --level file --submit --detach", 3, 2,
+                         ("via", "exmod run pipe step --level file --submit --detach", 3, 2,
                           ["5000_[0-1]", "5000_0", "5000_1", "5001"], "no state recorded", 3))
-        self.assertEqual(v["command"], "camri run pipe step --level file --submit --detach --record /x/r.json")
+        self.assertEqual(v["command"], "exmod run pipe step --level file --submit --detach --record /x/r.json")
         self.assertEqual((c["kind"], c["step"], c["command"], c["level"]),
                          ("verify", "checks.sh", "sbatch --parsable --time=00:30:00 /x/checks.sh", "single"))
         # the Slack end-report summary (first paragraph) carries the jobs line, once

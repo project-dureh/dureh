@@ -180,7 +180,7 @@ class Ops(SiteCase):
         w = wf.wi_new(s, "desk", "run", "g", "researcher", "site", ["a"])["id"]
         script = self.tmp / "job.sh"
         script.write_text("#!/bin/sh\necho hi\n")
-        with self.assertRaisesRegex(DurehError, "only pipeline-runner"):
+        with self.assertRaisesRegex(DurehError, "may not submit scheduler jobs: that needs the submit_jobs capability"):
             ops.slurm_submit(s, "py-writer", w, str(script))
         with self.assertRaisesRegex(DurehError, "not dispatched"):
             ops.slurm_submit(s, "desk", w, str(script))
@@ -277,7 +277,7 @@ class Ops(SiteCase):
         r = score(self.s, "desk", "py-writer", str(ws), None)
         self.assertEqual(r["result"], "pass", r)
         (ws / "data").mkdir()
-        (ws / "data" / "x.nii").write_text("forbidden")
+        (ws / "data" / "x.dat").write_text("forbidden")
         r = score(self.s, "desk", "py-writer", str(ws), None)
         self.assertTrue(r["hard_failure"])
 

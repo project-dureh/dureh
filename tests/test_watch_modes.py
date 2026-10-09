@@ -1,9 +1,10 @@
 """Release 45: config `slurm.watch` (monitor | on-demand | off) sets what the generated text says about job ends.
-`monitor` (the default, a site without the key) keeps the standing `slurm watch` Monitor text; `on-demand` and
-`off` drop it from the desk text, the role files, the refused-wait hint and the verify hints."""
+`monitor` (the default for a site without the key) keeps the standing `slurm watch` Monitor text; `on-demand` and
+`off` drop it from the desk text, the role files, the refused-wait hint and the verify hints. Release 46: `install`
+writes `on-demand` for a new site; an existing site without the key keeps `monitor`."""
 import json
 
-from helpers import SiteCase, denied, hook
+from helpers import SiteCase, denied, hook, add_runner_roles
 
 from dureh_core import ops
 from dureh_core.runtimes import claude_code
@@ -13,10 +14,7 @@ from dureh_core.util import DurehError
 class WatchModes(SiteCase):
     def setUp(self):
         super().setUp()
-        manifest = self.package / "startup.yaml"
-        manifest.write_text(manifest.read_text()
-                            .replace("managers: [pm-modules]", "managers: [pm-modules, pm-projects]")
-                            .replace("workers: [py-writer,", "workers: [pipeline-runner, py-writer,"))
+        add_runner_roles(self.package)
         self.install()
 
     def set_mode(self, mode):
@@ -28,7 +26,7 @@ class WatchModes(SiteCase):
     def generated(self):
         claude_code.generate(self.site())
         return ((self.site_root / "CLAUDE.md").read_text(),
-                (self.site_root / ".claude" / "agents" / "pipeline-runner.md").read_text())
+                (self.site_root / ".claude" / "agents" / "runner.md").read_text())
 
     def refusal(self):
         out = hook(self.site(), hook_event_name="PreToolUse", tool_name="Bash", cwd=str(self.site_root),
@@ -38,6 +36,11 @@ class WatchModes(SiteCase):
         return out["hookSpecificOutput"]["permissionDecisionReason"]
 
     def test_default_is_monitor_with_todays_text(self):
+        self.assertEqual(ops.watch_mode(self.site()), "on-demand", "release 46: a new site watches on demand")
+        path = self.site_root / "config.json"
+        cfg = json.loads(path.read_text())
+        cfg["slurm"].pop("watch")  # an existing site installed before release 46
+        path.write_text(json.dumps(cfg))
         self.assertEqual(ops.watch_mode(self.site()), "monitor")
         md, runner = self.generated()
         self.assertIn("slurm watch` running as a Monitor", md)
@@ -79,6 +82,7 @@ class WatchModes(SiteCase):
         self.assertIn("monitor, on-demand, off", str(cm.exception))
 
     def test_tool_hints_follow_the_mode(self):
+        self.set_mode("monitor")
         self.assertIn("slurm watch", ops.job_end_phrase(self.site()))
         self.set_mode("off")
         self.assertNotIn("slurm watch", ops.job_end_phrase(self.site()))

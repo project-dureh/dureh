@@ -3,18 +3,17 @@ import json
 import unittest
 
 from dureh_core import workflow as wf
-from dureh_core.org import HARNESS_ROOT, Org
 from dureh_core.paths import write_decision
 from dureh_core.records import Ledger
-from tests.helpers import SiteCase
+from tests.helpers import SiteCase, minimal_org
 
 
 class PyWriterScope(unittest.TestCase):
     def setUp(self):
-        self.org = Org.load(HARNESS_ROOT)
+        self.org = minimal_org()
 
     def test_module_lock_is_in_scope(self):
-        self.assertTrue(self.org.scope_allows("py-writer", "modules/camri/uv.lock"))
+        self.assertTrue(self.org.scope_allows("py-writer", "modules/exmod/uv.lock"))
 
     def test_other_locks_stay_out_of_scope(self):
         # fnmatch "*" spans "/", so nested paths under a module match too; .venv/ is kept out of the
@@ -26,11 +25,10 @@ class PyWriterScope(unittest.TestCase):
 class Notebooks(unittest.TestCase):
     # UR-20261003-06 (a company site): one marimo notebook per pipeline in the project's code/ folder
     def test_project_notebooks_in_scope_other_project_code_not(self):
-        from dureh_core.org import HARNESS_ROOT, Org
-
-        org = Org.load(HARNESS_ROOT)
-        self.assertTrue(org.scope_allows("py-writer", "projects/lna/code/notebooks/camri_preproc.py"))
-        for rel in ("projects/lna/code/containers/fsl.def", "projects/lna/code/run.sh", "projects/lna/derivatives/x",
+        
+        org = minimal_org()
+        self.assertTrue(org.scope_allows("py-writer", "projects/lna/code/notebooks/exmod_preproc.py"))
+        for rel in ("projects/lna/code/containers/fsl.def", "projects/lna/code/run.sh", "projects/lna/published/x",
                     "projects/lna/README.md"):
             self.assertFalse(org.scope_allows("py-writer", rel), rel)
 
@@ -42,19 +40,19 @@ class ModuleContainerRecipes(SiteCase):
     def setUp(self):
         super().setUp()
         self.install()
-        self.make_module("camri")
+        self.make_module("exmod")
         self.s = self.site()
         led = Ledger(self.s)
-        bundle = wf.wi_new(self.s, "desk", "Bundle", "g", "pm-modules", "modules/camri", ["ok"])["id"]
+        bundle = wf.wi_new(self.s, "desk", "Bundle", "g", "pm-modules", "modules/exmod", ["ok"])["id"]
         wf.wi_approve(self.s, "desk", bundle, "ok")
-        self.w = wf.wi_new(self.s, "desk", "Recipe", "g", "py-writer", "modules/camri", ["ok"], parent=bundle)["id"]
+        self.w = wf.wi_new(self.s, "desk", "Recipe", "g", "py-writer", "modules/exmod", ["ok"], parent=bundle)["id"]
         wf.wi_approve(self.s, "desk", self.w, "ok")
         led.event("wi.dispatched", "desk", self.w, {"role": "py-writer", "brief": "0" * 16, "by": "desk"})
-        self.recipe = self.site_root / "worktrees" / self.w / "containers" / "camri.def"
+        self.recipe = self.site_root / "worktrees" / self.w / "containers" / "exmod.def"
         self.recipe.parent.mkdir(parents=True)
 
     def test_py_writer_writes_module_recipes_in_its_worktree(self):
-        self.assertTrue(self.s.org.scope_allows("py-writer", "modules/camri/containers/camri.def"))
+        self.assertTrue(self.s.org.scope_allows("py-writer", "modules/exmod/containers/exmod.def"))
         ok, why = write_decision(self.s, "py-writer", self.recipe, agent_wi=self.w)
         self.assertTrue(ok, why)
         ok, _ = write_decision(self.s, "py-writer", self.recipe, agent_wi="WI-9999")
@@ -66,7 +64,7 @@ class ModuleContainerRecipes(SiteCase):
                 continue
             ok, why = write_decision(self.s, role, self.recipe)
             self.assertFalse(ok, (role, why))
-            self.assertFalse(self.s.org.scope_allows(role, "modules/camri/containers/camri.def"), role)
+            self.assertFalse(self.s.org.scope_allows(role, "modules/exmod/containers/exmod.def"), role)
 
     def test_cache_stays_protected(self):
         cfg = json.loads((self.site_root / "config.json").read_text())
@@ -74,7 +72,7 @@ class ModuleContainerRecipes(SiteCase):
         (self.site_root / "config.json").write_text(json.dumps(cfg))
         (self.site_root / "cache" / "containers").mkdir(parents=True)
         s = self.site()
-        ok, why = write_decision(s, "py-writer", self.site_root / "cache" / "containers" / "camri.def", agent_wi=self.w)
+        ok, why = write_decision(s, "py-writer", self.site_root / "cache" / "containers" / "exmod.def", agent_wi=self.w)
         self.assertFalse(ok)
         self.assertIn("container cache", why)
 
@@ -90,24 +88,24 @@ class ModuleTools(SiteCase):
     def setUp(self):
         super().setUp()
         self.install()
-        self.make_module("camri")
+        self.make_module("exmod")
         self.s = self.site()
         led = Ledger(self.s)
-        bundle = wf.wi_new(self.s, "desk", "Bundle", "g", "pm-modules", "modules/camri", ["ok"])["id"]
+        bundle = wf.wi_new(self.s, "desk", "Bundle", "g", "pm-modules", "modules/exmod", ["ok"])["id"]
         wf.wi_approve(self.s, "desk", bundle, "ok")
-        self.w = wf.wi_new(self.s, "desk", "Schema", "g", "py-writer", "modules/camri", ["ok"], parent=bundle)["id"]
+        self.w = wf.wi_new(self.s, "desk", "Schema", "g", "py-writer", "modules/exmod", ["ok"], parent=bundle)["id"]
         wf.wi_approve(self.s, "desk", self.w, "ok")
         led.event("wi.dispatched", "desk", self.w, {"role": "py-writer", "brief": "0" * 16, "by": "desk"})
         self.schema = self.site_root / "worktrees" / self.w / "tools" / "pipeline-spec.schema.json"
         self.schema.parent.mkdir(parents=True)
 
     def test_py_writer_may_write_module_tools(self):
-        self.assertTrue(self.s.org.scope_allows("py-writer", "modules/camri/tools/pipeline-spec.schema.json"))
+        self.assertTrue(self.s.org.scope_allows("py-writer", "modules/exmod/tools/pipeline-spec.schema.json"))
         ok, why = write_decision(self.s, "py-writer", self.schema, agent_wi=self.w)
         self.assertTrue(ok, why)
 
     def test_other_roles_may_not(self):
-        self.assertFalse(self.s.org.scope_allows("doc-writer", "modules/camri/tools/pipeline-spec.schema.json"))
+        self.assertFalse(self.s.org.scope_allows("doc-writer", "modules/exmod/tools/pipeline-spec.schema.json"))
         ok, why = write_decision(self.s, "doc-writer", self.schema)
         self.assertFalse(ok, why)
 

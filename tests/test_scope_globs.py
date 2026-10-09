@@ -1,7 +1,9 @@
 """Review 2026-10-07 #7: write-scope globs are segment-aware. `*` and `?` never cross `/`; `**` spans depth."""
 import unittest
 
-from dureh_core.org import HARNESS_ROOT, Org, scope_match
+from helpers import example_org
+
+from dureh_core.org import scope_match
 
 
 class ScopeGlobMatching(unittest.TestCase):
@@ -12,8 +14,8 @@ class ScopeGlobMatching(unittest.TestCase):
         self.assertFalse(scope_match("modules/a/b/x", "modules/a?b/x"))
 
     def test_double_star(self):
-        self.assertTrue(scope_match("projects/p/derivatives/a/b.nii.gz", "projects/*/derivatives/**"))
-        self.assertFalse(scope_match("projects/p/derivatives", "projects/*/derivatives/**"))
+        self.assertTrue(scope_match("projects/p/published/a/b.dat", "projects/*/published/**"))
+        self.assertFalse(scope_match("projects/p/published", "projects/*/published/**"))
         self.assertTrue(scope_match("a/b", "a/**/b"))
         self.assertTrue(scope_match("a/x/y/b", "a/**/b"))
         self.assertFalse(scope_match("a/x/y/c", "a/**/b"))
@@ -24,28 +26,23 @@ class ScopeGlobMatching(unittest.TestCase):
 
 class ScopesDoNotCrossDirectories(unittest.TestCase):
     def setUp(self):
-        self.org = Org.load(HARNESS_ROOT)
+        self.org = example_org()
 
-    def test_data_steward_cannot_reach_sourcedata_through_star(self):
-        for rel in ("projects/p/sourcedata/sub-01/derivatives/x.nii.gz",
-                    "projects/p/sourcedata/sub-01/code/containers/x.def",
-                    "projects/p/sourcedata/sub-01/dataset_description.json",
-                    "projects/p/sub-01/.datalad/config"):
-            self.assertFalse(self.org.scope_allows("data-steward", rel), rel)
+    def test_publisher_cannot_reach_inputs_through_star(self):
+        for rel in ("projects/p/inputs/catalog.yaml", "projects/p/inputs/a/catalog.yaml", "projects/p/a/catalog.yaml"):
+            self.assertFalse(self.org.scope_allows("publisher", rel), rel)
 
-    def test_py_writer_single_level_files_stay_single_level(self):
-        for rel in ("modules/m/sub/src/x.py", "modules/m/data/uv.lock", "modules/m/data/pyproject.toml"):
-            self.assertFalse(self.org.scope_allows("py-writer", rel), rel)
+    def test_builder_single_level_files_stay_single_level(self):
+        for rel in ("modules/m/sub/src/x.py", "modules/m/data/pyproject.toml"):
+            self.assertFalse(self.org.scope_allows("builder", rel), rel)
 
     def test_intended_patterns_still_allowed(self):
         allowed = {
-            "data-steward": ["projects/p/derivatives/ica/a/b.nii.gz", "projects/p/dataset_description.json",
-                             "projects/p/.datalad/config", "projects/p/sourcedata/atlases/a/b.nii.gz",
-                             "projects/p/code/containers/fsl.def"],
-            "py-writer": ["modules/m/src/pkg/x.py", "modules/m/tests/t.py", "modules/m/uv.lock",
-                          "projects/p/code/notebooks/a/b.py"],
-            "pipeline-runner": ["projects/p/checkpoints/a/b.json", "projects/p/README.md"],
-            "desk": ["projects/p/README.md", "package/a/b"],
+            "publisher": ["projects/p/catalog.yaml"],
+            "builder": ["modules/m/src/pkg/x.py", "modules/m/tests/t.py", "modules/m/pyproject.toml"],
+            "runner": ["projects/p/checkpoints/a/b.json", "projects/p/README.md"],
+            "worker": ["modules/m/src/x.py", "modules/m/docs/a.md"],
+            "desk": ["projects/p/README.md"],
         }
         for role, paths in allowed.items():
             if role not in self.org.roles:

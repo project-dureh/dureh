@@ -5,13 +5,29 @@ from dureh_core import yamlsub
 from dureh_core.util import DurehError
 
 
+def manifest_v2(links=50):
+    """A project manifest in the shape company manifests use (nested mappings, flow mappings, comments, quoted and
+    null scalars, long link lists), with neutral names."""
+    rows = [f"inputs/s-{i:03d}" for i in range(links)]
+    link_lines = "".join(f'  - {{path: "{r}", link_target: "/proj/lab/{r}", external: true, traversed: false, size_bytes: 10}}\n'
+                         for r in rows)
+    return ("schema_version: 2\nproject:\n  name: \"p1\"\n"
+            "execution:\n  mode: \"slurm\"\n  slurm:\n    account: \"acct\"\n    partition: \"general\"\n"
+            "source:\n  type: \"raw\"   # note\n  external_root: \"/proj/lab/p1\"\n  size_bytes: 17490933543\n"
+            "pipelines:\n  - family: \"pipe\"\n    axes: {}\n    tool_version: null\n    workflows:\n"
+            "      - name: \"pipe.default\"\n        default: true\n"
+            "provenance:\n  tool_versions:\n    exmod: \"2.0.0a0+68b4d2d\"\n    containers:\n"
+            "      - {name: \"a\", digest: \"sha256:aaa\"}\n"
+            f"external_links:   # {len(rows)} entries\n{link_lines}")
+
+
 class FlowMappings(unittest.TestCase):
     def test_flow_mapping_items_in_a_sequence(self):
         text = ('links:   # a comment\n'
-                '  - {path: "rawbids/sub-1", link_target: "/proj/x/sub-1", external: true, size_bytes: 45}\n'
+                '  - {path: "inputs/sub-1", link_target: "/proj/x/sub-1", external: true, size_bytes: 45}\n'
                 '  - {name: "afni", digest: "sha256:fb4f"}\n')
         self.assertEqual(yamlsub.loads(text)["links"], [
-            {"path": "rawbids/sub-1", "link_target": "/proj/x/sub-1", "external": True, "size_bytes": 45},
+            {"path": "inputs/sub-1", "link_target": "/proj/x/sub-1", "external": True, "size_bytes": 45},
             {"name": "afni", "digest": "sha256:fb4f"}])
 
     def test_flow_mapping_value_and_empty(self):
@@ -31,8 +47,6 @@ class FlowMappings(unittest.TestCase):
             import yaml
         except ImportError:
             self.skipTest("PyYAML not installed: not run")
-        from test_projectgen import manifest_v2
-
         text = manifest_v2(50)
         self.assertEqual(yamlsub.loads(text), yaml.safe_load(text))
 

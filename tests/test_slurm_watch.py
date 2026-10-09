@@ -6,7 +6,7 @@ import json
 import unittest
 from pathlib import Path
 
-from helpers import SiteCase, denied, hook
+from helpers import SiteCase, denied, hook, add_runner_roles
 
 from dureh_core import ops
 from dureh_core import workflow as wf
@@ -18,16 +18,16 @@ from dureh_core.util import DurehError, read_json
 FINDING = "fnd-20261004T214606784656Z-a4f231c9"  # a company site, 2026-10-04: WI-0117's 21:25 dispatch never started
 
 
+MONITOR = {"account": "acct-x", "partition": "general", "each_level": "any", "external_jobs": False, "watch": "monitor"}
+
+
 class WatchCase(SiteCase):
-    """desk -> pm-projects bundle -> pipeline-runner item on a git project, with a fake scheduler."""
+    """desk -> coordinator bundle -> runner item on a git project, with a fake scheduler."""
 
     def setUp(self):
         super().setUp()
-        manifest = self.package / "startup.yaml"
-        manifest.write_text(manifest.read_text()
-                            .replace("managers: [pm-modules]", "managers: [pm-modules, pm-projects]")
-                            .replace("workers: [py-writer,", "workers: [data-steward, pipeline-runner, py-writer,"))
-        self.install()
+        add_runner_roles(self.package)
+        self.install(slurm=MONITOR)  # these suites prove the standing-watch mode (release 46: new sites on-demand)
         self.fake = self.tmp / "fakebin"
         self.fake.mkdir()
         self.tool("sbatch", "case \"$*\" in *--test-only*) echo 'sbatch: Job 9 to start at 2026-10-03T10:00:00 using 1"
@@ -54,9 +54,9 @@ class WatchCase(SiteCase):
         (self.proj / "checkpoints").mkdir(parents=True)
         import subprocess
         subprocess.run(["git", "init", "-q", "-b", "main", str(self.proj)], check=True)
-        self.bundle = wf.wi_new(self.s, "desk", "Bundle", "g", "pm-projects", "projects/lna", ["ok"])["id"]
+        self.bundle = wf.wi_new(self.s, "desk", "Bundle", "g", "coordinator", "projects/lna", ["ok"])["id"]
         wf.wi_approve(self.s, "desk", self.bundle, "ok")
-        self.item = wf.wi_new(self.s, "desk", "Run", "g", "pipeline-runner", "projects/lna", ["ok"], parent=self.bundle)["id"]
+        self.item = wf.wi_new(self.s, "desk", "Run", "g", "runner", "projects/lna", ["ok"], parent=self.bundle)["id"]
         wf.wi_approve(self.s, "desk", self.item, "ok")
         self.script = self.proj / "checkpoints" / "step1.sh"
         self.script.write_text("#!/bin/bash\n#SBATCH --time=00:05:00\necho hi\n")
@@ -81,15 +81,15 @@ class WatchCase(SiteCase):
 
     def dispatch_bundle(self, manager_agent="a-pm"):
         """The desk dispatches the bundle and its manager starts (bound by its brief at the first tool call)."""
-        self.spawn("desk", "pm-projects", wf.dispatch_brief(self.s, self.bundle, "desk")["brief"])
-        self.runtime("SubagentStart", "pm-projects", manager_agent)
-        hook(self.s, hook_event_name="PreToolUse", tool_name="Bash", cwd=str(self.site_root), agent_type="pm-projects",
+        self.spawn("desk", "coordinator", wf.dispatch_brief(self.s, self.bundle, "desk")["brief"])
+        self.runtime("SubagentStart", "coordinator", manager_agent)
+        hook(self.s, hook_event_name="PreToolUse", tool_name="Bash", cwd=str(self.site_root), agent_type="coordinator",
              agent_id=manager_agent, tool_input={"command": "ls"})  # first tool call: bound to the one pending dispatch
 
     def dispatch_item(self, agent_id="a-pm"):
         """The manager prepares and spawns the item (wi.dispatched); whether a worker starts is up to the test."""
-        brief = wf.dispatch_brief(self.s, self.item, "pm-projects")["brief"]
-        self.assertIsNone(self.spawn("pm-projects", "pipeline-runner", brief, agent_id))
+        brief = wf.dispatch_brief(self.s, self.item, "coordinator")["brief"]
+        self.assertIsNone(self.spawn("coordinator", "runner", brief, agent_id))
         return brief
 
     def backdate(self, event_id, seconds):
@@ -107,7 +107,7 @@ class WatchCase(SiteCase):
         return [e for e in self.led.events(wi) if e["type"] == "wi.dispatched"][-1]
 
     def submit(self, **kw):
-        return ops.slurm_submit(self.s, "pipeline-runner", self.item, str(self.script), **kw)
+        return ops.slurm_submit(self.s, "runner", self.item, str(self.script), **kw)
 
     def watch(self, reported=None):
         buf = io.StringIO()
@@ -121,8 +121,8 @@ class Watch(WatchCase):
         super().setUp()
         self.dispatch_bundle()
         self.dispatch_item()
-        self.runtime("SubagentStart", "pipeline-runner", "a-w1")
-        self.runtime("SubagentStop", "pipeline-runner", "a-w1")  # the worker ended its turn while its job runs
+        self.runtime("SubagentStart", "runner", "a-w1")
+        self.runtime("SubagentStop", "runner", "a-w1")  # the worker ended its turn while its job runs
 
     def test_one_line_per_ended_job_recorded_once_across_restarts(self):
         single = self.submit()
@@ -135,7 +135,7 @@ class Watch(WatchCase):
         lines = self.watch()
         self.assertEqual(len(lines), 1)
         line = lines[0]
-        for part in (f"run={single['id']}", "job=4300", f"wi={self.item}", "role=pipeline-runner", "agent=a-w1:ended",
+        for part in (f"run={single['id']}", "job=4300", f"wi={self.item}", "role=runner", "agent=a-w1:ended",
                      "state=COMPLETED", f"next=the manager of bundle {self.bundle} re-dispatches {self.item}"):
             self.assertIn(part, line)
         self.assertNotIn("4301", line)
@@ -154,17 +154,17 @@ class Watch(WatchCase):
         self.assertEqual(arr[0]["payload"]["failed_items"], ["sub-02", "sub-03"])
         self.assertTrue(arr[0]["payload"]["watched"])
         self.assertEqual(self.watch(), [])
-        self.assertEqual(ops.slurm_status(self.s, "pipeline-runner", array["id"])["id"], arr[0]["id"],
+        self.assertEqual(ops.slurm_status(self.s, "runner", array["id"])["id"], arr[0]["id"],
                          "the re-dispatched worker reads the same final record")
 
     def test_states_recorded_by_wait_or_status_are_not_reported(self):
         run = self.submit()
         self.sacct("4300", "COMPLETED|0:0|00:02:00")
-        ops.slurm_wait(self.s, "pipeline-runner", run["id"], timeout=1, interval=1)
+        ops.slurm_wait(self.s, "runner", run["id"], timeout=1, interval=1)
         self.assertEqual(self.watch(), [], "the worker saw the end itself")
         other = self.submit()
         self.sacct("4301", "TIMEOUT|0:0|00:05:00")
-        ops.slurm_status(self.s, "pipeline-runner", other["id"])  # a non-waited status of a terminal state
+        ops.slurm_status(self.s, "runner", other["id"])  # a non-waited status of a terminal state
         self.assertEqual(self.watch(), [])
 
     def test_unknown_states_and_dry_runs_are_skipped_and_the_loop_polls(self):
@@ -180,7 +180,7 @@ class Watch(WatchCase):
     def test_next_step_follows_the_agents(self):
         run = self.submit()
         self.sacct("4300", "COMPLETED|0:0|00:02:00")
-        self.runtime("SubagentStop", "pm-projects", "a-pm")  # the manager ended too
+        self.runtime("SubagentStop", "coordinator", "a-pm")  # the manager ended too
         self.assertIn(f"next=dispatch brief --wi {self.bundle} (bundle", self.watch()[0])
         top = wf.wi_new(self.s, "desk", "Top", "g", "researcher", "site", ["ok"])["id"]  # a top-level item, desk-submitted job
         wf.wi_approve(self.s, "desk", top, "ok")
@@ -205,7 +205,7 @@ class Watch(WatchCase):
 
     def test_only_the_desk_watches_and_the_cli_prints(self):
         with self.assertRaisesRegex(DurehError, "only the desk watches"):
-            ops.slurm_watch(self.s, "pipeline-runner", once=True, out=io.StringIO())
+            ops.slurm_watch(self.s, "runner", once=True, out=io.StringIO())
         run = self.submit()
         self.sacct("4300", "FAILED|1:0|00:00:03")
         import contextlib
@@ -225,9 +225,9 @@ class Batched(WatchCase):
         super().setUp()
         self.dispatch_bundle()
         self.dispatch_item()
-        self.runtime("SubagentStart", "pipeline-runner", "a-w1")
-        self.runtime("SubagentStop", "pipeline-runner", "a-w1")
-        self.runtime("SubagentStop", "pm-projects", "a-pm")  # only jobs can hold the lane now
+        self.runtime("SubagentStart", "runner", "a-w1")
+        self.runtime("SubagentStop", "runner", "a-w1")
+        self.runtime("SubagentStop", "coordinator", "a-pm")  # only jobs can hold the lane now
 
     def calls(self):
         f = self.fake / "sacct.calls"
@@ -361,15 +361,15 @@ class Lanes(WatchCase):
 
     def test_only_live_agents_or_running_jobs_hold_a_lane(self):
         self.dispatch_bundle()
-        self.assertEqual(self.lanes(), ("1/2", {self.bundle: ["pm-projects agent running on " + self.bundle]}))
+        self.assertEqual(self.lanes(), ("1/2", {self.bundle: ["coordinator agent running on " + self.bundle]}))
         self.dispatch_item()
-        self.runtime("SubagentStart", "pipeline-runner", "a-w1")
-        self.runtime("SubagentStop", "pm-projects", "a-pm")
-        self.assertEqual(self.lanes()[1], {self.bundle: [f"pipeline-runner agent starting on {self.item}"]},
+        self.runtime("SubagentStart", "runner", "a-w1")
+        self.runtime("SubagentStop", "coordinator", "a-pm")
+        self.assertEqual(self.lanes()[1], {self.bundle: [f"runner agent starting on {self.item}"]},
                          "the bundle's lane is held by its worker (started, not yet bound), not by the ended manager")
         run = self.submit()
         self.sacct("4300", "RUNNING|0:0|00:01:00")
-        self.runtime("SubagentStop", "pipeline-runner", "a-w1")  # worker ended; its job runs
+        self.runtime("SubagentStop", "runner", "a-w1")  # worker ended; its job runs
         self.assertEqual(self.lanes(), ("1/2", {self.bundle: [f"job 4300 RUNNING on {self.item} ({run['id']})"]}))
         orphans = {o["wi"]: o for o in ops.status(self.s)["orphaned"]}
         self.assertIn(self.bundle, orphans, "status still shows the ended manager")
@@ -427,22 +427,22 @@ class Lanes(WatchCase):
         self.led.event("agent.finished", "researcher", a, {"agent_id": "a-a"})
         wf.dispatch_brief(self.s, c, "desk")
         self.assertEqual(len([e for e in self.led.events(c) if e["type"] == "lane.refused"]), 1)
-        self.assertTrue(self.s.org.may_append("pm-projects", "lane.refused"), "a manager may record a refusal too")
+        self.assertTrue(self.s.org.may_append("coordinator", "lane.refused"), "a manager may record a refusal too")
 
 
 class NeverStarted(WatchCase):
-    """The finding's scenario: WI-0117, dispatched by pm-projects at 21:25 UTC, no agent.started, later
+    """The finding's scenario: WI-0117, dispatched by coordinator at 21:25 UTC, no agent.started, later
     `dispatch brief` refused with 'dispatched and its agent has not finished'."""
 
     def setUp(self):
         super().setUp()
         self.dispatch_bundle()
-        self.dispatch_item()  # wi.dispatched by pm-projects; no SubagentStart follows
+        self.dispatch_item()  # wi.dispatched by coordinator; no SubagentStart follows
 
     def test_finding_scenario_is_superseded_after_the_grace(self):
         self.assertEqual(ops.agent_state(self.led, self.item), "not started")
         with self.assertRaisesRegex(DurehError, r"dispatched \d+ s ago and no agent has started for it yet; after 120 s"):
-            wf.dispatch_brief(self.s, self.item, "pm-projects")
+            wf.dispatch_brief(self.s, self.item, "coordinator")
         old = self.last_dispatch(self.item)
         self.backdate(old["id"], 20 * 60)
         self.assertIn("re-dispatch with `dispatch brief", {o["wi"]: o for o in ops.status(self.s)["orphaned"]}[self.item]["action"])
@@ -454,8 +454,8 @@ class NeverStarted(WatchCase):
         new = self.last_dispatch(self.item)
         self.assertNotEqual(new["id"], old["id"])
         self.assertEqual(self.led.wi_status(self.item)["status"], "dispatched")
-        self.runtime("SubagentStart", "pipeline-runner", "a-w2")
-        bash = hook(self.s, hook_event_name="PreToolUse", tool_name="Bash", cwd=str(self.site_root), agent_type="pipeline-runner",
+        self.runtime("SubagentStart", "runner", "a-w2")
+        bash = hook(self.s, hook_event_name="PreToolUse", tool_name="Bash", cwd=str(self.site_root), agent_type="runner",
                     agent_id="a-w2", tool_input={"command": f"{self.site_root}/bin/dureh wi show --wi {self.item}"})
         self.assertFalse(denied(bash))
         started = [e for e in self.led.events(self.item) if e["type"] == "agent.started"]
@@ -465,16 +465,16 @@ class NeverStarted(WatchCase):
 
     def test_a_starting_or_running_agent_still_blocks(self):
         self.backdate(self.last_dispatch(self.item)["id"], 20 * 60)
-        self.runtime("SubagentStart", "pipeline-runner", "a-slow")  # deferred start: the runtime has no transcript yet
+        self.runtime("SubagentStart", "runner", "a-slow")  # deferred start: the runtime has no transcript yet
         self.assertEqual(ops.agent_state(self.led, self.item), "starting")
         with self.assertRaisesRegex(DurehError, "has not finished; stop it"):
-            wf.dispatch_brief(self.s, self.item, "pm-projects")
-        hook(self.s, hook_event_name="PreToolUse", tool_name="Bash", cwd=str(self.site_root), agent_type="pipeline-runner",
+            wf.dispatch_brief(self.s, self.item, "coordinator")
+        hook(self.s, hook_event_name="PreToolUse", tool_name="Bash", cwd=str(self.site_root), agent_type="runner",
              agent_id="a-slow", tool_input={"command": "ls"})
         self.assertEqual(ops.agent_state(self.led, self.item), "running")
         with self.assertRaisesRegex(DurehError, "has not finished; stop it"):
-            wf.dispatch_brief(self.s, self.item, "pm-projects")
-        self.runtime("SubagentStop", "pipeline-runner", "a-slow")
+            wf.dispatch_brief(self.s, self.item, "coordinator")
+        self.runtime("SubagentStop", "runner", "a-slow")
         self.dispatch_item()
         sup = [e for e in self.led.events(self.item) if e["type"] == "dispatch.prepared"][-1]["payload"]["supersedes"]
         self.assertEqual(sup["agent"], "ended")
@@ -493,7 +493,7 @@ class NeverStarted(WatchCase):
 class WaitHints(SiteCase):
     def setUp(self):
         super().setUp()
-        self.install()
+        self.install(slurm=MONITOR)  # these suites prove the standing-watch mode (release 46: new sites on-demand)
         self.s = self.site()
 
     def bash(self, command, role="py-writer", **extra):
@@ -536,7 +536,7 @@ class Instructions(WatchCase):
         self.assertIn("re-dispatch the owning WI", claude_md)
         self.assertIn("`lane.refused`", claude_md)
         self.assertNotIn("Wait for a scheduler job with", claude_md)
-        runner = (self.site_root / ".claude" / "agents" / "pipeline-runner.md").read_text()
+        runner = (self.site_root / ".claude" / "agents" / "runner.md").read_text()
         self.assertIn("Never wait for a job in the session", runner)
         self.assertIn("the desk re-dispatches you when `dureh slurm watch` reports the job", runner)
         self.assertNotIn("follow it with", runner)
