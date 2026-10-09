@@ -1321,7 +1321,10 @@ def checks_env_plan(site: Site, wi: str, cwd: Path, troot: Path) -> dict:
     """The Python environment a WI's declared checks run in (release 46, company finding 2026-10-09: a new WI
     worktree has no `.venv`, since it is untracked, so checks fell back to a bare `python`). Modes:
 
-    - `own`: the work root has its own `.venv` (or is the target's main tree): used as today.
+    - `own`: the work root has its own `.venv` (or is the target's main tree): the checks run with that `.venv`
+      activated as in the other modes (VIRTUAL_ENV, PATH, UV_PROJECT_ENVIRONMENT, UV_NO_SYNC=1 so the checks never
+      sync or change it; release 48, company finding d381ae6b: before, nothing was activated and a bare `python`
+      was the system one). With no `.venv` at all (a main tree without env_rebuild) nothing is activated.
     - `shared-venv`: the worktree has no own environment (none, or the shared form `dispatch brief` gives it since
       release 47, see share_worktree_env), the target's main tree has a usable (not stale) `.venv`, and the
       worktree's `uv.lock` is byte-identical to the main tree's (or neither has one and `pyproject.toml` is
@@ -1346,9 +1349,9 @@ def checks_env_plan(site: Site, wi: str, cwd: Path, troot: Path) -> dict:
     if cwd.resolve() == troot.resolve():
         if not own.exists() and cmd:
             return {"mode": "missing", "exports": {}, "target": target}
-        return {"mode": "own", "exports": {}}
+        return _own_plan(own)
     if own.exists() and not shared_form:
-        return {"mode": "own", "exports": {}}
+        return _own_plan(own)
     main = troot / ".venv"
     if main.is_dir() and not stale_venv(troot) and _same_deps(cwd, troot):
         return {"mode": "shared-venv", "venv": str(main),
@@ -1362,8 +1365,18 @@ def checks_env_plan(site: Site, wi: str, cwd: Path, troot: Path) -> dict:
                 **({"replace": True} if shared_form else {}),
                 "exports": {"VIRTUAL_ENV": str(own), "PATH_PREPEND": str(own / "bin")}}
     if shared_form:  # env_rebuild was removed from config after the dispatch: the shared form as it stands
-        return {"mode": "own", "exports": {}}
+        return _own_plan(own)
     return {"mode": "none", "exports": {}}
+
+
+def _own_plan(venv: Path) -> dict:
+    """Mode `own` of checks_env_plan: the work root's own `.venv` activated (release 48), or nothing to activate
+    when there is no `.venv` directory."""
+    if not venv.is_dir():
+        return {"mode": "own", "exports": {}}
+    return {"mode": "own", "venv": str(venv),
+            "exports": {"VIRTUAL_ENV": str(venv), "UV_PROJECT_ENVIRONMENT": str(venv), "UV_NO_SYNC": "1",
+                        "PATH_PREPEND": str(venv / "bin")}}
 
 
 def _check_env_present(site: Site, wi: str, cwd: Path, troot: Path) -> None:
@@ -1424,7 +1437,7 @@ def _checks_script(wi: str, cwd: Path, troot: Path, site_root: Path, prefix: Pat
              f" DUREH_TARGET_ROOT={shlex.quote(str(troot))} DUREH_WI={shlex.quote(wi)}",
              "unset DUREH_ACTOR DUREH_AGENT_ID", "status=0"]
     plan = plan or {"mode": "none", "exports": {}}
-    if plan["mode"] != "none" and plan["mode"] != "own":
+    if plan.get("venv"):
         lines.append(f"# checks environment: {plan['mode']} ({plan.get('venv')})")
     if plan["mode"] == "rebuild":  # the worktree's own .venv, built in the job (scheduler work, not session work)
         if plan.get("replace"):  # the shared form dispatch gave the worktree (release 47): its own env replaces it
