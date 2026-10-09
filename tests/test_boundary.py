@@ -397,6 +397,82 @@ class ProtectedNoneAndLinks(ExampleSiteCase):
         self.assertEqual(cc.drift(self.site()), [], "the links file is a tracked generated file")
 
 
+class FollowUps(ExampleSiteCase):
+    """Fixes of 2026-10-09 found while drafting a company package on this release."""
+
+    def test_scope_conflicts_follow_the_runtime_precedence(self):
+        from dureh_core.package import effective_rule, role_scope_conflicts
+        from dureh_core.protect import best_rule
+
+        m = example_manifest()
+        m["protected"] = [{"path": "projects/*/published/**", "level": "read-only"},
+                          {"path": "projects/*/**/.git/**", "level": "read-only"},
+                          {"path": "projects/p-test/**", "level": "none"}]
+        m["roles"]["runner"]["write_scopes"] = ["projects/p-test/checkpoints/**", "projects/p-test/published/**"]
+        org = Org.load(HARNESS_ROOT, manifest=m)
+        self.assertEqual(role_scope_conflicts(m, org.roles.values()), [], "inside the lifted area nothing conflicts")
+        w = "projects/p-test/checkpoints/.git/x"
+        self.assertEqual(effective_rule(m["protected"], w), best_rule(m["protected"], [w]))
+        self.assertEqual(effective_rule(m["protected"], w)["level"], "none",
+                         "`.git` inside the lifted area: the more specific none rule decides, as at run time")
+        m["roles"]["runner"]["write_scopes"] = ["projects/*/checkpoints/**"]
+        org = Org.load(HARNESS_ROOT, manifest=m)
+        out = role_scope_conflicts(m, org.roles.values())
+        self.assertEqual(len(out), 1, out)
+        self.assertIn("projects/*/**/.git/**", out[0])
+        m["roles"]["runner"]["write_scopes"] = ["projects/*/published/**"]
+        org = Org.load(HARNESS_ROOT, manifest=m)
+        self.assertTrue(role_scope_conflicts(m, org.roles.values()))
+        # the same package installs; the runtime agrees with the validation
+        pm = self.package / "startup.yaml"
+        pm.write_text(pm.read_text().replace("      - projects/*/checkpoints/**\n", "      - projects/p-test/checkpoints/**\n")
+                      .replace("  - {path: projects/*/inputs/**, level: no-read, why: example raw inputs are never read by agents}\n",
+                               "  - {path: projects/*/**/.git/**, level: read-only, why: repository internals}\n"
+                               "  - {path: projects/p-test/**, level: none, why: test project}\n"))
+        self.install()
+        s = self.site()
+        ok, why = write_decision(s, "runner", self.site_root / "projects" / "p-test" / "checkpoints" / ".git" / "x")
+        self.assertTrue(ok, why)
+        ok, why = write_decision(s, "desk", self.site_root / "projects" / "p1" / "a" / ".git" / "x")
+        self.assertIn("is protected", why)
+
+    def test_package_roles_replace_the_generic_manager_and_worker(self):
+        org = Org.load(HARNESS_ROOT, manifest=example_manifest())
+        self.assertNotIn("manager", org.roles)
+        self.assertNotIn("worker", org.roles)
+        self.assertEqual({"desk", "checker"} <= set(org.roles), True)
+        self.assertNotIn("manager", org.role("desk").may_dispatch)
+        self.assertFalse(any(org.scope_allows(r, "modules/m/src/x.py") for r in org.roles if r != "builder"),
+                         "only the package's own role writes module sources")
+        only_workers = {"schema_version": 2, "package": {"id": "x", "name": "X"},
+                        "roles": {"doer": {"kind": "worker", "tier": "worker", "write_scopes": ["modules/*/lib/**"]}}}
+        org = Org.load(HARNESS_ROOT, manifest=only_workers)
+        self.assertIn("manager", org.roles, "no package manager: the generic one stays")
+        self.assertNotIn("worker", org.roles)
+        self.assertEqual(org.role("manager").may_dispatch, ["checker"])
+        explicit = {**only_workers, "roles": {**only_workers["roles"],
+                                              "worker": {"kind": "worker", "tier": "worker", "write_scopes": []}}}
+        self.assertEqual(Org.load(HARNESS_ROOT, manifest=explicit).role("worker").source, "package",
+                         "a package may still declare `worker` itself")
+        self.install()
+        agents = {p.stem for p in (self.site_root / ".claude" / "agents").glob("*.md")}
+        self.assertEqual(agents, {"coordinator", "builder", "runner", "publisher", "scout", "checker"})
+
+    def test_desk_text_lists_every_protected_rule(self):
+        pm = self.package / "startup.yaml"
+        extra = "".join(f"  - {{path: projects/*/area{i}/**, level: read-only, why: r{i}}}\n" for i in range(7))
+        pm.write_text(pm.read_text().replace("templates:\n", "") .replace("  project: templates/project\n",
+                      "") .replace("guards:\n", extra + "  - {path: projects/p-test/**, level: none, why: t}\ntemplates:\n"
+                                   "  project: templates/project\nguards:\n", 1))
+        self.install()
+        text = (self.site_root / "CLAUDE.md").read_text()
+        for i in range(7):
+            self.assertIn(f"`projects/*/area{i}/**` read-only", text)
+        self.assertIn("`projects/p-test/**` none", text)
+        self.assertIn("`projects/*/inputs/**` no-read", text)
+        self.assertNotIn("; ...", text)
+
+
 class NoProtection(SiteCase):
     def test_none_declared_and_reads_unhooked(self):
         self.install()

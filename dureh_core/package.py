@@ -245,15 +245,68 @@ def check(manifest: dict, root: Path | None = None) -> list[str]:
     return warnings
 
 
+WITNESS_FILLER = "w"
+WITNESS_MAX = 20000
+
+
+def _concrete(glob: str, vocab: list[str]) -> list[str]:
+    """Concrete paths a glob matches, built from `vocab` names: each wildcard segment takes a vocabulary name it
+    matches (or a filler), each `**` zero to two such names. Bounded; used only to find witnesses."""
+    from fnmatch import fnmatchcase
+
+    out = [[]]
+    for seg in glob.split("/"):
+        if seg == "**":
+            names = vocab + [WITNESS_FILLER]
+            ext = [[]] + [[a] for a in names] + [[a, b] for a in names for b in names]
+            out = [p + e for p in out for e in ext][:WITNESS_MAX]
+        elif any(c in seg for c in "*?["):
+            names = [n for n in vocab if fnmatchcase(n, seg)]
+            filler = seg.replace("*", WITNESS_FILLER).replace("?", "x")
+            if not any(c in filler for c in "[]") and filler not in names:
+                names.append(filler)
+            out = [p + [n] for p in out for n in names][:WITNESS_MAX]
+        else:
+            out = [p + [seg] for p in out]
+    return ["/".join(p) for p in out if p]
+
+
+def effective_rule(rules: list[dict], path: str) -> dict | None:
+    """The rule that decides a site-relative path at run time (protect.best_rule: most specific, later on a tie)."""
+    from .protect import best_rule
+
+    return best_rule(rules, [path])
+
+
 def role_scope_conflicts(manifest: dict, roles) -> list[str]:
-    """Write scopes (of package roles and desk additions) that cover a protected path: refused (3.4 rule 4)."""
-    rules = [r for r in protected_rules(manifest) if r.get("level") != "none"]
+    """Write scopes (of package roles and desk additions) that cover a protected path: refused (3.4 rule 4).
+
+    A scope conflicts only where the effective level is read-only or no-read, decided exactly as the runtime guard
+    decides (the most specific matching rule wins, the later one on a tie; `none` lifts the package's own rules):
+    the harness builds witness paths in the overlap of the scope and each protective rule from the names the
+    scope, that rule and the `none` rules spell, and refuses when any witness is protected. So `projects/p-test/**
+    none` lets a scope `projects/p-test/checkpoints/**` through even under `projects/*/**/.git/** read-only`, because
+    `projects/p-test/**` is more specific at the second segment; a scope `projects/*/checkpoints/**` still
+    conflicts (other projects stay protected)."""
+    from .org import scope_match
+
+    rules = protected_rules(manifest)
+    lifts = [r for r in rules if r.get("level") == "none"]
     out = []
     for r in roles:
         for s in r.write_scopes:
             if s.startswith("site:") or r.source == "harness":
                 continue
             for p in rules:
-                if globs_overlap(s, p["path"]):
-                    out.append(f"role {r.name}: write scope {s} covers protected path {p['path']} ({p['level']})")
+                if p.get("level") == "none" or not globs_overlap(s, p["path"]):
+                    continue
+                vocab = sorted({seg for g in [s, p["path"], *(x["path"] for x in lifts)] for seg in g.split("/")
+                                if seg and not any(c in seg for c in "*?[")})
+                witnesses = [w for w in set(_concrete(s, vocab) + _concrete(p["path"], vocab))
+                             if scope_match(w, s) and scope_match(w, p["path"])]
+                hit = next((w for w in sorted(witnesses) if (effective_rule(rules, w) or {}).get("level")
+                            in ("read-only", "no-read")), None)
+                if hit is not None or not witnesses:  # no witness found: refuse, as before (conservative)
+                    out.append(f"role {r.name}: write scope {s} covers protected path {p['path']} ({p['level']})"
+                               + (f", e.g. {hit}" if hit else ""))
     return out

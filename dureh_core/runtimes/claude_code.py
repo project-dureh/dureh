@@ -590,9 +590,11 @@ def _protected_text(site: Site, dureh) -> str:
     rules = site.protected()
     if not rules:
         return f" The package declares no protected paths (`{dureh} protected list`)."
-    shown = "; ".join(f"`{r['path']}` {r['level']}" for r in rules[:6]) + ("; ..." if len(rules) > 6 else "")
+    shown = "; ".join(f"`{r['path']}` {r['level']}" for r in rules)  # every rule, `none` lifts included
     return (f" Protected paths (`{dureh} protected list`) bind every role, you included: {shown}. A read-only area is"
-            " never written by an agent; a no-read area is not read either (listing names is fine). Every refusal is recorded as `guard.denied`.")
+            " never written by an agent; a no-read area is not read either (listing names is fine); `none` lifts the"
+            " package's own rules there. The most specific rule decides (the later one on a tie). Every refusal is"
+            " recorded as `guard.denied`.")
 
 
 def _hook_command(site: Site) -> str:

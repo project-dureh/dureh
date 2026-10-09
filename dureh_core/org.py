@@ -205,6 +205,15 @@ class Org:
                         fail(f"{where}: role {name}: kind must be manager or worker")
                     roles[name] = _role(name, spec, where, "package")
                     _check_scopes(roles[name], where)
+                # Director 2026-10-09: a package that declares its own managers (workers) does not get the generic
+                # `manager` (`worker`) as well, so the generic worker's module scopes cannot bypass the package's own
+                # narrower ones; a package may still declare `manager`/`worker` itself. Desk and checker always stay.
+                for kind in ("manager", "worker"):
+                    if kind not in pkg_roles and any(isinstance(sp, dict) and sp.get("kind") == kind and n != "checker"
+                                                     for n, sp in pkg_roles.items()):
+                        del roles[kind]
+                        for other in roles.values():
+                            other.may_dispatch = [t for t in other.may_dispatch if t != kind]
                 _desk_additions(roles["desk"], manifest.get("desk"), "startup.yaml")
                 _check_scopes(roles["desk"], "startup.yaml desk")
             if listed and enabled is None:
