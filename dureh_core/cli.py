@@ -51,6 +51,8 @@ def cmd_install(a):
     print("Created fresh site state; no package state or recovery pointer was imported.")
     print(f"Bootstrap work items (awaiting Gate 1): {', '.join(r['work_items']) or 'none'}")
     print(f"Self-test: {r['selftest']['result']} {r['selftest']['problems'] or ''}".rstrip())
+    for w in (r["selftest"].get("counts") or {}).get("warnings") or []:
+        print(f"warning: {w}")
     print(f"State: {r['state'].get('backend')} revision {r['state'].get('revision')}")
 
 
@@ -66,11 +68,20 @@ def cmd_adapter_sync(a):
         if not (other / "dureh_core").is_dir() or not os.access(exe, os.X_OK):
             fail(f"{other} is not a harness checkout (no executable dureh with dureh_core/)")
         if other != site.harness_root.resolve():
-            os.execv(str(exe), [str(exe), "--site", str(site.root), "adapter", "sync"])
+            os.execv(str(exe), [str(exe), "--site", str(site.root), "adapter", "sync",
+                                *(["--package-rev", a.package_rev] if a.package_rev else [])])
     old_root = (site.config.get("harness") or {}).get("root")
     stored_site_root = site.stored_root
-    from .install import apply_config_defaults
+    from .install import apply_config_defaults, sync_package
 
+    synced = sync_package(site, a.package_rev)  # option A: startup/ is re-copied from the committed source revision
+    if synced.get("skipped"):
+        print(f"package: {synced['skipped']}")
+    else:
+        print(f"package {synced['id']}: {synced['from'] or 'unpinned'} -> {synced['to']}"
+              + (f" ({len(synced['changed'])} file(s) changed; package.synced recorded)" if synced["changed"] else " (unchanged)"))
+    for w in synced.get("warnings") or []:
+        print(f"warning: {w}")
     added = apply_config_defaults(site)  # UP-0069: package config_defaults the site's config.json lacks (added once)
     if added:
         print(f"config.json: added from the package's config_defaults: {', '.join(added)}")
@@ -188,10 +199,11 @@ def cmd_dispatch_brief(a):
     from .workflow import dispatch_brief
     from .workday import gate
 
-    why = gate(_site(a), a.wi, checking=a.role == "checker")
+    site = _site(a)
+    why = gate(site, a.wi, checking=bool(a.role) and site.org.has(a.role, "verify"))
     if why:
         fail(why)
-    r = dispatch_brief(_site(a), a.wi, _actor(a), a.role)
+    r = dispatch_brief(site, a.wi, _actor(a), a.role)
     print(f"# spawn subagent_type={r['subagent_type']} model={r['model']}; pass everything below as the prompt")
     print(r["brief"], end="")
 
@@ -316,19 +328,6 @@ def cmd_status(a):
     _print(st if a.json else render_status(st))
 
 
-def cmd_container(a):
-    from . import containers
-
-    site = _site(a)
-    if a.container_command == "build":
-        _print(containers.build(site, _actor(a), a.wi, a.recipe, a.module, a.rev, a.version, a.name, a.time, a.mem,
-                                a.dry_run))
-    elif a.container_command == "retire":
-        _print(containers.retire(site, _actor(a), a.sif, a.reason, a.dry_run, a.wi))
-    else:
-        _print(containers.status(site, _actor(a), a.wi))
-
-
 def cmd_slurm(a):
     from . import ops
 
@@ -338,11 +337,9 @@ def cmd_slurm(a):
             if a.module or a.rev:
                 raise DurehError("--module with --via is phase 2 (not yet): the module's own jobs run its live checkout; "
                                  "drop --module/--rev or submit a plain script with --script --module")
-            for flag, value in (("--script", a.script), ("--each", a.each), ("--each-from-bids", a.each_from_bids),
-                                ("--level", a.level), ("--max-parallel", a.max_parallel), ("--sbatch-arg", a.sbatch_arg),
-                                ("--resubmit-failed", a.resubmit_failed), ("--suffix", a.suffix), ("--datatype", a.datatype),
-                                ("--match", a.match), ("--sub", a.sub), ("--ses", a.ses), ("--single", a.single or None),
-                                ("--reason", a.reason)):
+            for flag, value in (("--script", a.script), ("--each", a.each), ("--max-parallel", a.max_parallel),
+                                ("--sbatch-arg", a.sbatch_arg), ("--resubmit-failed", a.resubmit_failed),
+                                ("--single", a.single or None), ("--reason", a.reason)):
                 if value not in (None, []):
                     raise DurehError(f"{flag} does not go with --via: the module command renders and submits the job itself")
             _print(ops.slurm_submit_via(site, _actor(a), a.wi, a.via, record=a.record, after=a.after, dry_run=a.dry_run,
@@ -350,16 +347,14 @@ def cmd_slurm(a):
         elif a.record is not None or a.via_module is not None:
             raise DurehError("--record and --via-module go with --via")
         elif a.resubmit_failed:
-            if a.each or a.each_from_bids:
+            if a.each:
                 raise DurehError("--resubmit-failed takes the items from the run; drop --each")
             _print(ops.slurm_resubmit_failed(site, _actor(a), a.resubmit_failed, a.script, a.dry_run, a.sbatch_arg,
                                              a.module, a.rev, a.after, a.max_parallel, wi=a.wi))
         else:
             _print(ops.slurm_submit(site, _actor(a), a.wi, a.script, a.dry_run, a.sbatch_arg, module=a.module,
                                     rev=a.rev, each=" ".join(a.each) if a.each else None, after=a.after,
-                                    max_parallel=a.max_parallel, each_from_bids=a.each_from_bids, level=a.level,
-                                    suffix=a.suffix, datatype=a.datatype, match=a.match, subs=a.sub, sess=a.ses,
-                                    single=a.single, reason=a.reason))
+                                    max_parallel=a.max_parallel, single=a.single, reason=a.reason))
     elif a.slurm_command == "status":
         _print(ops.slurm_status(site, _actor(a), a.run))
     elif a.slurm_command == "wait":
@@ -734,27 +729,11 @@ def prune_stale_lines(r: dict) -> list[str]:
     return out
 
 
-def cmd_promote(a):
-    from .promote import promote, replace_metadata
+def cmd_protected(a):
+    from .protect import listing, render_listing
 
-    agent = os.environ.get("DUREH_AGENT_ID")
-    if a.kind == "report":
-        from .promote import promote_report
-
-        if not (a.source and a.run and a.name and a.dataset) or a.metadata or a.dest or a.input:
-            fail("--kind report takes --source, --run, --dataset and --name")
-        _print(promote_report(_site(a), _actor(a), a.wi, a.run, a.source, a.dataset, a.name, agent))
-        return
-    if not a.dataset:
-        fail("--dataset is required (derivatives/<name>)")
-    if a.metadata:
-        if a.source or a.run or a.dest or not a.input:
-            fail("--metadata takes --input and no --source, --run or --dest")
-        _print(replace_metadata(_site(a), _actor(a), a.wi, a.dataset, a.metadata, a.input, agent))
-    else:
-        if not (a.source and a.run) or a.input:
-            fail("promotion needs --source and --run (or use --metadata NAME --input FILE)")
-        _print(promote(_site(a), _actor(a), a.wi, a.run, a.source, a.dataset, a.dest, agent))
+    out = listing(_site(a))
+    _print(out if a.json else render_listing(out))
 
 
 def cmd_artifact_write(a):
@@ -781,13 +760,13 @@ def cmd_artifact_write(a):
 # ------------------------------------------------------------------- parser
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="dureh", description="DUREH harness tools: wi, dispatch, verify, ledger, event, status, "
-                                "slurm, container, path-refs, purge, push, usage, site, day, upstream, slack, report, "
-                                "authorize-write, worktree, promote, artifact (plus install, adapter, hook).")
+                                "slurm, path-refs, purge, push, usage, site, day, upstream, slack, report, "
+                                "authorize-write, worktree, protected, artifact (plus install, adapter, hook).")
     p.add_argument("--site", help="installed site directory (or DUREH_SITE)")
     p.add_argument("--observe", action="store_true",
                    help="read-only: allow only status, wi show/list, ledger query, upstream list/message/inbox (without "
-                        "--record; --watch included), path-refs, usage, verify --self, day status, site session status; never record "
-                        "anything (or DUREH_OBSERVE=1)")
+                        "--record; --watch included), path-refs, usage, verify --self, day status, site session status, "
+                        "protected list; never record anything (or DUREH_OBSERVE=1)")
     sub = p.add_subparsers(dest="command", required=True)
 
     def add(parent, name, func, help_):
@@ -804,8 +783,10 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--skip-unit", action="store_true", help="skip harness unit tests in the install self-test")
 
     ad = sub.add_parser("adapter", help="runtime adapter output").add_subparsers(dest="adapter_command", required=True)
-    x = add(ad, "sync", cmd_adapter_sync, "regenerate runtime files from org/ and the package")
+    x = add(ad, "sync", cmd_adapter_sync, "re-copy the package from its source at a committed revision (config "
+            "startup.source; refused with uncommitted changes), validate it, and regenerate runtime files")
     x.add_argument("--harness", help="switch this site to that harness checkout (a release under releases/) and sync from it")
+    x.add_argument("--package-rev", metavar="REV", help="the package source revision to install (default: its committed HEAD)")
 
     h = add(sub, "hook", cmd_hook, "runtime hook entry point (reads the event JSON on stdin)")
     h.add_argument("runtime", choices=["claude-code"])
@@ -948,25 +929,13 @@ def parser() -> argparse.ArgumentParser:
                    help="with --via: the config modules[] entry whose `submit` options the harness may add (default: "
                         "the entry whose cli/id is the command's first word; needed for wrapped commands such as `uv run`)")
     x.add_argument("--each", nargs="+", metavar="ITEMS",
-                   help="one array task per item (all at once, no cap): `sub-01,sub-02`, `sub-01 sub-02` or @file "
-                        "(one per line, # comments; inside the site); items are sub-<l>, sub-<l>_ses-<l> or plain labels, one level per array; the job gets "
-                        "the item, level, index, subject and session under config slurm.each_env names, default "
-                        "DUREH_ITER, DUREH_ITER_BY, DUREH_ITER_INDEX, DUREH_ITER_SUB, DUREH_ITER_SES")
-    x.add_argument("--each-from-bids", metavar="DATASET",
-                   help="items from a BIDS dataset inside the site: with --level file (the default, Director 2026-10-06) "
-                        "one task per file of --suffix (names only, nothing read; the task gets the file's path and the "
-                        "dataset root under slurm.each_env path/root names, default DUREH_ITER_PATH, DUREH_ITER_ROOT); "
-                        "--level subject its sub-* directories, --level session sub-*/ses-* (both need --reason)")
-    x.add_argument("--level", choices=["file", "subject", "session"],
-                   help="with --each-from-bids (default: config slurm.each_level, file)")
-    x.add_argument("--suffix", help="with --level file: the BIDS suffix of the files to loop over (e.g. bold, T1w)")
-    x.add_argument("--datatype", help="with --level file: only files in this datatype directory (func, anat, dwi, ...)")
-    x.add_argument("--match", metavar="GLOB", help="with --level file: only files whose path relative to the dataset matches")
-    x.add_argument("--sub", nargs="+", metavar="LABEL", help="with --level file: only these subjects")
-    x.add_argument("--ses", nargs="+", metavar="LABEL", help="with --level file: only these sessions")
+                   help="one array task per item (all at once, no cap): `a,b`, `a b` or @file (one per line, # comments; "
+                        "inside the site); an item's level comes from the package's labels.item_grammar (else plain), one "
+                        "level per array; the job gets the item, level, index and the grammar's named fields under config "
+                        "slurm.each_env names, default DUREH_ITER, DUREH_ITER_BY, DUREH_ITER_INDEX, DUREH_ITER_<FIELD>")
     x.add_argument("--single", action="store_true",
-                   help="one job that is not a workflow step (needs --reason); workflow steps loop at file level")
-    x.add_argument("--reason", help="why one job (--single) or a level coarser than file (--level subject|session)")
+                   help="one job without --each when the loop rule (config slurm.each_level) is on (needs --reason)")
+    x.add_argument("--reason", help="why one job (--single)")
     x.add_argument("--after", action="append", metavar="RUN",
                    help="start only after these runs completed (afterok on their job; an array waits for all tasks); "
                         "comma list or repeated")
@@ -996,32 +965,6 @@ def parser() -> argparse.ArgumentParser:
                                     "the owning WI when a line arrives")
     x.add_argument("--interval", type=int, default=300, help="seconds between scheduler checks (default 300; one sacct call per check)")
     x.add_argument("--once", action="store_true", help="one pass, then exit")
-    x.add_argument("--actor")
-
-    co = sub.add_parser("container", help="sanctioned container builds (scheduler jobs)").add_subparsers(
-        dest="container_command", required=True)
-    x = add(co, "build", cmd_container, "build a new SIF from a module revision and its recipe (module containers/<name>.def or --recipe), as a scheduler job")
-    x.add_argument("--wi", required=True)
-    x.add_argument("--recipe", help="project-local recipe projects/<p>/code/containers/<name>.def; omit to use the "
-                   "module's own containers/<name>.def at --rev (canonical)")
-    x.add_argument("--module", required=True, help="module id under modules/ whose `git archive <rev>` is the build context")
-    x.add_argument("--rev", required=True, help="module revision (any git revision; recorded in full)")
-    x.add_argument("--version", help="image version (default: the module's pyproject version at --rev)")
-    x.add_argument("--name", help="image name; without --recipe it also selects the module's containers/<name>.def "
-                   "(default: the recipe stem, else the module id)")
-    x.add_argument("--time", help="job --time (default: config containers.time or 02:00:00)")
-    x.add_argument("--mem", help="job --mem (default: config containers.mem or 16G)")
-    x.add_argument("--dry-run", action="store_true")
-    x.add_argument("--actor")
-    x = add(co, "status", cmd_container, "after the build job ended: check the image and record container.built once")
-    x.add_argument("--wi", required=True)
-    x.add_argument("--actor")
-    x = add(co, "retire", cmd_container, "delete an image no project manifest pins (desk or data-steward); its provenance "
-            "moves to <cache>/retired/ and container.retired is recorded")
-    x.add_argument("--sif", required=True, help="image file name in the cache, e.g. <module>_<version>-<rev7>.sif")
-    x.add_argument("--reason", required=True)
-    x.add_argument("--wi", help="the data-steward's dispatched WI to record it on (optional)")
-    x.add_argument("--dry-run", action="store_true", help="list pinning manifests and what would be removed")
     x.add_argument("--actor")
 
     x = add(sub, "path-refs", cmd_path_refs, "find references to a path before moving or deleting it")
@@ -1263,18 +1206,11 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--json", action="store_true", help="with --all or --prune-stale: print the items and summary as"
                    " JSON")
     x.add_argument("--actor")
-    x = add(sub, "promote", cmd_promote, "data-steward: promote verified checkpoints into a derivatives subdataset, "
-            "or (--kind report) land a generated report into derivatives/<dataset>/reports/<name>/")
-    x.add_argument("--kind", choices=["derivative", "report"], default="derivative")
-    x.add_argument("--name", help="with --kind report: directory under derivatives/<dataset>/reports/")
-    x.add_argument("--wi", required=True)
-    x.add_argument("--run", help="completed slurm run record that produced the source")
-    x.add_argument("--source", help="project-relative path under checkpoints/<step>/")
-    x.add_argument("--dataset", help="name of the subdataset under derivatives/")
-    x.add_argument("--dest", help="path inside the dataset (default: source path below checkpoints/<step>/)")
-    x.add_argument("--metadata", help="create or replace a top-level metadata file instead, e.g. dataset_description.json")
-    x.add_argument("--input", help="with --metadata: the new file, in your scratch space or under checkpoints/")
-    x.add_argument("--actor")
+    pr = sub.add_parser("protected", help="the package's protected paths (read-only, no-read)").add_subparsers(
+        dest="protected_command", required=True)
+    x = add(pr, "list", cmd_protected, "each protected path with its level and source (package id and revision); "
+            "read-only, allowed with --observe")
+    x.add_argument("--json", action="store_true")
     art = sub.add_parser("artifact", help="harness-mediated artifact writes").add_subparsers(dest="artifact_command", required=True)
     x = add(art, "write", cmd_artifact_write, "create a new authorized artifact")
     x.add_argument("--role", required=True)
@@ -1284,7 +1220,8 @@ def parser() -> argparse.ArgumentParser:
 
 
 OBSERVE_ALLOWED = {("status", None), ("wi", "show"), ("wi", "list"), ("ledger", "query"), ("upstream", "list"), ("upstream", "message"), ("upstream", "inbox"),
-                   ("path-refs", None), ("usage", None), ("verify", None), ("day", "status"), ("site", "session")}
+                   ("path-refs", None), ("usage", None), ("verify", None), ("day", "status"), ("site", "session"),
+                   ("protected", "list")}
 
 
 def _check_observe(args) -> None:

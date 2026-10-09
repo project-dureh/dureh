@@ -27,6 +27,7 @@ from ..ops import render_status, status, transcript_usage, watch_mode
 from ..org import HARNESS_ROOT
 from .. import procs
 from ..paths import classify, scratch_roots, write_decision
+from ..protect import CONTENT_READERS, has_no_read, read_refusal
 from ..records import Ledger
 from ..site import TOOL_NAMES, Site
 from ..util import DurehError, fail, dumps, sha256_bytes, utc_now, times_word, write_replace
@@ -53,13 +54,19 @@ ALWAYS_DENY_FIRST = {
     "screen": "no hidden background work in the session; use the scheduler",
     "tmux": "no hidden background work in the session; use the scheduler",
 }
-TOOLS_BY_ROLE = {
-    "manager": ["Agent", "Bash", "Read", "Grep", "Glob"],
-    "researcher": ["Bash", "Read", "Grep", "Glob", "WebSearch", "WebFetch"],
-    "checker": ["Bash", "Read", "Grep", "Glob"],
-    "pipeline-runner": ["Bash", "Read", "Grep", "Glob", "Write"],
-    "worker": ["Bash", "Read", "Grep", "Glob", "Edit", "Write"],
-}
+READ_TOOLS = {"Read", "Grep", "NotebookRead"}
+BASE_TOOLS = ["Bash", "Read", "Grep", "Glob"]
+
+
+def role_tools(role) -> list[str]:
+    """Tools from kind + capabilities + scopes (release 46): managers spawn (Agent); a role with write scopes edits
+    (Edit, Write); the network capability adds WebSearch and WebFetch. A verify role has no write scopes."""
+    tools = (["Agent"] if role.kind == "manager" else []) + list(BASE_TOOLS)
+    if role.kind == "worker" and [s for s in role.write_scopes if not s.startswith("site:")]:
+        tools += ["Edit", "Write"]
+    if role.has("network"):
+        tools += ["WebSearch", "WebFetch"]
+    return tools
 
 
 # ================================================================ generate
@@ -86,14 +93,8 @@ def _skill_frontmatter(name: str, text: str) -> str:
 
 
 def _agent_file(site: Site, role, project: str | None = None) -> str:
-    org = site.org
     entry = site.model_for_tier(role.tier)
-    kind = role.kind if role.kind == "manager" else ("researcher" if role.name == "researcher" else
-                                                    "checker" if role.name == "checker" else
-                                                    "pipeline-runner" if role.name == "pipeline-runner" else "worker")
-    tools = TOOLS_BY_ROLE[kind]
-    if role.kind == "worker" and not role.write_scopes and role.name not in ("pipeline-runner",):
-        tools = [t for t in tools if t not in ("Edit", "Write")]
+    tools = role_tools(role)
     dureh = site.root / "bin" / "dureh"
     scopes = [s for s in role.write_scopes if not s.startswith("site:")]
     if project:
@@ -117,7 +118,8 @@ def _agent_file(site: Site, role, project: str | None = None) -> str:
             f"- You may dispatch only: {', '.join(role.may_dispatch)}. One work item = one worker type.",
             f"- Prepare every spawn with `{dureh} dispatch brief --wi <WI>`; pass the printed brief as the entire prompt,"
             " with `subagent_type` set to the role it names. The hook refuses any other spawn.",
-            f"- After a worker stages, verify through the checker: `{dureh} dispatch brief --wi <WI> --role checker`.",
+            f"- After a worker stages, verify through {_verifier_text(site, role)}: `{dureh} dispatch brief --wi <WI> --role"
+            f" {_verifier(site, role)}`.",
             f"- Re-dispatch an item at most {times_word(int(site.limit('max_redispatch', 2)))} after failed checks; then stop"
             " and report to the desk.",
             f"- Record problems found outside the scope as findings: `{dureh} ledger add finding --summary ... --evidence-level ...`.",
@@ -146,48 +148,64 @@ def _agent_file(site: Site, role, project: str | None = None) -> str:
             f"- Return at most {int(site.limit('worker_report_lines', 30))} lines with numbers: changed paths, commands and"
             " results, unresolved assumptions.",
         ]
-        extra = {
-            "checker": [f"- Your job: verify the item in your brief with `{dureh} verify --wi <WI>`. It checks ownership, declared"
-                        " outputs, and declared checks, and records the result. Report its numbers; never fix the artifact.",
-                        "- The declared checks run as one scheduler job; never run them, a test suite or `pytest` yourself in"
-                        " the session, and never pass `--local` unless your brief says so.",
-                        f"- With the slurm checks runner (your brief says so): run `{dureh} verify --wi <WI> --submit`, report the"
-                        f" run id it prints and end your turn; when the desk re-dispatches you after the job ended, run"
-                        f" `{dureh} verify --wi <WI> --collect` and report its result (if it says the job is still running,"
-                        " report that and end your turn). Otherwise run `verify --wi <WI>` in the foreground.",
-                        "- Never run verify in the background (no `&`, no background shell): a background command is killed"
-                        " when you end and nothing is recorded."],
-            "pipeline-runner": [f"- Submit every computation with `{dureh} slurm submit --wi <WI> --script <job.sh>`."
-                                " Never run heavy tools in the session.",
-                                f"- {_log_rule(site)}",
-                                "- Never wait for a job in the session (no `squeue`/`sleep` loops, no background commands,"
-                                f" no long `slurm wait`): after submitting, report the run id(s) and end your turn; the desk"
-                                f" re-dispatches you {_job_end_seen(site)}, and `{dureh} slurm status --run <run-id>`"
-                                f" then shows its final state (per item for `--each`). `{dureh} slurm wait --run <run-id>` only for"
-                                " a job expected to end within a few minutes.",
-                                f"- {SUBJECT_RULE} File-level items are BIDS file stems; subject/session items are `sub-<label>` (or `sub-<label>_ses-<label>`);"
-                                f" the script reads them from the environment: {_item_names_text(site)};"
-                                f" rerun only the failed items with `{dureh} slurm submit --wi <WI> --resubmit-failed <run> [--script <fixed.sh>]`.",
-                                f"- Build a container image only with `{dureh} container build --wi <WI> --module <m> --rev <rev> [--name <name>]`"
-                                " (the recipe is the module's own `containers/<name or m>.def` at that rev; add"
-                                " `--recipe projects/<p>/code/containers/<name>.def` only for a project-local image);"
-                                f" when the build job has ended (you are re-dispatched), record it with `{dureh} container status --wi <WI>`"
-                                " (never `apptainer build`, never write the container cache)."],
-            "py-writer": ["- A module's container recipes are `containers/<name>.def` at the module root (canonical; the build context is"
-                          " `git archive <rev>` of the module, so `%files` paths are module-relative). Commit them on the WI branch;"
-                          " images are built later by a pipeline-runner from the promoted revision, never by you.",
-                          f"- Finish with `{dureh} wi stage --wi <WI> --summary ...` after committing on the WI branch."],
-            "data-steward": [f"- `derivatives/` is written only by `{dureh} promote` (see harness docs/promote.md), never directly.",
-                             f"- Pin images in {site.project_manifest() or 'the project manifest'} by `sha256:<hex>` from `container.built`; project copies of module"
-                             " recipes under code/containers/ are optional (the module's containers/ is canonical).",
-                             f"- Remove an image no manifest pins with `{dureh} container retire --sif <file> --reason ... --wi <WI>`"
-                             " (`--dry-run` first lists pinning manifests); never delete from the cache yourself.",
-                             f"- Finish with `{dureh} wi stage --wi <WI> --summary ...` after committing on the WI branch."],
-            "researcher": [f"- Record each result: `{dureh} ledger add finding --wi <WI> --summary ... --evidence-level ...`"
-                           " with --source for every source (identity, retrieval time, passage or hash)."],
-        }.get(role.name, [f"- Finish with `{dureh} wi stage --wi <WI> --summary ...` after committing on the WI branch."])
+        extra: list[str] = []
+        if role.has("verify"):
+            extra += _verify_lines(dureh)
+        if role.has("submit_jobs"):
+            extra += _job_lines(site, dureh)
+        if role.has("network"):
+            extra += [f"- Record each result: `{dureh} ledger add finding --wi <WI> --summary ... --evidence-level ...`"
+                      " with --source for every source (identity, retrieval time, passage or hash)."]
+        if not role.has("verify") and (scopes or not role.has("network")):
+            extra.append(f"- Finish with `{dureh} wi stage --wi <WI> --summary ...`"
+                         + (" (you have no worktree: nothing to commit)." if role.isolation == "scratch"
+                            else " after committing on the WI branch."))
+        extra += list(role.instructions)
         lines += extra
     return "\n".join(lines) + "\n"
+
+
+def _verifier(site: Site, caller=None) -> str:
+    """The verify role a caller dispatches (the checker unless the package re-skinned or replaced it)."""
+    names = [r.name for r in site.org.with_capability("verify")
+             if caller is None or r.name in caller.may_dispatch]
+    return "checker" if "checker" in names or not names else names[0]
+
+
+def _verifier_text(site: Site, caller=None) -> str:
+    return f"the `{_verifier(site, caller)}` (verify capability)"
+
+
+def _verify_lines(dureh) -> list[str]:
+    return [f"- Your job: verify the item in your brief with `{dureh} verify --wi <WI>`. It checks ownership, declared"
+            " outputs, and declared checks, and records the result. Report its numbers; never fix the artifact.",
+            "- The declared checks run as one scheduler job; never run them, a test suite or `pytest` yourself in"
+            " the session, and never pass `--local` unless your brief says so.",
+            f"- With the slurm checks runner (your brief says so): run `{dureh} verify --wi <WI> --submit`, report the"
+            f" run id it prints and end your turn; when the desk re-dispatches you after the job ended, run"
+            f" `{dureh} verify --wi <WI> --collect` and report its result (if it says the job is still running,"
+            " report that and end your turn). Otherwise run `verify --wi <WI>` in the foreground.",
+            "- Never run verify in the background (no `&`, no background shell): a background command is killed"
+            " when you end and nothing is recorded."]
+
+
+def _job_lines(site: Site, dureh) -> list[str]:
+    """Agent-file lines of a role with the submit_jobs capability (release 46: generic; a package adds its own
+    loop rule text through `policies.loop_rule.text`)."""
+    from ..package import loop_policy
+
+    policy = loop_policy(site.package_manifest()).get("text")
+    return [f"- Submit every computation with `{dureh} slurm submit --wi <WI> --script <job.sh>`."
+            " Never run heavy tools in the session.",
+            f"- {_log_rule(site)}",
+            "- Never wait for a job in the session (no `squeue`/`sleep` loops, no background commands,"
+            f" no long `slurm wait`): after submitting, report the run id(s) and end your turn; the desk"
+            f" re-dispatches you {_job_end_seen(site)}, and `{dureh} slurm status --run <run-id>`"
+            f" then shows its final state (per item for `--each`). `{dureh} slurm wait --run <run-id>` only for"
+            " a job expected to end within a few minutes.",
+            f"- {JOBS_RULE} The script reads its item from the environment: {_item_names_text(site)};"
+            f" rerun only the failed items with `{dureh} slurm submit --wi <WI> --resubmit-failed <run> [--script <fixed.sh>]`."
+            + (f" {policy}" if policy else "")]
 
 
 def _item_names(site: Site) -> dict:
@@ -215,25 +233,20 @@ def _log_rule(site: Site) -> str:
 
 def _item_names_text(site: Site) -> str:
     n = _item_names(site)
-    what = {"item": "item", "by": "level", "index": "index", "sub": "subject label", "ses": "session label",
-            "path": "file path relative to the dataset (file level)", "root": "dataset root (file level)"}
-    return ", ".join(f"`${v}` ({what[k]})" for k, v in n.items())
+    what = {"item": "item", "by": "level", "index": "index"}
+    return ", ".join(f"`${v}` ({what.get(k, k + ' field of the item grammar')})" for k, v in n.items())
 
 
 TESTS_RULE = ("- Test suites are scheduler work too: never run `pytest`, `python -m unittest discover` or a module's test"
               " suite in the session (one session hit its memory limit this way). The WI's declared checks run as one"
               " scheduler job when the checker runs `dureh verify --wi <WI>`; other computation goes through"
               " `dureh slurm submit`. Commit, stage, and let the check job report.")
-SUBJECT_RULE = ("Every workflow step loops at file level (Director 2026-10-06): one array task per file, all files at once:"
-                " `slurm submit --wi <WI> --script <step.sh> --each-from-bids <dataset> --level file --suffix <bids suffix>"
-                " [--datatype <d>] [--match <glob>] [--sub ...]`; the task reads its file under the configured path name"
-                " (default `$DUREH_ITER_PATH`, relative to `$DUREH_ITER_ROOT`) and its stem under the item name. Subject or"
-                " session level only with `--reason '<why>'`; a single job only with `--single --reason`; group steps go"
-                " `--after <run>` of the array. A module with its own submit command is submitted through it: `slurm submit"
-                " --wi <WI> --via '<module command> ... --level file --submit --detach'` (for example `camri run <pipeline> <step>"
-                " --workflow <w> --level file [filters] --submit --detach`), one submission per step, the next step"
-                " `--after <run>`; the module makes the array and the item list, the harness records its level."
-                " Plain item lists (`--each <items>`) are for hand-picked items. Never loop submits by hand.")
+JOBS_RULE = ("Loop with one array per step: `slurm submit --wi <WI> --script <step.sh> --each <items>` (a list or `@file`,"
+             " one array task per item, all items at once; an item's level and fields come from the package's"
+             " labels.item_grammar); a group step goes `--after <run>` of the array; a single job without `--each`"
+             " needs `--single --reason '<why>'` while the loop rule is on (config `slurm.each_level`). A module with"
+             " its own submit command is submitted through it: `slurm submit --wi <WI> --via '<module command> ...'`"
+             " (docs/slurm.md \"via\"), one submission per step, the next step `--after <run>`. Never loop submits by hand.")
 
 
 REPORT_RULE = (" Report with `{0} report --kind status|question|approval-exec|approval-light|alert|end-report --file <msg>`;"
@@ -410,11 +423,14 @@ def _claude_md(site: Site) -> str:
               f"- {ENGLISH_RULE}",
               "- persona file: `state/persona/persona.json`; memory: `state/memory/` (only you read and write it).", "",
               "## Organization", "", "```text", "Director <-> desk", ]
+    verifiers = [r.name for r in org.with_capability("verify")]
     for m in managers:
-        lines.append(f"   +-- {m.name:12s} -> {', '.join(x for x in m.may_dispatch if x != 'checker')}")
+        lines.append(f"   +-- {m.name:12s} -> {', '.join(x for x in m.may_dispatch if x not in verifiers)}")
     direct = [x for x in org.role("desk").may_dispatch if org.role(x).kind == "worker"]
     lines += [f"   +-- direct: {', '.join(direct)}", "```", "",
-              "Depth is fixed at two: desk -> manager -> worker. One work item = one worker type. Verification is the checker's alone.", "",
+              "Depth is fixed at two: desk -> manager -> worker. One work item = one worker type. Verification is a"
+              f" verify role's alone ({', '.join(verifiers)}).", "",
+              _capability_text(org), "",
               "## How you work", "",
               f"All harness tools are subcommands of `{dureh}` ({', '.join(TOOL_NAMES)}). Run `{dureh} --help` for syntax.", "",
               "When you name a WI to the Director, add its short title: `WI-0138 (framework design doc)` (harness output for the"
@@ -456,7 +472,7 @@ def _claude_md(site: Site) -> str:
               f" (or `--target <target>` for a main tree's `.venv`); it rebuilds the environment with `env_rebuild` from config.json."
               f" After the site moved or was renamed, `{dureh} worktree repair --all` does this for every worktree and environment at once (`--dry-run` first)."
               " Never edit `.git` files or rebuild environments by hand.",
-              f"8. Compute runs only as scheduler jobs through `{dureh} slurm submit`. {SUBJECT_RULE} {_log_rule(site)}"
+              f"8. Compute runs only as scheduler jobs through `{dureh} slurm submit`. {JOBS_RULE}{_loop_policy_text(site)} {_log_rule(site)}"
               + _job_end_rule(site, dureh) +
               f" re-dispatch the owning WI: `{dureh} dispatch brief --wi <WI>` (for an item of a bundle whose manager"
               " ended, re-dispatch the bundle so its manager re-dispatches the item; an ended verify job is collected by the checker,"
@@ -468,11 +484,8 @@ def _claude_md(site: Site) -> str:
               " bundles do not); every lane refusal is recorded as `lane.refused` and counted in status."
               f" A dispatch whose agent never started is superseded by a new `{dureh} dispatch brief --wi <WI>` after"
               " `dispatch_start_grace_seconds` (default 120 s); `dispatch stop` is for releasing the item, not for clearing it."
-              f" Brief pipeline-runners the same way (subject list or `@file`, steps, `--after` order); container images only through `{dureh} container build`"
-              f" (a pipeline-runner WI on the module or a project, recipe = the module's `containers/<name>.def` at `--rev`; `{dureh} container status --wi <WI>` records `container.built` with the sha256 for the data-steward's manifest;"
-              f" `{dureh} container retire --sif <file> --reason ...` removes an image no project manifest pins). External pushes only through `{dureh} push` with a Director decision."
-              f" Verified checkpoints reach `derivatives/` only through `{dureh} promote`, run by a dispatched data-steward;"
-              f" a code-generated report lands with `{dureh} promote --kind report ... --dataset <pipeline> --name <report>` in derivatives/<pipeline>/reports/<report>/ with provenance.json.",
+              " Brief a role with the `submit_jobs` capability the same way (item list or `@file`, steps, `--after` order)."
+              f" External pushes only through `{dureh} push` with a Director decision.",
               f"9. Self-test the harness and this site with `{dureh} verify --self` after any harness or package update."
               f" Several work items at once: `{dureh} wi show --wi A --wi B --summary`. Never wait for a scheduler job in a polling loop:"
               + _no_poll_rule(site, dureh) +
@@ -524,7 +537,7 @@ def _claude_md(site: Site) -> str:
               " The plan lists each work item with its expected agent spawns and a rough usage estimate, and the day total against the daily share."
               f" To fix a WI's checks, acceptance, constraints, outputs or stale base, amend it instead of replacing it: `{dureh} wi amend --wi <WI> --memo ... [--check ...] [--rebase]`"
               " (a stopped item re-opens; inside a day plan the plan approval covers it). A different goal, role or target is a new WI."
-              " Promotion (Gate 2) of checker-verified module and project WIs in the plan is covered by the plan approval; promotion into derivatives and harness/package contributions wait for the end report."
+              " Promotion (Gate 2) of checker-verified module and project WIs in the plan is covered by the plan approval; harness/package contributions wait for the end report."
               " After the end time one checker run is still allowed for an item staged during the day; a re-dispatch after a failed check is overtime (recorded by the harness for plan items)."
               " Never held by the plan or the clock: stopping an agent (`dispatch stop`) or a scheduler job, merge-window handling (idle, adapter sync, verify --self), recording upstream replies."
               f" Data at risk: tell the Director at once; on the Director's word run `{dureh} day urgent --wi <WI>... --memo \"<Director's words>\"` (releases those WIs from the plan, the clock and the budget until tomorrow)."
@@ -542,11 +555,44 @@ def _claude_md(site: Site) -> str:
               " then write a short handoff to `state/memory/handoff.md` (what is open, what the Director decided, what is next);"
               f" then run `{dureh} day close`. After it, do nothing: the session job sends `/exit` to this session within about 20 s and ends by itself;"
               " never scancel your own job.", "",
-              "Small questions the Director asks may be answered directly. Research that needs many sources goes to `researcher`; long documents go to `doc-writer`.",
-              "Reference paths are read-only. Records are append-only: correct history by appending an event, never by editing a record.", "",
+              "Small questions the Director asks may be answered directly." + _research_text(org),
+              "Reference paths are read-only. Records are append-only: correct history by appending an event, never by editing a record."
+              + _protected_text(site, dureh), "",
               "## Core values", "", values, "",
               f"Status and pending gates are injected at session start. For more: `{dureh} status`, `{dureh} ledger query \"SELECT ...\"`, `{dureh} usage`."]
     return "\n".join(lines) + "\n"
+
+
+def _capability_text(org) -> str:
+    """The organization's capabilities by role (release 46: tools and event authority come from kind + capabilities)."""
+    from ..package import CAPABILITIES
+
+    held = {c: [r.name for r in org.with_capability(c)] for c in CAPABILITIES}
+    return ("Capabilities (closed set; a role's tools and the events it may record follow its kind and capabilities): "
+            + "; ".join(f"{c}: {', '.join(n) if n else 'none'}" for c, n in held.items())
+            + ". The desk itself may submit jobs, verify and use the network.")
+
+
+def _loop_policy_text(site: Site) -> str:
+    from ..package import loop_policy
+
+    text = loop_policy(site.package_manifest()).get("text")
+    return f" Package loop rule: {text}" if text else ""
+
+
+def _research_text(org) -> str:
+    net = [r.name for r in org.with_capability("network")]
+    return (f" Research that needs many sources goes to a role with the network capability ({', '.join(net)})." if net
+            else " No role has the network capability: research beyond small questions waits for the package to add one.")
+
+
+def _protected_text(site: Site, dureh) -> str:
+    rules = site.protected()
+    if not rules:
+        return f" The package declares no protected paths (`{dureh} protected list`)."
+    shown = "; ".join(f"`{r['path']}` {r['level']}" for r in rules[:6]) + ("; ..." if len(rules) > 6 else "")
+    return (f" Protected paths (`{dureh} protected list`) bind every role, you included: {shown}. A read-only area is"
+            " never written by an agent; a no-read area is not read either (listing names is fine). Every refusal is recorded as `guard.denied`.")
 
 
 def _hook_command(site: Site) -> str:
@@ -581,7 +627,9 @@ def _settings(site: Site) -> dict:
         "hooks": {
             "SessionStart": [{"hooks": hook(60)}],
             "SessionEnd": [{"hooks": hook(120)}],
-            "PreToolUse": [{"matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash|Agent|Task|WebFetch|WebSearch", "hooks": hook()}],
+            # release 46: Read|Grep only when the package declares a no-read path, so other sites pay nothing
+            "PreToolUse": [{"matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash|Agent|Task|WebFetch|WebSearch"
+                            + ("|Read|Grep" if has_no_read(site) else ""), "hooks": hook()}],
             "PostToolUse": [{"matcher": "Write|Edit|MultiEdit", "hooks": hook()}],
             "SubagentStart": [{"hooks": hook()}],
             "SubagentStop": [{"hooks": hook()}],
@@ -1067,6 +1115,25 @@ def _scan_check(site: Site, first: str, words: list[str], cwd: Path) -> str | No
     return None
 
 
+def _read_check(site: Site, first: str, words: list[str], cwd: Path) -> str | None:
+    """Release 46, best effort: a content reader (`cat`, `head`, `grep`, `python <file>`, `cp` from ...) naming a path
+    in a no-read area, or any command reading one through `<`. Indirection (a script that opens the file) is not
+    caught; listing (`ls`, `find`, Glob) is allowed."""
+    cands = [w for w in words[1:] if not w.startswith("-")] if first in CONTENT_READERS else []
+    cands += [words[i + 1] for i, w in enumerate(words[:-1]) if w in ("<", "<>")]
+    cands += [w.split("=", 1)[1] for w in words[1:] if w.startswith("--") and "=" in w and first in CONTENT_READERS]
+    for raw in cands:
+        if "$" in raw or not raw:
+            continue
+        p = Path(os.path.expanduser(raw))
+        p = p if p.is_absolute() else cwd / p
+        t = classify(site, p, cwd)
+        why = read_refusal(site, p, t.logical if t.zone in ("worktree", "target") else None)
+        if why:
+            return f"`{first} {raw}` reads a protected path: {why}"
+    return None
+
+
 def _marked(original: str, agent_id: str, simple: bool) -> str:
     """The command with DUREH_AGENT_ID in its environment, so leftovers can be found when the agent ends."""
     ident = f"DUREH_AGENT_ID={shlex.quote(agent_id)}"
@@ -1111,6 +1178,7 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
         return _deny(wait(f"cannot parse the command ({exc}); simplify it", original))
     cwd = Path(data.get("cwd") or site.root)
     scheduler_only = _scheduler_only(site)
+    no_read = has_no_read(site)
     words_only = [s for s in segs if s[0] not in _SEPARATORS]
     if any(s == ["&"] for s in segs):
         return _deny(wait("no background jobs (`&`) in the session; use the scheduler", original))
@@ -1171,6 +1239,10 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
             return _deny("recursive deletion goes through `dureh purge`")
         if role != "desk":
             why = _scan_check(site, first, words, cwd)
+            if why:
+                return _deny(why)
+        if no_read:
+            why = _read_check(site, first, words, cwd)
             if why:
                 return _deny(why)
         if first == "cd" and len(words) > 1:
@@ -1254,6 +1326,17 @@ def _record_spawn(led: Ledger, role: str, target: str, wi: str, digest: str, ti:
 def pre_tool_use(site: Site, data: dict) -> dict | None:
     tool = data.get("tool_name") or ""
     role = _role_of(site, data)
+    if tool in READ_TOOLS:
+        if not has_no_read(site):
+            return None
+        ti = data.get("tool_input") or {}
+        path = ti.get("file_path") or ti.get("path") or ti.get("notebook_path") or data.get("cwd") or str(site.root)
+        cwd = Path(data.get("cwd") or site.root)
+        p = Path(os.path.expanduser(str(path)))
+        p = p if p.is_absolute() else cwd / p
+        t = classify(site, p, cwd)
+        why = read_refusal(site, p, t.logical if t.zone in ("worktree", "target") else None)
+        return _deny(why) if why else None
     if role.startswith("foreign:"):
         if tool in WRITE_TOOLS | SPAWN_TOOLS or tool == "Bash":
             return _deny(f"{role[8:]} is not a DUREH role; spawn DUREH roles only")
@@ -1266,7 +1349,8 @@ def pre_tool_use(site: Site, data: dict) -> dict | None:
             _bind(led, role, data, "first-tool")
         target = ti.get("subagent_type") or "general-purpose"
         if target not in org.roles or target == "desk":
-            return _deny(f"`{target}` is not a DUREH role; research goes to `researcher`, documents to `doc-writer`")
+            return _deny(f"`{target}` is not a DUREH role; spawn one of the roles {role} may dispatch: "
+                         f"{', '.join(org.role(role).may_dispatch) or 'none'}")
         if target not in org.role(role).may_dispatch:
             return _deny(f"{role} may not dispatch {target}")
         m = BRIEF_RE.search(ti.get("prompt") or "")
@@ -1277,7 +1361,7 @@ def pre_tool_use(site: Site, data: dict) -> dict | None:
             return _deny(f"the brief is for {brief_role}, not {target}")
         from ..workday import gate
 
-        why = gate(site, wi, checking=target == "checker")
+        why = gate(site, wi, checking=org.has(target, "verify"))
         if why:
             return _deny(why)
         with led.lock():
@@ -1302,8 +1386,9 @@ def pre_tool_use(site: Site, data: dict) -> dict | None:
         return None
     if tool == "Bash":
         return guard_bash(site, role, data)
-    if tool in NETWORK_TOOLS and role not in ("desk", "researcher"):
-        return _deny("network access is limited to the desk and researcher")
+    if tool in NETWORK_TOOLS and not org.has(role, "network"):
+        holders = ["desk"] + [r.name for r in org.with_capability("network")]
+        return _deny(f"network access needs the network capability ({', '.join(holders)})")
     return None
 
 
@@ -1476,7 +1561,7 @@ def _audit_denial(site: Site, data: dict, out: dict | None) -> dict | None:
     if out and out.get("hookSpecificOutput", {}).get("permissionDecision") == "deny":
         role = _role_of(site, data)
         ti = data.get("tool_input") or {}
-        target = ti.get("file_path") or ti.get("command") or ti.get("subagent_type") or ti.get("url") or ""
+        target = ti.get("file_path") or ti.get("command") or ti.get("subagent_type") or ti.get("url") or ti.get("path") or ""
         payload = {"tool": data.get("tool_name"), "role": role, "agent_id": data.get("agent_id"),
                    "target": str(target)[:4000],
                    "reason": out["hookSpecificOutput"].get("permissionDecisionReason", "")[:500]}

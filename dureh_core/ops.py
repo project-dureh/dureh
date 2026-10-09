@@ -65,7 +65,8 @@ def orphaned(led: Ledger, wis: list[dict], closable: list | None = None) -> list
             continue
         kids = [w["id"] for w in wis if (payloads.get(w["id"]) or {}).get("parent") == wi]
         running = [k for k in kids if state.get(k) in ("running", "starting")]
-        manager = led.site.org.role(payloads[wi]["role"]).is_manager
+        r = led.site.org.get(payloads[wi]["role"])
+        manager = bool(r) and r.is_manager
         if manager and state[wi] == "ended" and kids and all(status_of.get(k) in BUNDLE_SETTLED for k in kids):
             if closable is not None:
                 closable.append(_bundle_to_close(wi, payloads[wi]["role"], {k: status_of[k] for k in kids}))
@@ -283,7 +284,6 @@ def lane_refusals(led: Ledger, hours: int = 24) -> dict:
 
 
 EXTERNAL_LIMIT = 10  # external jobs listed by status; the rest are counted
-EXTERNAL_IGNORE_DEFAULT = ["cc-*"]  # session jobs (`cc-<session name>[-<purpose>]`): this and other sessions' desks
 
 
 def _base_job(job) -> str:
@@ -307,14 +307,20 @@ def _owned_jobs(led: Ledger) -> set[str]:
 
 
 def external_jobs(site: Site, led: Ledger | None = None) -> dict | None:
-    """Release 45: the site user's scheduler jobs (one `squeue -h -u $USER`) that no harness record owns, so the
-    desk sees work started outside `dureh slurm submit|verify|site session` (by hand, by a module's own
-    framework, or left over). Excluded: jobs a run or session record names, the calling job ($SLURM_JOB_ID, the
-    session itself), and names matching config `slurm.external_ignore` (default `cc-*`, the session jobs of this
-    and other sites). {jobs: [{job_id, name, state, time}] (at most EXTERNAL_LIMIT), count}; None when config
-    `slurm.external_jobs` is false or squeue cannot be asked (never an error)."""
+    """The site user's scheduler jobs (one `squeue -h -u $USER`) that no harness record owns, so the desk sees work
+    started outside `dureh slurm submit|verify|site session` (by hand, by a module's own framework, or left over).
+    Release 46: only jobs whose name matches config `slurm.external_match` (an include list of name patterns, e.g.
+    `["<prefix>-*"]`) are listed; empty or absent lists none and asks squeue nothing. Excluded always: jobs a run or
+    session record names and the calling job ($SLURM_JOB_ID, the session itself). The old `slurm.external_ignore` is
+    ignored (config_warnings says so). {jobs: [{job_id, name, state, time}] (at most EXTERNAL_LIMIT), count}; None
+    when nothing is matched, config `slurm.external_jobs` is false or squeue cannot be asked (never an error)."""
     cfg = site.config.get("slurm") or {}
     if cfg.get("external_jobs", True) is False:
+        return None
+    match = cfg.get("external_match") or []
+    if isinstance(match, str):
+        match = [match]
+    if not match:
         return None
     import getpass
 
@@ -331,17 +337,36 @@ def external_jobs(site: Site, led: Ledger | None = None) -> dict | None:
     own_job = os.environ.get("SLURM_JOB_ID")
     if own_job:
         owned.add(_base_job(own_job))
-    ignore = cfg.get("external_ignore", EXTERNAL_IGNORE_DEFAULT) or []
     out = []
     for line in proc.stdout.splitlines():
         parts = line.strip().split("|")
         if len(parts) < 4 or not parts[0]:
             continue
         job, name, state, used = (x.strip() for x in parts[:4])
-        if _base_job(job) in owned or any(fnmatch.fnmatchcase(name, str(g)) for g in ignore):
+        if _base_job(job) in owned or not any(fnmatch.fnmatchcase(name, str(g)) for g in match):
             continue
         out.append({"job_id": job, "name": name, "state": state, "time": used})
     return {"jobs": out[:EXTERNAL_LIMIT], "count": len(out)}
+
+
+def config_warnings(site: Site) -> list[str]:
+    """Config keys a site still carries that this release ignores (shown by status, `adapter sync`, `verify --self`)."""
+    out = []
+    slurm = site.config.get("slurm") or {}
+    if "external_ignore" in slurm:
+        out.append("config slurm.external_ignore is ignored since release 46: external jobs are listed only when their"
+                   " name matches slurm.external_match (an include list of name patterns; empty or absent lists none)")
+    proj = site.config.get("project") or {}
+    gone = [k for k in ("pipeline_version_key", "derivative_entry") if k in proj]
+    if gone:
+        out.append(f"config project.{', project.'.join(gone)}: unused since release 46 (project guidance is a generic"
+                   " scaffold; the package's templates/project carries project text)")
+    cont = site.config.get("containers") or {}
+    gone = [k for k in ("manifest_globs", "module", "build_args", "time", "mem") if k in cont]
+    if gone:
+        out.append(f"config containers.{', containers.'.join(gone)}: unused since release 46 (`dureh container"
+                   " build/status/retire` were removed; only containers.cache and containers.cache_env are read)")
+    return out
 
 
 def render_external(ext: dict | None) -> str | None:
@@ -390,7 +415,25 @@ def status(site: Site) -> dict:
         "workday": _workday(site),
         "external_jobs": external_jobs(site, led),
         "labels": led.labels(),  # UR-20261008-02: `WI-xxxx (short title)` wherever the text names a WI
+        "warnings": status_warnings(site, wis),
     }
+
+
+def status_warnings(site: Site, wis: list[dict]) -> list[str]:
+    """Config keys this release ignores, package/org load warnings, and open WIs whose role this organization no
+    longer defines (release 46 removed roles from the harness default org)."""
+    out = config_warnings(site)
+    try:
+        out += site.org.warnings
+        open_states = ("proposed", "approved", "dispatched", "staged", "rework", "verified")
+        stale = [f"{w['id']} ({w['role']})" for w in wis if w["status"] in open_states and site.org.get(w["role"]) is None]
+        if stale:
+            out.append("open work items whose role is not in this organization (removed or disabled): "
+                       + ", ".join(stale[:10]) + ("; ..." if len(stale) > 10 else "")
+                       + "; stop them (`dispatch stop`/`wi amend`) or recreate them for a package role")
+    except DurehError as exc:
+        out.append(f"organization does not load: {exc}")
+    return out
 
 
 def _workday(site: Site) -> dict:
@@ -438,6 +481,8 @@ def render_status(st: dict) -> str:
     ext = render_external(st.get("external_jobs"))
     if ext:
         lines.append(ext)
+    for w in st.get("warnings") or []:
+        lines.append(f"Warning: {w}")
     for b in st.get("bundles_to_close") or []:
         counts = ", ".join(f"{k} {v}" for k, v in sorted(b["counts"].items()))
         lines.append(f"Bundle to close (manager not needed): {b['wi']} {b['role']} items {counts} -> {b['action']}")
@@ -456,12 +501,9 @@ ITEM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
-LEVELS = ("file", "session", "subject")  # finest first; config `slurm.each_level` (default file) is the loop rule's level
-BIDS_SKIP = {"derivatives", "sourcedata", "code", "stimuli", "phenotype", ".git", ".datalad", ".heudiconv"}
-SIDECAR_EXT = (".json", ".tsv", ".bval", ".bvec")
-FILE_ENTITY_RE = re.compile(r"(?:^|_)(sub|ses)-([A-Za-z0-9]+)")
-LOOP_RULE = ("workflows loop at file level (Director 2026-10-06): use --each-from-bids <dataset> --level file --suffix <s>, "
-             "or --single --reason '<why one job>'")
+LOOP_RULE = ("a job without --each is refused while the loop rule is on (config slurm.each_level {level}): submit one "
+             "array with --each <items|@file>, a group step with --after <run>, or one job with --single --reason "
+             "'<why one job>'")
 
 
 JOB_PREFIX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
@@ -479,12 +521,16 @@ def job_prefix(site: Site) -> str:
 
 
 def each_level(site: Site) -> str:
-    """Config `slurm.each_level`: the level workflow steps loop at (default `file`; Director 2026-10-06: 모든 workflow는
-    file 기준으로 loop). A coarser `--level` needs `--reason`, a bare single job `--single --reason`; `any` switches the
-    rule off."""
-    lv = str((site.config.get("slurm") or {}).get("each_level") or "file")
-    if lv not in (*LEVELS, "any"):
-        fail(f"config slurm.each_level must be one of {', '.join(LEVELS)} or any: {lv!r}")
+    """Config `slurm.each_level`: the level steps loop at, one of the package's `labels.levels` or `any` (the rule
+    off). Default: the finest declared level, else `any`. While it is on, a job without `--each` is refused unless it
+    is a group step (`--after`) or `--single --reason` (release 46: the level words and the rule's text are the
+    package's; the harness keeps the refusal)."""
+    levels = site.labels["levels"]
+    raw = (site.config.get("slurm") or {}).get("each_level")
+    lv = str(raw or (levels[0] if levels else "any"))
+    if lv not in (*levels, "any"):
+        fail(f"config slurm.each_level must be one of the package's labels.levels ({', '.join(levels) or 'none declared'})"
+             f" or any: {lv!r}")
     return lv
 
 
@@ -514,62 +560,7 @@ def job_end_phrase(site: Site) -> str:
     return "once the job has ended (the desk sees it with `slurm status`)"
 
 
-def file_entities(stem: str) -> dict:
-    """{sub, ses} labels of a BIDS file stem (`sub-01_ses-1_task-rest_run-01_bold`)."""
-    return {m.group(1): m.group(2) for m in FILE_ENTITY_RE.finditer(stem)}
-
-
-def _labels(raw, prefix: str) -> set[str] | None:
-    if not raw:
-        return None
-    out = {x[len(prefix):] if x.startswith(prefix) else x for r in raw for x in re.split(r"[,\s]+", str(r)) if x}
-    return out or None
-
-
-def bids_files(root: Path, suffix: str, datatype: str | None = None, match: str | None = None,
-               subs: set[str] | None = None, sess: set[str] | None = None) -> tuple[list[dict], int]:
-    """File-level items of a BIDS dataset from a names-only walk of its `sub-*` trees (nothing is opened, stat'ed
-    for content or fetched; a dangling git-annex symlink is a name like any other): the files whose BIDS suffix (the
-    last `_` part of the stem, the name before its first `.`) is `suffix`, optionally inside `datatype` directories
-    (func, anat, ...), matching `match` (a glob on the path relative to the dataset), of the `subs`/`sess` labels.
-    One item per stem: a sidecar (.json, .tsv, .bval, .bvec) never stands for the data file beside it. Returns the
-    rows {index, item, sub, ses, path} sorted by stem and the number of BIDS file names seen."""
-    rows: dict[str, dict] = {}
-    seen = 0
-    for sub in sorted(d.name for d in root.iterdir() if d.name.startswith("sub-") and d.is_dir()):
-        for dirpath, dirnames, filenames in os.walk(root / sub):
-            dirnames[:] = sorted(d for d in dirnames if d not in BIDS_SKIP and not d.startswith("."))
-            for name in sorted(filenames):
-                stem = name.split(".", 1)[0]
-                if name.startswith(".") or not stem.startswith("sub-") or "_" not in stem:
-                    continue
-                seen += 1
-                if stem.rsplit("_", 1)[-1] != suffix:
-                    continue
-                if datatype and os.path.basename(dirpath) != datatype:
-                    continue
-                rel = os.path.relpath(os.path.join(dirpath, name), root)
-                if match and not fnmatch.fnmatch(rel, match):
-                    continue
-                ents = file_entities(stem)
-                if subs is not None and ents.get("sub") not in subs:
-                    continue
-                if sess is not None and ents.get("ses") not in sess:
-                    continue
-                prev = rows.get(stem)
-                if prev is None or (prev["path"].endswith(SIDECAR_EXT) and not rel.endswith(SIDECAR_EXT)):
-                    rows[stem] = {"item": stem, "sub": ents.get("sub"), "ses": ents.get("ses"), "path": rel}
-    return [{"index": i, **rows[s]} for i, s in enumerate(sorted(rows))], seen
-
-
-def item_table(files: list[dict]) -> str:
-    """The file-level item table (the `.tsv` beside the item list; printed by `--dry-run`)."""
-    cols = ("index", "item", "sub", "ses", "path")
-    return "".join("\t".join(str(r.get(c) if r.get(c) is not None else "") for c in cols) + "\n"
-                   for r in ({c: c for c in cols}, *files))
-
-
-def validate_items(items: list[str], level: str | None = None) -> list[str]:
+def validate_items(items: list[str], grammar: dict | None = None) -> list[str]:
     if not items:
         fail("--each needs at least one item")
     bad = [i for i in items if not ITEM_RE.match(i)]
@@ -582,7 +573,7 @@ def validate_items(items: list[str], level: str | None = None) -> list[str]:
         seen.add(i)
     if dup:
         fail(f"duplicate --each item(s): {', '.join(dup[:5])}")
-    items_level(items, level)
+    items_level(items, grammar)
     return items
 
 
@@ -603,7 +594,7 @@ def parse_items(site: Site, spec: str) -> tuple[list[str], str | None]:
         each_file = str(p)
     else:
         words = [w for w in re.split(r"[,\s]+", spec) if w]
-    return validate_items(words), each_file
+    return validate_items(words, site.labels["item_grammar"]), each_file
 
 
 def _inside_site(site: Site, raw: str, what: str) -> Path:
@@ -616,34 +607,10 @@ def _inside_site(site: Site, raw: str, what: str) -> Path:
     return p
 
 
-def items_from_bids(site: Site, dataset: str, level: str = "subject", suffix: str | None = None,
-                    datatype: str | None = None, match: str | None = None, subs=None, sess=None
-                    ) -> tuple[list[str], str, list[dict] | None]:
-    """Items from a BIDS dataset (inside the site; names only, nothing read): level `file` (Director 2026-10-06)
-    enumerates the files of BIDS suffix `suffix` (`bids_files`), item = the file stem; `subject` the `sub-*`
-    directories; `session` `sub-*/ses-*` as `sub-X_ses-Y`. Returns (items, resolved dataset, file rows | None)."""
-    if level not in LEVELS:
-        fail(f"--level must be one of {', '.join(LEVELS)}")
-    root = _inside_site(site, dataset, "--each-from-bids")
-    if not root.is_dir():
-        fail(f"--each-from-bids: not a directory: {root}")
-    if level == "file":
-        if not suffix or not re.match(r"^[A-Za-z0-9]+$", suffix):
-            fail("--level file needs --suffix <BIDS suffix> (letters and digits, e.g. bold, T1w)")
-        files, seen = bids_files(root, suffix, datatype, match, _labels(subs, "sub-"), _labels(sess, "ses-"))
-        if not files:
-            filt = ", ".join(f"{k} {v}" for k, v in (("datatype", datatype), ("match", match), ("sub", subs), ("ses", sess)) if v)
-            fail(f"--each-from-bids --level file: no *_{suffix} file under {root}" + (f" ({filt})" if filt else "")
-                 + f"; {seen} BIDS file name(s) seen")
-        return validate_items([f["item"] for f in files], "file"), str(root), files
-    if any(x for x in (suffix, datatype, match, subs, sess)):
-        fail("--suffix, --datatype, --match, --sub and --ses go with --level file")
-    subs = sorted(d.name for d in root.iterdir() if d.name.startswith("sub-") and d.is_dir())
-    items = subs if level == "subject" else [f"{s}_{d.name}" for s in subs for d in sorted((root / s).iterdir())
-                                             if d.name.startswith("ses-") and d.is_dir()]
-    if not items:
-        fail(f"--each-from-bids: no {'sub-*' if level == 'subject' else 'sub-*/ses-*'} directories in {root}")
-    return validate_items(items), str(root), None
+def _status_actor(led: Ledger, actor: str) -> str:
+    """Who records a run's status: the actor when it may (submit_jobs or verify), else the desk on its behalf."""
+    org = led.site.org
+    return actor if org.get(actor) and (org.has(actor, "submit_jobs") or org.may_append(actor, "run.status")) else "desk"
 
 
 def _get_run(led: Ledger, run_id: str) -> dict:
@@ -694,66 +661,66 @@ def _dep_job_ids(deps: list[dict]) -> list[str]:
     return out
 
 
-DEFAULT_ITEM_ENV = {"item": "DUREH_ITER", "by": "DUREH_ITER_BY", "index": "DUREH_ITER_INDEX",
-                    "sub": "DUREH_ITER_SUB", "ses": "DUREH_ITER_SES",
-                    "path": "DUREH_ITER_PATH", "root": "DUREH_ITER_ROOT"}  # path, root: file-level arrays only
+DEFAULT_ITEM_ENV = {"item": "DUREH_ITER", "by": "DUREH_ITER_BY", "index": "DUREH_ITER_INDEX"}
+ITEM_ENV_FIXED = ("item", "by", "index")
 VAR_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-SUBJECT_ITEM_RE = re.compile(r"^sub-([A-Za-z0-9]+)(?:_ses-([A-Za-z0-9]+))?$")
 
 
-def item_entities(item: str) -> tuple[str, dict]:
-    """(level, {sub, ses}) of an --each item. An item starting with `sub-` must be exactly `sub-<label>`
-    (subject) or `sub-<label>_ses-<label>` (session), labels [A-Za-z0-9]+; any other `sub-` item is refused.
-    Every other item is plain and not parsed (`dim-20`, `SIGMA`, `JDRS001LNA`)."""
-    if not item.startswith("sub-"):
-        return "plain", {}
-    m = SUBJECT_ITEM_RE.match(item)
-    if not m:
-        fail(f"--each item {item!r} starts with `sub-` but is not `sub-<label>` or `sub-<label>_ses-<label>` "
-             "(labels [A-Za-z0-9]+)")
-    return ("session" if m.group(2) else "subject"), ({"sub": m.group(1), "ses": m.group(2)} if m.group(2)
-                                                      else {"sub": m.group(1)})
+def item_entities(item: str, grammar: dict | None = None) -> tuple[str, dict]:
+    """(level, fields) of an --each item by the package's `labels.item_grammar` {level: regex with named groups}:
+    the first level whose regex matches the whole item, its named groups as the fields; an item no regex matches is
+    `plain` with no fields (release 46: the harness itself parses no item grammar)."""
+    for level, pat in (grammar or {}).items():
+        m = pat.fullmatch(item)
+        if m:
+            return level, {k: v for k, v in m.groupdict().items() if v is not None}
+    return "plain", {}
 
 
-def items_level(items: list[str], level: str | None = None) -> str:
-    """file (given: items are BIDS file stems, not parsed), subject, session or plain; one array holds one level only."""
-    if level == "file":
-        return "file"
-    levels = {item_entities(i)[0] for i in items}
+def grammar_fields(grammar: dict | None) -> list[str]:
+    """The named fields of the item grammar, in declaration order (each exported as DUREH_ITER_<FIELD> by default)."""
+    out: list[str] = []
+    for pat in (grammar or {}).values():
+        out += [g for g in pat.groupindex if g not in out]
+    return out
+
+
+def items_level(items: list[str], grammar: dict | None = None) -> str:
+    """The level of an array's items by the item grammar (else plain); one array holds one level only."""
+    levels = {item_entities(i, grammar)[0] for i in items}
     if len(levels) > 1:
         fail(f"--each mixes {' and '.join(sorted(levels))} items in one array; submit one level per array")
     return levels.pop()
 
 
 def item_env(site: Site) -> dict:
-    """Names the --each job gets the item, its index and its subject/session labels under: config
-    `slurm.each_env` {"item", "index", ["by"], ["sub"], ["ses"], ["path"], ["root"]} (the company's own names, e.g. CAMRI_SUBJECT;
-    an unmapped by/sub/ses/path/root is not exported), else DUREH_ITER, DUREH_ITER_BY, DUREH_ITER_INDEX,
-    DUREH_ITER_SUB, DUREH_ITER_SES, DUREH_ITER_PATH, DUREH_ITER_ROOT (Director 2026-10-04; path and root for file-level
-    arrays, 2026-10-06). `by` is the array level: file, subject, session or plain."""
+    """Names the --each job gets the item, its level (`by`), its index and the item grammar's named fields under:
+    config `slurm.each_env` {"item", "index", ["by"], [<field>...]} (a site's own names; an unmapped by/field is not
+    exported), else DUREH_ITER, DUREH_ITER_BY, DUREH_ITER_INDEX and DUREH_ITER_<FIELD> for each field of the package's
+    labels.item_grammar (Director 2026-10-04; release 46: the fields are the package's)."""
+    fields = grammar_fields(site.labels["item_grammar"])
     cfg = (site.config.get("slurm") or {}).get("each_env")
     if not cfg:
-        return dict(DEFAULT_ITEM_ENV)
-    ok = (isinstance(cfg, dict) and {"item", "index"} <= set(cfg) <= set(DEFAULT_ITEM_ENV)
+        return {**DEFAULT_ITEM_ENV, **{f: f"DUREH_ITER_{f.upper()}" for f in fields}}
+    allowed = set(ITEM_ENV_FIXED) | set(fields) | {"path", "root"}  # path, root: accepted and unused since release 46
+    ok = (isinstance(cfg, dict) and {"item", "index"} <= set(cfg) <= allowed
           and all(isinstance(v, str) and VAR_RE.match(v) for v in cfg.values())
           and len(set(cfg.values())) == len(cfg))
     if not ok:
-        fail('config slurm.each_env must be {"item": <NAME>, "by": <NAME>, "index": <NAME>, "sub": <NAME>, '
-             f'"ses": <NAME>, "path": <NAME>, "root": <NAME>}} (by, sub, ses, path and root optional) with different '
+        fail('config slurm.each_env must be {"item": <NAME>, "index": <NAME>, "by": <NAME>, <field>: <NAME> ...} '
+             f'(by and the item grammar\'s fields {", ".join(fields) or "(none declared)"} optional) with different '
              f'variable names: {cfg!r}')
-    return {k: cfg[k] for k in DEFAULT_ITEM_ENV if k in cfg}
+    return {k: cfg[k] for k in (*ITEM_ENV_FIXED, *fields) if k in cfg}
 
 
 def item_lines(items: list[str], items_file: str | None, env: dict | None = None, level: str | None = None,
-               files: list[dict] | None = None, root: str | None = None) -> list[str]:
+               grammar: dict | None = None) -> list[str]:
     """Shell lines that map $SLURM_ARRAY_TASK_ID to the item and export the item, the array level (`by`), its
-    index and its subject and session labels (empty when the item has none) under the configured names; a
-    file-level array (`level` file, `files` rows, dataset `root`) also exports the file's path relative to the
-    dataset and the dataset root."""
+    index and the item grammar's named fields (empty when the item has none) under the configured names."""
     import shlex
 
     env = env or DEFAULT_ITEM_ENV
-    ents = [file_entities(i) for i in items] if level == "file" else [item_entities(i)[1] for i in items]
+    ents = [item_entities(i, grammar)[1] for i in items]
     it, ix = env["item"], env["index"]
     arr = lambda vals: "(" + " ".join(shlex.quote(v) if v else "''" for v in vals) + ")"  # noqa: E731
     out = [f"# --each: {len(items)} item(s), array task i runs item i" + (f" (list: {items_file})" if items_file else ""),
@@ -763,26 +730,19 @@ def item_lines(items: list[str], items_file: str | None, env: dict | None = None
            f'export {it}="${{_DUREH_ITERS[$SLURM_ARRAY_TASK_ID]:-}}"',
            f'[ -n "${it}" ] || {{ echo "dureh: no item for array task $SLURM_ARRAY_TASK_ID" >&2; exit 98; }}']
     if env.get("by"):
-        out.append(f"export {env['by']}={items_level(items, level)}")
-    for key in ("sub", "ses"):
-        if env.get(key):
-            out += [f"_DUREH_{key.upper()}=" + arr([e.get(key) or "" for e in ents]),
-                    f'export {env[key]}="${{_DUREH_{key.upper()}[$SLURM_ARRAY_TASK_ID]}}"']
-    shown = [k for k in ("item", "by", "index", "sub", "ses") if env.get(k)]
-    if files is not None and env.get("path"):
-        out += ["_DUREH_PATH=" + arr([f["path"] for f in files]),
-                f'export {env["path"]}="${{_DUREH_PATH[$SLURM_ARRAY_TASK_ID]}}"']
-        shown.append("path")
-    if root and env.get("root"):
-        out.append(f"export {env['root']}={shlex.quote(str(root))}")
-        shown.append("root")
+        out.append(f"export {env['by']}={level or items_level(items, grammar)}")
+    fields = [k for k in env if k not in ITEM_ENV_FIXED]
+    for key in fields:
+        out += [f"_DUREH_F_{key.upper()}=" + arr([e.get(key) or "" for e in ents]),
+                f'export {env[key]}="${{_DUREH_F_{key.upper()}[$SLURM_ARRAY_TASK_ID]}}"']
+    shown = [k for k in ("item", "by", "index", *fields) if env.get(k)]
     names = ", ".join(f"{env[k]}=${env[k]}" for k in shown)
     out.append(f'echo "dureh: array task: {names}" >&2')
     return out
 
 
 def _each_wrapper(script: Path, items: list[str], items_file: str, env: dict | None = None, level: str | None = None,
-                  files: list[dict] | None = None, root: str | None = None) -> str:
+                  grammar: dict | None = None) -> str:
     import shlex
 
     lines = script.read_text(encoding="utf-8", errors="replace").splitlines()
@@ -791,17 +751,20 @@ def _each_wrapper(script: Path, items: list[str], items_file: str, env: dict | N
     directives = [ln for ln in lines if ln.strip().startswith("#SBATCH")]
     out = ["#!/bin/bash", *directives,
            f"# Generated by `dureh slurm submit --each`: runs {script} once per item (one array task each).",
-           *item_lines(items, items_file, env, level, files, root),
+           *item_lines(items, items_file, env, level, grammar),
            # absolute: the job runs in its --chdir, not where the script path was given
            "exec " + " ".join(shlex.quote(w) for w in interp) + f" {shlex.quote(os.path.abspath(script))} \"$@\""]
     return "\n".join(out) + "\n"
 
 
 def _submit_guards(led: Ledger, actor: str, wi: str) -> dict:
-    """Who may submit for which WI: pipeline-runner (or the desk), on a dispatched WI of that role."""
+    """Who may submit for which WI: a role with the submit_jobs capability (or the desk), on a dispatched WI of
+    that role (release 46: capability, not role name)."""
     rec = led.get("work-item", wi)
-    if actor not in ("pipeline-runner", "desk"):
-        fail("only pipeline-runner (or the desk) submits scheduler jobs")
+    if not led.site.org.has(actor, "submit_jobs"):
+        holders = [r.name for r in led.site.org.with_capability("submit_jobs")]
+        fail(f"{actor} may not submit scheduler jobs: that needs the submit_jobs capability (the desk"
+             + (f", {', '.join(holders)}" if holders else "; no package role holds it") + ")")
     if actor != "desk" and rec["payload"]["role"] != actor:
         fail(f"{wi} is not a {actor} work item")
     if led.wi_status(wi)["status"] not in ("dispatched", "rework"):
@@ -813,14 +776,11 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
                  extra: list[str] | None = None, extra_payload: dict | None = None,
                  module: str | None = None, rev: str | None = None, each: str | None = None,
                  after: list[str] | None = None, max_parallel: int | None = None,
-                 items: list[str] | None = None, each_from_bids: str | None = None,
-                 level: str | None = None, suffix: str | None = None, datatype: str | None = None,
-                 match: str | None = None, subs: list[str] | None = None, sess: list[str] | None = None,
-                 single: bool = False, reason: str | None = None) -> dict:
-    """Submit one scheduler job (or one array, `--each*`) for a dispatched WI and record the run. File-level loop
-    rule (Director 2026-10-06, config `slurm.each_level`, default file): a workflow step loops over files
-    (`--each-from-bids <dataset> --level file --suffix <s>`); a coarser `--level` needs `--reason`, a bare single
-    job `--single --reason`, a group step goes `--after` an array. `level`, `reason` and `single` are recorded."""
+                 items: list[str] | None = None, single: bool = False, reason: str | None = None) -> dict:
+    """Submit one scheduler job (or one array, `--each`) for a dispatched WI and record the run. Loop rule (config
+    `slurm.each_level`, one of the package's labels.levels or `any`): while it is on, a job without `--each` is
+    refused unless it is a group step (`--after` an array) or `--single --reason`; the package's
+    `policies.loop_rule.refuse` text is added to the refusal. `level`, `reason` and `single` are recorded."""
     from datetime import datetime, timezone
 
     led = Ledger(site)
@@ -833,32 +793,23 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
     if rev is not None and module is None:
         fail("--rev needs --module")
     extra = list(extra or [])
-    each_file = bids = files = None
+    each_file = None
     rule_level = each_level(site)
-    if each is not None and each_from_bids is not None:
-        fail("--each and --each-from-bids exclude each other")
-    if level is not None and each_from_bids is None:
-        fail("--level goes with --each-from-bids")
-    if any(x for x in (suffix, datatype, match, subs, sess)) and each_from_bids is None:
-        fail("--suffix, --datatype, --match, --sub and --ses go with --each-from-bids --level file")
+    grammar = site.labels["item_grammar"]
     if each is not None:
         items, each_file = parse_items(site, each)
-    elif each_from_bids is not None:
-        level = level or (rule_level if rule_level != "any" else "subject")
-        items, bids, files = items_from_bids(site, each_from_bids, level, suffix, datatype, match, subs, sess)
     elif items is not None:
-        validate_items(items)
+        validate_items(items, grammar)
     reason = (reason or "").strip() or None
     if single and items is not None:
         fail("--single is for a job without --each")
     if single and not reason:
         fail("--single needs --reason '<why one job>'")
-    if rule_level != "any":  # the file-level loop rule (Director 2026-10-06)
-        if items is None and not after and not single:
-            fail(LOOP_RULE)
-        if each_from_bids is not None and LEVELS.index(level) > LEVELS.index(rule_level) and not reason:
-            fail(f"--level {level} is coarser than the loop rule's level {rule_level} (config slurm.each_level; Director "
-                 f"2026-10-06: workflows loop at file level): add --reason '<why {level} level>'")
+    if rule_level != "any" and items is None and not after and not single:  # the loop rule (config slurm.each_level)
+        from .package import loop_policy
+
+        extra_text = loop_policy(site.package_manifest()).get("refuse")
+        fail(LOOP_RULE.format(level=rule_level) + (f" ({extra_text})" if extra_text else ""))
     if max_parallel is not None:
         if items is None:
             fail("--max-parallel needs --each")
@@ -904,9 +855,7 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         items_file = site_logs / f"each-{stamp}.items"
         array = {"job_id": None, "items": list(items), "count": len(items), "items_file": str(items_file),
-                 "env": item_env(site), "level": items_level(items, "file" if files is not None else None)}
-        if files is not None:
-            array.update(table=str(items_file.with_suffix(".tsv")), files=len(files), root=bids)
+                 "env": item_env(site), "level": items_level(items, grammar)}
     mod = None
     if module is not None:  # UR-20261004-04: the job runs against a pinned, read-only tree of modules/<m>
         from . import exectree
@@ -914,7 +863,7 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
         mod = exectree.prepare(site, wi, rec["payload"].get("target"), module, rev, path, dry_run,
                                items=items, items_file=array["items_file"] if array else None,
                                item_env=array["env"] if array else None, item_level=array["level"] if array else None,
-                               item_files=files, item_root=bids)
+                               item_grammar=grammar)
         warnings += mod["warnings"]
     for w in warnings:
         print(f"warning: {w}", file=sys.stderr)
@@ -937,13 +886,6 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
             payload["max_parallel"] = max_parallel
         if each_file:
             payload["each_file"] = each_file
-        if bids:
-            payload["each_from_bids"] = {"dataset": bids, "level": level or "subject",
-                                         **{k: v for k, v in (("suffix", suffix), ("datatype", datatype), ("match", match),
-                                                              ("sub", subs), ("ses", sess)) if v},
-                                         **({"files": len(files)} if files is not None else {})}
-    if dry_run and files is not None:
-        print(item_table(files), end="", file=sys.stderr)  # the item table a --dry-run shows
     if deps:
         payload["after"] = deps
     if mod:
@@ -955,7 +897,7 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
         if mod:
             exectree.cleanup(Path(mod["module"]["tree"]))
         if array is not None:
-            for f in (array["items_file"], array.get("wrapper"), array.get("table")):
+            for f in (array["items_file"], array.get("wrapper")):
                 if f and os.path.isfile(f):
                     os.unlink(f)
 
@@ -963,11 +905,9 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
         if array is not None:
             site_logs.mkdir(parents=True, exist_ok=True)
             Path(array["items_file"]).write_text("".join(f"{i}\n" for i in items), encoding="utf-8")
-            if files is not None:
-                Path(array["table"]).write_text(item_table(files), encoding="utf-8")
             if array.get("wrapper"):
                 Path(array["wrapper"]).write_text(_each_wrapper(path, items, array["items_file"], array["env"],
-                                                                array["level"], files, bids))
+                                                                array["level"], grammar))
                 Path(array["wrapper"]).chmod(0o755)
         try:
             check = _day_check(site, cmd, path, extra, cfg, wi=wi)
@@ -1113,7 +1053,7 @@ def ingest_submission(path: Path, root: Path, site: Site) -> dict:
             count = j.get("count")
             if count is not None and (not isinstance(count, int) or count != len(items)):
                 fail(f"submission record {path}: {where}.count {count!r} differs from its {len(items)} items")
-            job.update(items=items, count=len(items), level=_via_level(items, level or declared),
+            job.update(items=items, count=len(items), level=_via_level(items, level or declared, site.labels["item_grammar"]),
                        level_declared=bool(level or declared))
         jobs.append(job)
     known = {"schema_version", "schema", "tool", "tool_version", "submitted_at", "jobs", "items", "cwd", "manifest",
@@ -1124,13 +1064,13 @@ def ingest_submission(path: Path, root: Path, site: Site) -> dict:
             "extra": {k: v for k, v in data.items() if k not in known}}
 
 
-def _via_level(items: list[str], declared) -> str:
-    """The array's item level: what the record declares (any word), else subject/session/plain by the item grammar
-    when every item fits it, else plain (a module's own item grammar, e.g. BIDS file stems, is not parsed)."""
+def _via_level(items: list[str], declared, grammar: dict | None = None) -> str:
+    """The array's item level: what the record declares (any word), else the package's item grammar when every item
+    fits one level, else plain (a module's own item grammar is not parsed)."""
     if declared:
         return str(declared)
     try:
-        return items_level(items)
+        return items_level(items, grammar)
     except DurehError:
         return "plain"
 
@@ -1199,7 +1139,7 @@ def slurm_submit_via(site: Site, actor: str, wi: str, via, record: str | None = 
                      extra_payload: dict | None = None, argv_extra: list[str] | None = None) -> dict:
     """`slurm submit --wi WI --via '<module command ...>'`: run the module's own submit command in the WI's job root
     with the site environment, then ingest the submission record it wrote and record the usual `slurm` run so
-    status/wait/watch/resubmit-failed/purge and `promote --run` work as for a plain submit. Record path: `--record`,
+    status/wait/watch/resubmit-failed/purge work as for a plain submit. Record path: `--record`,
     else the path the harness passed through `modules[<m>].submit.record_arg`, else the last stdout line
     `submission-record: <path>`. A non-zero exit records only a `slurm.via-failed` event."""
     import shlex
@@ -1289,7 +1229,7 @@ def slurm_submit_via(site: Site, actor: str, wi: str, via, record: str | None = 
             payload["max_parallel"] = a["max_parallel"]
         if not a.get("level_declared"):  # the module owns the loop: not refused, but its level should be declared
             note = (f"via: the submission record declares no item level for array job {a['job_id']} (recorded as "
-                    f"{a['level']}); the module should say `level: file` (workflows loop at file level, Director 2026-10-06)")
+                    f"{a['level']}); the module should declare the array's item level in its submission record")
             payload.setdefault("warnings", []).append(note)
             print(f"warning: {note}", file=sys.stderr)
     payload["level"] = payload["array"]["level"] if arrays else ("group" if deps else "single")
@@ -1435,7 +1375,7 @@ def _record_array(site: Site, led: Ledger, actor: str, run: dict, st: dict, wait
             from . import exectree
 
             exectree.cleanup(site.relocate(mod["tree"]))  # recorded at submit time; the site may have moved since
-    ev = led.event("run.status", actor if actor in ("pipeline-runner", "desk") else "desk", run["wi"], payload, [rid])
+    ev = led.event("run.status", _status_actor(led, actor), run["wi"], payload, [rid])
     return ev
 
 
@@ -1493,7 +1433,7 @@ def slurm_status(site: Site, actor: str, run_id: str) -> dict:
         ev = _record_array(site, led, actor, run, _array_status(site, run), waited=False)
     else:
         state, line = job_state(site, job)
-        ev = led.event("run.status", actor if actor in ("pipeline-runner", "desk") else "desk", run["wi"],
+        ev = led.event("run.status", _status_actor(led, actor), run["wi"],
                        {"run": run_id, "job_id": job, "scheduler_state": state, "raw": line}, [run_id])
     return {**ev, "logs": _log_hint(site, run)}
 
@@ -1523,7 +1463,7 @@ def slurm_wait(site: Site, actor: str, run_id: str, timeout: int = 3600, interva
             ev["note"] = f"still {st['scheduler_state']} ({st['counts']}) after {timeout} s; wait again or check later"
         return {**ev, "logs": _log_hint(site, run)}
     state, line, final = wait_job(site, job, int(max(0, deadline - time.monotonic())), interval)
-    ev = led.event("run.status", actor if actor in ("pipeline-runner", "desk") else "desk", run["wi"],
+    ev = led.event("run.status", _status_actor(led, actor), run["wi"],
                    {"run": run_id, "job_id": job, "scheduler_state": state, "raw": line,
                     "waited": True, "final": final}, [run_id])
     if not final:
@@ -2037,10 +1977,17 @@ def path_refs(site: Site, target: str, roots: list[Path] | None = None, limit: i
             needles.update(str(r / rel) for r in [site.root, *site.previous_roots()])
     roots = roots or [site.root, HARNESS_ROOT]
     hits = []
-    skip = {".git", "node_modules", "__pycache__", "cache", ".cache", "worktrees", "derivatives", "sourcedata", "rawbids"}
+    skip = {".git", "node_modules", "__pycache__", "cache", ".cache", "worktrees"}
+    final = site.labels["layout"].get("final")
+    if final:
+        skip.add(final)  # the package's final area: large, versioned data, not text that names paths
+    from .protect import rule_for
+
     for root in roots:
         for base_dir, dirs, files in os.walk(root):
-            dirs[:] = [d for d in dirs if d not in skip]
+            # never read inside a no-read protected area (release 46), not even for path references
+            dirs[:] = [d for d in dirs if d not in skip
+                       and rule_for(site, Path(base_dir) / d, levels=("no-read",)) is None]
             for name in files:
                 p = Path(base_dir) / name
                 if p.suffix not in TEXT_SUFFIXES or p.is_symlink():

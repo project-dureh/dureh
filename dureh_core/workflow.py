@@ -600,8 +600,10 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
 
 
 def _skill_for(site: Site, role: str, value: str | None) -> str | None:
+    """The role's own skill (package `roles.<r>.skill`), else the schema-1 `skills` map, else its value's skill."""
+    r = site.org.get(role)
     skills = (site.package_manifest().get("skills") or {})
-    rel = skills.get(role)
+    rel = (r.skill if r else None) or skills.get(role)
     if not rel and value:
         for v in site.package_manifest().get("values") or []:
             if v.get("id") == value:
@@ -616,9 +618,10 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None) -> 
     org = site.org
     rec = led.get("work-item", wi)
     p = rec["payload"]
-    checking = as_role == "checker"
+    checking = bool(as_role) and org.has(as_role, "verify")
     if as_role and not checking and as_role != p["role"]:
-        fail(f"{wi} is owned by {p['role']}; only the checker can be dispatched for another role's item")
+        fail(f"{wi} is owned by {p['role']}; only a role with the verify capability can be dispatched for another"
+             " role's item")
     role = org.role(as_role or p["role"])
     caller = org.role(by)
     if role.name not in caller.may_dispatch:
@@ -829,16 +832,9 @@ def _render_brief(site: Site, rec: dict, role: str, wt: dict, entry: dict,
                   " then stop and report.",
                   f"4. When every item is verified, run `{dureh} wi stage --wi {rec['id']} --summary ...` and return a summary"
                   f" of at most {int(site.limit('manager_report_lines', 30))} lines."]
-    elif role == "checker":
+    elif r.has("verify"):
         lines += [""] + _checker_lines(site, rec, dureh)
-    elif role == "data-steward":
-        lines += ["", f"Never write derivatives/ yourself. Promote a verified checkpoint with `{dureh} promote --wi {rec['id']} "
-                  "--run <completed slurm run id> --source checkpoints/<step>/<path> --dataset <derivatives name>`;"
-                  " update dataset_description.json with `--metadata dataset_description.json --input <file in $TMPDIR>`.",
-                  f"Commit any metadata edits on the WI branch, then run `{dureh} wi stage --wi {rec['id']} --summary \"...\"`.",
-                  f"Return at most {int(site.limit('worker_report_lines', 30))} lines: promotions and paths, commands run"
-                  " with results, open assumptions."]
-    elif role == "researcher":
+    elif r.has("network") and not scopes:
         lines += ["", f"Record each result with `{dureh} ledger add finding --wi {rec['id']} --summary ... --evidence-level ...`.",
                   "Keep sources (identity, retrieval time, passage or hash). Do not write files."]
     else:
@@ -1216,8 +1212,8 @@ def _run_checks_slurm(site: Site, wi: str, cwd: Path, troot: Path, checks: list[
 def _verify_context(site: Site, actor: str, wi: str) -> dict:
     """What every per-WI verification checks first: the actor, a staged item, a sane work root."""
     led = Ledger(site)
-    if actor not in ("checker", "desk"):
-        fail("verification is recorded by the checker")
+    if not site.org.has(actor, "verify"):
+        fail("verification is recorded by a role with the verify capability (the checker)")
     rec = led.get("work-item", wi)
     p = rec["payload"]
     status = led.wi_status(wi)["status"]
