@@ -2,10 +2,8 @@
 
 ```
 dureh slurm submit --wi <WI> --script <job.sh> [--sbatch-arg ARG ...] [--module <m> [--rev <rev>]] [--dry-run]
-                   [--each <items> | --each-from-bids <dataset> [--level file|subject|session] [--suffix S] [--datatype D]
-                                                                 [--match GLOB] [--sub L ...] [--ses L ...]
-                    | --resubmit-failed <run> | --single --reason '<why>']
-                   [--after <run>[,<run>...]] [--max-parallel N] [--reason '<why a coarser level>']
+                   [--each <items> | --resubmit-failed <run> | --single --reason '<why>']
+                   [--after <run>[,<run>...]] [--max-parallel N]
 dureh slurm submit --wi <WI> --via '<module command ...>' [--record <path>] [--via-module <m>]
                    [--after <run>[,<run>...]] [--dry-run]            # a module's own submit command (release 42)
 dureh slurm submit --wi <WI> --resubmit-failed <via run>             # re-runs the module command over the failed items
@@ -24,7 +22,7 @@ Director, 2026-10-05: scheduler stdout/stderr belong in the site's log dir only.
 - **Config `slurm.log_dir`**: default `logs/slurm`, relative to the site root; an absolute path is allowed only
   inside the site (the site root itself, `..` escapes and paths outside are refused). Every scheduler log of a
   WI goes to `<log_dir>/<WI>/`.
-- **Always on the command line.** `slurm submit` (and so `container build`) and the checks job of `verify --wi`
+- **Always on the command line.** `slurm submit` and the checks job of `verify --wi`
   pass `--output` and `--error` on the `sbatch` command line, after any `--sbatch-arg` / `checks.sbatch_args`:
   command-line options override `#SBATCH` directives, so a script cannot move them.
 - **Redirect rule.** Without a name: `%x-%j.out|.err` (`%x-%A_%a` for an array). When the script (`#SBATCH -o/-e`)
@@ -41,7 +39,7 @@ Director, 2026-10-05: scheduler stdout/stderr belong in the site's log dir only.
   release 19 the old candidates (job chdir, target root, site root, the script's own -o/-e directory). Files
   already in the site root from earlier releases are removed by `dureh purge --wi <WI>` when their record names
   them (inside the site only).
-- **Agents.** The generated desk and pipeline-runner instructions say: "Do not set --output/--error in job
+- **Agents.** The generated desk instructions and those of every role with the `submit_jobs` capability say: "Do not set --output/--error in job
   scripts; the harness writes scheduler logs to <log_dir>/<WI>/."
 - The session job keeps its own logs under `logs/session/` (absolute `#SBATCH` lines in the generated script),
   with its tmux pane log `<NAME>.pane.log` and, while closing, the close marker `<NAME>.close` that makes the job
@@ -76,7 +74,7 @@ wait for jobs; the desk watches the scheduler and re-dispatches.
   `slurm wait`) and prints ONE line:
 
   ```
-  2026-10-05T14:02:11Z run=run-20261005T...-ab12 job=3761206 wi=WI-0117 role=pipeline-runner agent=a221b499:ended state=COMPLETED items=COMPLETED:3 next=dispatch brief --wi WI-0117 (bundle WI-0110)
+  2026-10-05T14:02:11Z run=run-20261005T...-ab12 job=3761206 wi=WI-0117 role=runner agent=a221b499:ended state=COMPLETED items=COMPLETED:3 next=dispatch brief --wi WI-0117 (bundle WI-0110)
   ```
 
   `agent` is the latest agent bound to the WI and its state (running, ended, starting, not started; `none`
@@ -114,9 +112,12 @@ External jobs (2, no harness record): 1001 manual-test RUNNING 0:12:01; 1002_2 f
 ```
 
 - **Owned** (never listed): every job id a `run` record names (`job_id`, each `jobs[].job_id`, a verify run's job;
-  array tasks by their array id), every `session.started` and `container.built` job, and the calling job
-  (`$SLURM_JOB_ID`: the session itself). Names matching config `slurm.external_ignore` (default `["cc-*"]`,
-  the session jobs of this site and of other sites under the same user) are left out too.
+  array tasks by their array id), every `session.started` (and, from records before release 46, `container.built`)
+  job, and the calling job (`$SLURM_JOB_ID`: the session itself).
+- **Release 46: an include list.** Only jobs whose name matches config `slurm.external_match` (a list of name
+  patterns, e.g. `["<prefix>-*"]` for a module framework's own job names) are listed; empty or absent lists none,
+  and `squeue` is not asked at all. The old `slurm.external_ignore` is ignored with a warning (status, `adapter
+  sync`, `verify --self`) for one release.
 - At most 10 are listed, the rest counted (`... and N more`). When `squeue` is missing or fails, nothing is
   listed and nothing fails. Config `slurm.external_jobs: false` never asks.
 - `dureh day close` warns about them (result `warning`, `external_jobs` in `day.closed`) and does not refuse.
@@ -131,7 +132,7 @@ role files and the refused-wait hint tell agents about job ends. The commands th
 
 | mode | desk text | worker/checker hint |
 |---|---|---|
-| `monitor` (default; sites without the key) | keep `dureh slurm watch` running as a Monitor; re-dispatch when a line arrives | "the desk re-dispatches you when `dureh slurm watch` reports the job" |
+| `monitor` (default for sites without the key; release 46: `install` writes `on-demand` for a new site) | keep `dureh slurm watch` running as a Monitor; re-dispatch when a line arrives | "the desk re-dispatches you when `dureh slurm watch` reports the job" |
 | `on-demand` | no standing Monitor: a job expected within minutes is waited for with `slurm wait --run <id>`; a longer one is checked with `slurm status --run <id>` (or one `slurm watch --once` pass) at the next turn or when the Director asks | "the desk re-dispatches you once the job has ended" |
 | `off` | job ends are not watched; a job's state is read with `slurm status --run <id>` | as `on-demand` |
 
@@ -150,7 +151,7 @@ is recorded, when `sacct` reports one at the time of the check (one batched call
 watch`), or when the run is stale (older than `watch_stale_days` and `sacct` has no state for it); a run the scheduler cannot report
 counts as live until its state is recorded. Staged, rework and verified items waiting for the desk, and orphaned bundles
 (manager ended, no child agent or job alive), hold no lane. `dureh status` lists each holder (`Lane: WI-0110
-pm-projects [dispatched] held by pipeline-runner agent running on WI-0117; job 3761206 RUNNING on WI-0117
+coordinator [dispatched] held by runner agent running on WI-0117; job 3761206 RUNNING on WI-0117
 (run-...)`).
 
 Every refusal is recorded as a `lane.refused` event on the refused WI (actor: the dispatcher; payload `count`,
@@ -269,78 +270,43 @@ dureh verify --wi <WI> --collect [RUN]   # checker, re-dispatched: record the ve
   (which covers the desk-written part) and capped at 4 KB.
 - The synchronous `verify --wi` stays for the local runner and small checks. Never run verify in the background.
 
-## Workflows loop at file level: `--each-from-bids --level file` (release 42, Director 2026-10-06)
+## One array per step: `--each`, `--after`, `--resubmit-failed` (release 26; release 46: package labels)
 
-Director, 2026-10-06: "회사가 아직 slurm의 병렬실행을 충분히 활용 못하고 있는 것 같습니다. 모든 workflow는 file 기준으로 loop를
-돌리라고 하고". Every workflow step is submitted as one array with one task per file, all files at once:
-
-```
-dureh slurm submit --wi <WI> --script <step.sh> --each-from-bids <dataset> --level file --suffix bold [--datatype func]
-                   [--match 'sub-01/*'] [--sub 01 02] [--ses 1] [--dry-run]
-```
-
-- **Enumeration is by name only.** The harness walks the dataset's `sub-*` trees (skipping `derivatives/`,
-  `sourcedata/`, `code/`, `stimuli/`, `phenotype/` and dot directories) and lists the files whose BIDS suffix (the
-  last `_` part of the stem, the name before its first `.`) is `--suffix`. Nothing is opened or fetched: a
-  git-annex file that is not fetched is a dangling symlink, which is a name like any other. Filters: `--datatype`
-  (the file's directory: `func`, `anat`, `dwi`...), `--match GLOB` on the path relative to the dataset, `--sub`
-  and `--ses` labels (with or without `sub-`/`ses-`). One item per stem: a sidecar (`.json`, `.tsv`, `.bval`,
-  `.bvec`) never stands for the data file beside it.
-- **Items** are the file stems (`sub-01_ses-1_task-rest_run-01_bold`), `array.level` = `file`. The task gets, under
-  the configured names (`slurm.each_env`; defaults `DUREH_ITER`, `DUREH_ITER_BY`, `DUREH_ITER_INDEX`,
-  `DUREH_ITER_SUB`, `DUREH_ITER_SES`), the stem, `file`, its index and the labels parsed from the stem, plus two
-  names for file-level arrays: `path` (default `DUREH_ITER_PATH`, the file's path relative to the dataset) and
-  `root` (default `DUREH_ITER_ROOT`, the absolute dataset root). A configured `each_env` exports `path`/`root`
-  only when it maps them.
-- **Files.** The item list `each-<ts>.items` and the table `each-<ts>.tsv` (`index item sub ses path`) are written
-  next to the wrapper in `logs/slurm/<WI>/`; `--dry-run` prints the table (stderr) and writes nothing. The record
-  keeps `array: {..., level: file, files, table, root}` and `each_from_bids: {dataset, level, suffix, datatype?,
-  match?, sub?, ses?, files}`.
-- **The loop rule** (config `slurm.each_level`, default `file`). A `slurm submit` for a step that is not
-  file-level is refused unless justified: a bare single job (no `--each*`, no `--after`) is refused with
-  "workflows loop at file level (Director 2026-10-06): use --each-from-bids <dataset> --level file --suffix <s>, or
-  --single --reason '<why one job>'"; `--level subject|session` needs `--reason '<why>'`; a group step `--after`
-  an array is allowed as a single job; a hand-picked `--each <items>` list is allowed. `--via` runs are not
-  refused (the module owns the loop): the module's declared level is recorded and a missing one is warned.
-  Container builds are single jobs by nature (recorded with their reason). The run record says `level`
-  (`file|session|subject|plain|group|single`), `reason` and `single`. `slurm.each_level: subject` makes subject
-  the norm (file stays allowed); `any` switches the rule off (the test suites' plumbing jobs).
-
-## One job per subject: `--each`, `--after`, `--resubmit-failed` (release 26)
-
-Director's rule (2026-10-04): the unit of submission is one job per subject, all subjects submitted at once, and
-Slurm schedules them (no concurrency cap, no default `%N`). During development each step is submitted per
-subject and the next step starts only after every subject job of that step has finished; a workflow that chains
-several steps is also one job per subject; group-level steps start after all subject jobs finish. Never loop
-`slurm submit` by hand. Since release 42 the unit is the file (above); subject and session arrays stay available
-with `--reason`.
+The unit of submission is one array per step with one task per item, all items submitted at once, and Slurm
+schedules them (no concurrency cap, no default `%N`). The next step starts only after every task of the previous
+one has finished (`--after`); group steps go `--after` the array as single jobs. Never loop `slurm submit` by hand.
+Release 46 removed the harness's own item walker (the old dataset walker and its `--level/--suffix/--datatype/--match
+/--sub/--ses` flags): items are listed by the submitter (`--each`) or by a module's own submit command (`--via`).
 
 - **`--each <items>`** submits ONE Slurm array `--array=0-(N-1)`, one task per item. Items are a comma or space
-  list (`--each sub-01,sub-02` or `--each sub-01 sub-02`) or `@file` (one item per line; blank lines and `#`
-  comment lines are ignored; the file must lie inside the site). Each item must match
-  `^[A-Za-z0-9][A-Za-z0-9._-]*$`; other items, duplicates and an empty list are refused. A script or argument
-  that sets `--array` itself is refused. `--max-parallel N` adds `%N`; there is no default cap.
-- **Levels (provisional).** An item starting with `sub-` must be exactly `sub-<label>` (a subject-level job) or
-  `sub-<label>_ses-<label>` (a session-level job), labels `[A-Za-z0-9]+`; any other `sub-` item is refused
-  (`sub-01_run-1`, `sub-01_ses-1_acq-x`). Every other item is plain and not parsed (`dim-20`, `SIGMA`,
-  `JDRS001LNA`); its subject and session variables are exported empty. One level per array: mixing is refused.
-  Recorded as `array.level` = `subject|session|plain`.
-- **`--each-from-bids <dataset> --level subject|session`** takes the items from the directory names of a BIDS
-  dataset inside the site: `sub-*/` or `sub-*/ses-*/` as `sub-X_ses-Y`. Only the listing is read. The default
-  level is config `slurm.each_level` (`file`, above); these two need `--reason`. Recorded as
-  `each_from_bids: {dataset, level}`.
-- **Item mapping and names.** The job script runs once per task with five variables exported: the item, the
-  array level (`by`: `subject|session|plain`, as `array.level`), its 0-based index in this run's list, and its
-  subject and session labels without `sub-`/`ses-` (empty when the item has none). The names are the company's:
-  config `slurm.each_env` = `{"item": NAME, "by": NAME, "index": NAME, "sub": NAME, "ses": NAME, "path": NAME,
-  "root": NAME}` (`by`, `sub`, `ses`, `path`, `root` optional; only the configured names are exported; `path` and
-  `root` are set for file-level arrays). Without it the defaults are `DUREH_ITER`, `DUREH_ITER_BY`,
-  `DUREH_ITER_INDEX`, `DUREH_ITER_SUB`, `DUREH_ITER_SES`, `DUREH_ITER_PATH`, `DUREH_ITER_ROOT`. The record keeps the names as
-  `array.env`. For camri-org: `"each_env": {"item": "CAMRI_ITER", "by": "CAMRI_ITER_BY", "index":
-  "CAMRI_ITER_INDEX", "sub": "CAMRI_SUBJECT", "ses": "CAMRI_SESSION"}`. The harness writes the list to
-  `logs/slurm/<WI>/each-<utc ts>.items` (fixed for the run) and a wrapper `each-<utc ts>.sbatch` next to it that
-  carries the script's `#SBATCH` lines, maps `$SLURM_ARRAY_TASK_ID` to the item (exit 98 when a task has no item)
-  and runs the script with its own interpreter. With `--module` the module wrapper does the same mapping.
+  list (`--each a,b` or `--each a b`) or `@file` (one item per line; blank lines and `#` comment lines are ignored;
+  the file must lie inside the site). Each item must match `^[A-Za-z0-9][A-Za-z0-9._-]*$`; other items, duplicates
+  and an empty list are refused. A script or argument that sets `--array` itself is refused. `--max-parallel N`
+  adds `%N`; there is no default cap.
+- **Levels and fields come from the package** (`labels.item_grammar` in startup.yaml, `{<level>: <regex>}`). An
+  item's level is the first level whose regular expression matches the whole item; the regex's named groups are
+  the item's fields. An item no regex matches is `plain` with no fields; a package without a grammar makes every
+  item plain (the harness parses no grammar itself). One level per array: mixing is refused. Recorded as
+  `array.level`. Example (the neutral example package): `sample: '^sample-(?P<sample>[A-Za-z0-9]+)$'` and
+  `batch: '^sample-(?P<sample>[A-Za-z0-9]+)_batch-(?P<batch>[A-Za-z0-9]+)$'` make `sample-01` a `sample` item with
+  field `sample=01`. A schema-1 package keeps the grammar the harness had before release 46 (release 46 only).
+- **Item mapping and names.** The job script runs once per task with the item, the array level (`by`), its 0-based
+  index and each grammar field exported (a field the item lacks is exported empty). The names are the site's:
+  config `slurm.each_env` = `{"item": NAME, "index": NAME, "by": NAME, <field>: NAME ...}` (`by` and the fields
+  optional; only the configured names are exported; another key is refused). Without it the defaults are
+  `DUREH_ITER`, `DUREH_ITER_BY`, `DUREH_ITER_INDEX` and `DUREH_ITER_<FIELD>` for each field. The record keeps the
+  names as `array.env`. The harness writes the list to `logs/slurm/<WI>/each-<utc ts>.items` (fixed for the run)
+  and a wrapper `each-<utc ts>.sbatch` next to it that carries the script's `#SBATCH` lines, maps
+  `$SLURM_ARRAY_TASK_ID` to the item (exit 98 when a task has no item) and runs the script with its own
+  interpreter. With `--module` the module wrapper does the same mapping.
+- **The loop rule** (config `slurm.each_level`: one of the package's `labels.levels` or `any`; default: the
+  package's finest level, else `any`). While it is on, a job without `--each` is refused unless it is a group step
+  (`--after` an array) or `--single --reason '<why one job>'`; the refusal is "a job without --each is refused while
+  the loop rule is on (config slurm.each_level <level>): ..." followed by the package's `policies.loop_rule.refuse`
+  text when it declares one. The desk and the roles with `submit_jobs` read the package's `policies.loop_rule.text`
+  in their generated instructions. `--via` runs are not refused (the module owns the loop): the module's declared
+  level is recorded and a missing one is warned. The run record says `level` (an item level, `plain`, `group` or
+  `single`), `reason` and `single`.
 - **Logs.** `<slurm.log_dir>/<WI>/%x-%A_%a.out|.err` (one pair per task: `<job name>-<array job>_<task>.out`); a
   script's own `-o/-e` name is kept as a basename there, with `_%a` added (and `%j` turned into `%A`) when it has no `%a`.
 - **Record.** `array: {job_id, items, count, items_file, wrapper, env, level}`, plus `each_file` (the resolved `@file`),
@@ -359,8 +325,7 @@ with `--reason`.
 - **`slurm status` / `slurm wait`** on an array report every item's state from sacct and an overall state:
   COMPLETED only if all tasks completed; FAILED if any task ended otherwise and none is pending, running or
   unknown; else RUNNING or PENDING. `wait` returns when every task has ended. Once all are terminal the record
-  gets `item_states` (and `failed_items`), recorded once: a later `status` returns the same record. An overall
-  COMPLETED is what `dureh promote --run` needs.
+  gets `item_states` (and `failed_items`), recorded once: a later `status` returns the same record.
 - **Workday start check.** One `sbatch --test-only` for the whole array; the expected end is its first task's
   expected start plus the per-task `--time` (precedence as for single jobs: sbatch argument, then the script's
   `#SBATCH --time`, then config `slurm.time`). The record says `per_task: true`. Tasks that wait for resources
@@ -368,44 +333,42 @@ with `--reason`.
 - **Purge.** `dureh purge --wi <WI>` removes the task logs (`%A_%a` resolved for every task), the item list and
   the wrapper.
 
-Example (camri-org names configured as above): two per-subject steps and a group step during development.
+Example (the example package's names, `each_env` unset): two steps over samples and a group step.
 
 ```
 S=bin/dureh
-$S slurm submit --wi WI-0120 --script checkpoints/phase-d/step1.sh --module camri --each @checkpoints/phase-d/subjects.txt
+$S slurm submit --wi WI-0120 --script checkpoints/step-a/step1.sh --module exmod --each @checkpoints/step-a/samples.txt
 #   -> run-A (array 5 tasks)
-$S slurm submit --wi WI-0120 --script checkpoints/phase-d/step2.sh --module camri --each @checkpoints/phase-d/subjects.txt --after run-A
-$S slurm submit --wi WI-0120 --script checkpoints/phase-d/group.sh --module camri --after run-B
+$S slurm submit --wi WI-0120 --script checkpoints/step-a/step2.sh --module exmod --each @checkpoints/step-a/samples.txt --after run-A
+$S slurm submit --wi WI-0120 --script checkpoints/step-a/group.sh --module exmod --after run-B
 $S slurm wait --run run-B                       # per-item states, overall state
-$S slurm submit --wi WI-0120 --resubmit-failed run-A --script checkpoints/phase-d/step1-fixed.sh
+$S slurm submit --wi WI-0120 --resubmit-failed run-A --script checkpoints/step-a/step1-fixed.sh
 ```
 
-A job script for `--each` reads its subject from the environment:
+A job script for `--each` reads its item from the environment:
 
 ```
 #!/bin/bash
 #SBATCH --time=02:00:00
 #SBATCH --cpus-per-task=4
 set -euo pipefail
-: "${CAMRI_SUBJECT:?submit with --each}"
-uv run --frozen --project "${CAMRI_PROJECT}" camri run fmriprep --root . --subjects "${CAMRI_SUBJECT}" ...
+: "${DUREH_ITER_SAMPLE:?submit with --each}"
+uv run --frozen --project "${DUREH_MODULE_ROOT}" exmod run step1 --sample "${DUREH_ITER_SAMPLE}" ...
 ```
-
-A chained workflow (several steps in one camri call) is the same: one `--each` array over subjects.
 
 ## A module's own submit command: `--via` (release 42, proposals/module-submit-contract.md)
 
-Director, 2026-10-06: every CLI a company module ships is free of dureh; item levels, BIDS filters and the module's own
+Director, 2026-10-06: every CLI a company module ships is free of dureh; item levels, item filters and the module's own
 environment names belong to the module. The harness then does two things only: it runs the module's submit command
 inside the WI context and ingests the record that command writes. `--script` (with `--each`) stays the generic path
 for plain scripts and is unchanged.
 
 ```
-dureh slurm submit --wi WI-0120 --via 'camri run fmriprep step1 --workflow fmriprep.default --level subject --submit --detach'
+dureh slurm submit --wi WI-0120 --via 'exmod run pipe step1 --workflow pipe.default --level sample --submit --detach'
 ```
 
-- **Who, where, how.** The same guards as a plain submit: pipeline-runner (or the desk), a dispatched WI of that
-  role. The command (one quoted string, split like a shell) runs with cwd = the WI's job root (the target project
+- **Who, where, how.** The same guards as a plain submit: a role with the `submit_jobs` capability (or the desk), a
+  dispatched WI of that role. The command (one quoted string, split like a shell) runs with cwd = the WI's job root (the target project
   or module, where `--chdir` points for a plain submit) and the site environment (`site.env()`: `DUREH_SITE`,
   `env.path_prepend`, `env.vars`); nothing DUREH-specific is required of the module. stdout/stderr are captured;
   config `slurm.via_timeout` (default 600 s) bounds the command. `--dry-run` records `status: not-run` with the
@@ -413,11 +376,11 @@ dureh slurm submit --wi WI-0120 --via 'camri run fmriprep step1 --workflow fmrip
 - **What the harness may add to the command** comes only from config, never from a module name in code:
   `modules[<m>].submit: {record_arg, log_arg, after_arg, items_arg}` (each optional, each one option name of the
   module's CLI). The entry is the `modules[]` item whose `cli` (or `id`) is the command's first word (basename), or the
-  one named with `--via-module <m>` (needed for wrapped commands such as `uv run camri ...`). `record_arg <path>`
+  one named with `--via-module <m>` (needed for wrapped commands such as `uv run exmod ...`). `record_arg <path>`
   tells the module where to write its submission record (`<slurm.log_dir>/<WI>/via-<utc ts>.json`, or the `--record`
   path), `log_arg <slurm.log_dir>/<WI>/` where its logs go, `after_arg <job id>` once per job id of each `--after`
   run, `items_arg @<file>` the items to rerun (`--resubmit-failed`). Without a declared option nothing is passed:
-  the module decides and the record says where things are. camri-org:
+  the module decides and the record says where things are. Example:
   `"submit": {"record_arg": "--submission-record", "log_arg": "--log-dir", "after_arg": "--after", "items_arg": "--items"}`.
 - **`--after` with `--via`** needs `after_arg`; without it the submit is refused (put the dependency in the module
   command yourself). A dependency on a via run waits for every job of that submission (`after[].job_ids`), for a
@@ -428,7 +391,7 @@ dureh slurm submit --wi WI-0120 --via 'camri run fmriprep step1 --workflow fmrip
   event: nothing ran that the scheduler knows of).
 - **Ingest contract (decision 1).** The record path is `--record <path>` (relative to the job root), else the path
   the harness passed through `record_arg`, else the last stdout line matching `submission-record: <path>`. The file
-  is JSON in the minimal schema below; a module's own schema (camri: `camri.submission.v1`) is a superset, unknown
+  is JSON in the minimal schema below; a module's own schema (e.g. `exmod.submission.v1`) is a superset, unknown
   top-level keys are kept under `via.extra`.
 
   ```
@@ -444,7 +407,7 @@ dureh slurm submit --wi WI-0120 --via 'camri run fmriprep step1 --workflow fmrip
   Required: `schema_version`, `jobs[].job_id`, `jobs[].kind`. An array job needs items (its own `items`, else the
   record's); each item matches `^[A-Za-z0-9][A-Za-z0-9._-]*$`, no duplicates, `count` (when given) equals their
   number. The level is what the record declares (`selection.level`, `level`, or the items' `level`), else
-  subject/session/plain by the `--each` grammar, else `plain` (a module's file-level stems are not parsed).
+  the package's item grammar when every item fits one level, else `plain` (a module's own item names are not parsed).
   Relative paths resolve against the record's `cwd`, else the job root. Log patterns keep `%A_%a`/`%j`; `name` is the
   job name `%x` stands for (status/wait print the resolved paths; purge resolves them per task).
 - **Record (decision 3).** The usual `run` of type `slurm` with `status: submitted`, so everything downstream reads one
@@ -456,8 +419,7 @@ dureh slurm submit --wi WI-0120 --via 'camri run fmriprep step1 --workflow fmrip
 - **status / wait / watch.** One batched `sacct` call over every job of the submission. The state is the worst:
   COMPLETED only when every task of every job completed; FAILED when all ended and any did not; else RUNNING or
   PENDING. `wait` returns when every job ended. The `run.status` event carries `jobs: {job id: state}`, the first
-  array's `items`/`counts`, and when final `item_states`, `failed_items`, `failed_jobs` (recorded once). `promote
-  --run` needs the overall COMPLETED. `slurm cancel` cancels every job. `watch` reports the submission as one line
+  array's `items`/`counts`, and when final `item_states`, `failed_items`, `failed_jobs` (recorded once). `slurm cancel` cancels every job. `watch` reports the submission as one line
   (`job=` the first job, `items=` the first array's counts).
 - **Workday start check (decision 4), warn-only.** The job exists before the harness can check it. In an on-duty
   workday the harness reads `#SBATCH --time` from the first job's recorded script (else config `slurm.time`) and the
@@ -481,19 +443,19 @@ dureh slurm submit --wi WI-0120 --via 'camri run fmriprep step1 --workflow fmrip
 
 ## Pinned module trees: `--module <m>` (UR-20261004-04)
 
-A job script that points at the live checkout (`CAMRI_PROJECT=$DUREH_SITE/modules/camri`) runs whatever that
-checkout holds when Python imports it; a promotion during the job changes code under a running job (measured:
-job 3748401 started on camri 1eeab74 while modules/camri moved to 8333b22 and 69f83b3). With `--module <m>`
+A job script that points at the live checkout (`EXMOD_ROOT=$DUREH_SITE/modules/exmod`) runs whatever that
+checkout holds when Python imports it; a promotion during the job changes code under a running job (measured at a
+company site: a job started on one module revision while the checkout moved two revisions on). With `--module <m>`
 the job runs against a frozen copy instead:
 
-- **Revision.** `--rev`, else the pin in the WI target project's `camri-manifest.yaml`:
+- **Revision.** `--rev`, else the pin in the WI target project's manifest (config `project.manifest`):
   `provenance.tool_versions.<m>`, written as `"<version>+<sha>"` (for example `"2.0.0a1+2396359"`; a bare sha
   or `+g<sha>` also count). It is resolved to the full sha in `modules/<m>`. A `--rev` that differs from the
   pin is allowed and recorded as `rev_override: true`. With neither (a module WI, or no pin) the submit is
   refused.
 - **Tree.** At submit time `git -C modules/<m> archive <rev> | tar -x` into
   `scratch/exec/<WI>-<m>-<rev7>-<utc ts>/` under the site, then `chmod -R a-w`. No `git worktree`: nothing is
-  written into the module's `.git`. `export-ignore` paths are absent, as in container builds.
+  written into the module's `.git`. `export-ignore` paths are absent.
 - **Environment.**
   - `shared-venv` when the tree's `uv.lock` is byte-identical to `modules/<m>/uv.lock` and
     `modules/<m>/.venv` exists (and its interpreters are present): the job activates `modules/<m>/.venv`
@@ -502,7 +464,7 @@ the job runs against a frozen copy instead:
   - `rebuild` otherwise: the job first runs the module's `env_rebuild` (config `modules[<m>].env_rebuild`,
     else `env.rebuild`) in the tree with `UV_PROJECT_ENVIRONMENT=<tree>.venv` (a writable sibling), and fails
     with exit 97 when that fails. No `env_rebuild` configured is refused at submit time.
-  - Both set `UV_NO_SYNC=1`, so `uv run --project "$CAMRI_PROJECT" ...` in the job uses that environment and
+  - Both set `UV_NO_SYNC=1`, so `uv run --project "$EXMOD_ROOT" ...` in the job uses that environment and
     never syncs (never changes) it.
   - Trade-off: `shared-venv` starts at once and needs no network or cache, but shares the live `.venv`; a
     dependency change in the live checkout during the job (an `env repair` or `uv sync` there) still reaches
@@ -511,14 +473,14 @@ the job runs against a frozen copy instead:
     the pinned lock, at the cost of time and disk per job and a uv cache (use `--offline` in `env_rebuild`
     where nodes have no network). Rule of thumb: the same lock is the common case and the cheap one.
 - **Exports.** The module's own names from config (Director 2026-10-04: variables a company's job scripts read
-  carry the company's names): `modules[<m>].root_env=<tree>`, for example `"root_env": "CAMRI_PROJECT"`, and,
-  only when the entry also sets `rev_env` (for example `"CAMRI_REV"`), `<rev_env>=<full sha>`. Only when no
+  carry the company's names): `modules[<m>].root_env=<tree>`, for example `"root_env": "EXMOD_ROOT"`, and,
+  only when the entry also sets `rev_env` (for example `"EXMOD_REV"`), `<rev_env>=<full sha>`. Only when no
   root_env is configured does the wrapper export the fallbacks `DUREH_MODULE_ROOT=<tree>` and
   `DUREH_MODULE_REV=<full sha>` (the submit warns). `rev_env` without `root_env` is refused. The record keeps the
   names as `module.env: {root, rev}`. (Release 25 exported `DUREH_MODULE_ROOT`/`DUREH_MODULE_REV` always, plus
-  root_env; a script that reads `DUREH_MODULE_ROOT` on a site with root_env set must switch to the root_env name.) A job script that assigns the module root itself (`CAMRI_PROJECT=...`, `export <root_env>=...`, or
+  root_env; a script that reads `DUREH_MODULE_ROOT` on a site with root_env set must switch to the root_env name.) A job script that assigns the module root itself (`EXMOD_ROOT=...`, `export <root_env>=...`, or
   any assignment pointing at `$DUREH_SITE/modules/<m>`) overrides the export; the submit warns with the line
-  and never edits the script. Use `"${CAMRI_PROJECT}"` or `"${DUREH_MODULE_ROOT}"` in the script instead.
+  and never edits the script. Use `"${EXMOD_ROOT}"` or `"${DUREH_MODULE_ROOT}"` in the script instead.
 - **Wrapper.** The harness writes `<tree>.sbatch`: the script's `#SBATCH` lines, the exports and environment
   set-up, then the original script run as a child with its own interpreter (its shebang). That wrapper is what
   `sbatch` receives; the record keeps the original `script` and its sha256, plus `wrapper`.
@@ -530,6 +492,6 @@ the job runs against a frozen copy instead:
 - **Record.** The run record gets `module: {name, rev, rev_override, tree, env_mode, manifest_pin, manifest,
   root_env}` and any `warnings`.
 
-Site set-up for camri: add `"root_env": "CAMRI_PROJECT", "rev_env": "CAMRI_REV"` to the camri entry of
-`config.json` `modules`, and change job scripts to read `CAMRI_PROJECT` instead of setting it (or reading
+Site set-up for a module: add `"root_env": "EXMOD_ROOT", "rev_env": "EXMOD_REV"` (the module's own names) to its
+entry of `config.json` `modules`, and change job scripts to read `EXMOD_ROOT` instead of setting it (or reading
 `DUREH_MODULE_ROOT`).

@@ -1,36 +1,37 @@
-# Site configuration keys (`config.json`) and package `config_defaults`
+# Site configuration keys (`config.json`), the startup package (`startup.yaml`) and `config_defaults`
 
 `config.json` is written by `dureh install` from the harness defaults, the startup package's `config_defaults` and the
 install preset (in that order of precedence: the preset wins, then the package, then the harness). It is read-only for
 agents; the desk edits it in a merge window or with the Director's OK (upstream edits a company's config as harness
-work, rule 1 of the workspace). This page lists the keys that matter to `slurm`, `container`, `push`, the session job and the project
-guidance; the Slack and workday keys are in docs/slack.md and docs/workday.md.
+work, rule 1 of the workspace). This page lists the keys that matter to `slurm`, `push`, the session job and
+the project guidance, and the startup package interface (schema 2, release 46); the Slack and workday keys are in
+docs/slack.md and docs/workday.md.
 
-## Rule: no company names in harness code (UP-0069, Director 2026-10-06)
+## Rule: no company or domain names in the harness (UP-0069, Director 2026-10-06; widened in release 46)
 
-A harness string that names a company's module, manifest or variable is a config value or an example labelled as
-such; `tests/test_no_company_names.py` greps `dureh_core/` for `camri` outside a minimal allow-list of help-text
-examples. Harness defaults are generic; a startup package supplies its own values through `config_defaults`.
+A harness string that names a company's module, manifest or variable is a config value or a package value. Since
+release 46 `tests/test_no_company_names.py` scans `dureh_core/`, `org/`, `docs/`, the README and the tests for
+registered company names, domain data-standard and layout words, and the roles release 46 removed, outside a minimal
+allow-list. Harness defaults are generic; a startup package supplies its own values (roles, labels, `config_defaults`).
+Tests prove the mechanism with the neutral example package `tests/fixtures/example-org`.
 
 ## Keys
 
 | key | default | read by |
 |---|---|---|
-| `project.manifest` | `manifest.yaml` | the one project manifest the harness reads: `--module` revision pin (`provenance.tool_versions.<m>`, exectree), the generated project CLAUDE.md (projectgen), the first file `container retire` scans. `null` turns these off (`--module` then needs `--rev`). |
-| `project.pipeline_version_key` | `version` | key of a manifest `pipelines[]` entry that names the pipeline's software version (projectgen) |
-| `project.derivative_entry` | `{family}_{species}_{suffix}` | `str.format` of a `pipelines[]` entry giving the derivative it produces (projectgen "produced by"); unknown fields become `?` |
-| `containers.cache` | unset | the container cache directory (relative: under the site) |
+| `startup.source` | the install's `--startup` path | the package source tree `adapter sync` re-copies `startup/` from (release 46, "Single package source" below) |
+| `startup.rev` | written by install and `adapter sync` | the package revision installed in `startup/`: a git commit, or `sha256:<hex>` of the tree for a source without git; `deployment.json` pins the same |
+| `project.manifest` | `manifest.yaml` | the one project manifest the harness reads: the `--module` revision pin (`provenance.tool_versions.<m>`, exectree). `null` turns it off (`--module` then needs `--rev`). Release 46: `project.pipeline_version_key` and `project.derivative_entry` are unused (a warning names them) |
+| `containers.cache` | unset | the container cache directory (relative: under the site); no role writes it (write guard). Release 46 removed `dureh container build/status/retire` and `containers.manifest_globs`, `module`, `build_args`, `time`, `mem` |
 | `containers.cache_env` | `DUREH_CONTAINER_CACHE` | env var (config `env.vars` or the process) that names the cache when `containers.cache` is unset; `null` = no env lookup |
-| `containers.manifest_globs` | `["*manifest*.yaml", "*manifest*.yml", "*manifest*.json"]` | top-level project files `container retire` scans for a pinned sha256, after `project.manifest` |
-| `containers.module`, `containers.build_args`, `containers.time`, `containers.mem` | see docs/containers.md | container build jobs |
 | `slurm.account`, `slurm.partition`, `slurm.time` | unset | sbatch defaults (a script or argument `--time` wins) |
 | `slurm.log_dir` | `logs/slurm` | where scheduler logs go (docs/slurm.md) |
 | `slurm.job_prefix` | the session name (`session.name`, else the site folder name) | prefix of the job names the harness gives: `<prefix>-<WI>` for `slurm submit`, `<prefix>-verify-<WI>` for the checks job of `verify --wi`. A script's own `#SBATCH -J/--job-name` (or `--sbatch-arg -J`) wins for `slurm submit` (docs/slurm.md "Job names") |
-| `slurm.each_level` | `file` | the level workflow steps loop at (`file`, `session`, `subject`, or `any` to switch the rule off): a bare single job needs `--single --reason`, a coarser `--each-from-bids --level` needs `--reason` (docs/slurm.md "loop rule") |
-| `slurm.each_env` | DUREH_ITER names | the variable names an `--each` task gets its item under |
-| `slurm.watch` | `monitor` | how the desk learns that a job ended (release 45; docs/slurm.md "Watch modes"): `monitor` keeps a standing `slurm watch` Monitor (the behaviour before the key existed), `on-demand` keeps none (`slurm wait --run` for short jobs, `slurm status` at a later turn for long ones), `off` names only `slurm status`. Only generated text (CLAUDE.md, role files, hints) follows it; another value fails `adapter sync` |
-| `slurm.external_jobs` | `true` | `dureh status` asks `squeue -u $USER` for jobs no harness record owns and lists them as `External jobs` (release 45; docs/slurm.md); `false` never asks |
-| `slurm.external_ignore` | `["cc-*"]` | job-name globs never listed as external (default: session jobs `cc-<name>[-<purpose>]` of this and other sites) |
+| `slurm.each_level` | the package's finest `labels.levels`, else `any` | the loop rule: one of the package's levels or `any` (off). While on, a job without `--each` needs `--after` (a group step) or `--single --reason` (docs/slurm.md "One array per step") |
+| `slurm.each_env` | DUREH_ITER names | the variable names an `--each` task gets its item, level, index and item-grammar fields under |
+| `slurm.watch` | `monitor` for a site without the key; `on-demand` written by `install` for a new site (release 46) | how the desk learns that a job ended (release 45; docs/slurm.md "Watch modes"): `monitor` keeps a standing `slurm watch` Monitor, `on-demand` keeps none (`slurm wait --run` for short jobs, `slurm status` at a later turn for long ones), `off` names only `slurm status`. Only generated text (CLAUDE.md, role files, hints) follows it; another value fails `adapter sync` |
+| `slurm.external_jobs` | `true` | with `slurm.external_match` set, `dureh status` asks `squeue -u $USER` for jobs no harness record owns and lists the matching ones as `External jobs` (release 45; docs/slurm.md); `false` never asks |
+| `slurm.external_match` | absent (none listed) | release 46: name patterns of the external jobs to list (an include list, e.g. a module framework's job-name prefix); empty or absent lists none and asks `squeue` nothing. Replaces `slurm.external_ignore`, which is ignored with a warning for one release |
 | `slurm.via_timeout` | `600` | seconds a `--via` module command may take to submit and exit |
 | `checks.local_allow` | `[]` | globs of declared checks an item may run in the verify process with `wi new/amend --checks-runner local` (release 45; docs/slurm.md "Per-item local runner"); empty refuses the per-item choice |
 | `checks.local_timeout` | `60` | seconds per check on the per-item local path |
@@ -45,6 +46,95 @@ examples. Harness defaults are generic; a startup package supplies its own value
 | `modules[].cli` | the id | the command word that selects this entry for `slurm submit --via` |
 | `modules[].submit` | `{}` | `{record_arg, log_arg, after_arg, items_arg}`: the options of the module's own submit command the harness may add (docs/slurm.md "via") |
 
+## The startup package: `startup.yaml` schema 2 (release 46)
+
+A company package declares what is about one company or domain; the harness knows roles only by kind (desk,
+manager, worker) and by capability. Validated at install, `adapter sync` and `verify --self`
+(`install.validate_package`, `package.check`, `Org.load`); errors refuse, warnings are printed (and listed by
+`status` and `verify --self`).
+
+```yaml
+schema_version: 2
+package: {id, name, version, harness_min: 46}      # harness_min: the oldest harness release the package needs
+desk:                                              # additive to the harness desk
+  may_dispatch: [<worker roles the desk dispatches directly>]
+  write_scopes: [projects/*/README.md]             # logical scopes only; site:* scopes are harness-owned
+roles:
+  <name>:                                          # ^[a-z][a-z0-9-]{1,30}$; desk reserved; checker re-skin only
+    kind: manager | worker
+    tier: <tier in org/tiers.yaml>
+    description | output | never: <text>
+    isolation: worktree | scratch                  # scratch: no WI worktree; writes its scope in the target main tree
+    write_scopes: [<logical glob under modules/, projects/, package/, harness/>]
+    may_dispatch: [<workers>]                      # managers only
+    capabilities: [submit_jobs, verify, network]
+    project: true                                  # also a project-level agent file (projectgen)
+    skill: skills/<x>/SKILL.md                     # the role's skill (brief); must exist in the package
+    instructions: [<extra agent-file lines>]
+values: [{id, title, skill, manager}]              # manager: the role a bootstrap item of that value goes to
+policies:
+  loop_rule: {text: <desk/agent text>, refuse: <added to the loop-rule refusal>}
+protected:
+  - {path: <site-relative glob>, level: no-read | read-only, why: <text>}
+labels:
+  levels: [<finest>, ..., <coarsest>]              # slurm.each_level is one of these (or any)
+  layout: {staging: <dir>, final: <dir>, reports: <dir>}   # defaults: checkpoints, (none), reports
+  item_grammar: {<level>: <regex with named groups>}       # --each item levels and fields
+templates: {project: templates/project}            # holds CLAUDE.md.template for linked projects
+guards: {scheduler_only_commands: [...]}           # additive only
+config_defaults: {project, containers, slurm, checks, env, limits, guards, modules, index}
+lessons | bootstrap | dependencies | state: as before
+organization: {managers, workers}                  # release 46 only: an enable list over the roles; then `roles` rules
+```
+
+- **Capabilities** (closed set): `submit_jobs` (`slurm submit/status/wait/resubmit-failed`, `run.status`,
+  `run.completed`, `slurm.via-failed`), `verify`
+  (`verify --wi`, `verification.recorded`, `wi.verified`), `network` (WebFetch, WebSearch). A role's tools come from
+  its kind, capabilities and scopes; the events it may record from its kind's list plus its capabilities' lists
+  (`org/roles.yaml` `event_authority`, `capability_authority`). The desk holds `submit_jobs`, `verify`, `network`.
+- **No `promote` capability** (Director, 2026-10-09): release 46 removed the `dureh promote` data path (run
+  promotion, `--metadata`, `--kind report`); landing results in a final area is the company's own tooling. `dureh wi
+  promote` (Gate 2, `contrib/` branches) is unrelated and stays. `labels.layout.final` is only a label (`path-refs`
+  skips it).
+- **Default org** (`org/roles.yaml`): `desk`, a generic `manager` (dispatches `worker`, `checker`), a generic
+  `worker` (module `src/`, `tests/`, `docs/`), and `checker` (`verify`). A package's `roles` add roles or replace
+  `manager`/`worker`; `checker` may only be re-skinned (skill, instructions, texts) and keeps `verify` and no write
+  scopes. Every manager and every verify role is dispatched by the desk. A package without `roles` runs on the four.
+- **Validation** (3.4): unknown top-level keys warn (refused from release 49); `harness_min` above this release
+  refuses; roles: kind, tier, `may_dispatch` only on managers and only to workers (depth desk -> manager -> worker),
+  known targets, every dispatching manager can dispatch a verify role, at least one verify role, a verify role has no
+  write scopes; write scopes are segment-aware globs under `modules/`, `projects/`, `package/`, `harness/` and none
+  covers a protected path; capabilities from the closed set; skills and the
+  project template exist inside the package; no symlinks; protected levels are `no-read` or `read-only`.
+- **Schema 1** still loads in release 46 with a warning: its `organization` enable list resolves against the
+  generic roles plus `org/legacy/schema1-roles.yaml` (pm-modules, py-writer, doc-writer, researcher), names that no
+  longer exist are dropped with a warning, and its labels are the pre-46 words (`LEGACY_LABELS`). Both go when schema
+  1 is refused.
+
+### Protected paths
+
+`protected` rules bind every agent, the desk included: `read-only` refuses Write/Edit/NotebookEdit and Bash writes
+through the write guard (before any role scope); `no-read` also refuses content reads: Read and Grep with a path
+inside the area and Bash content readers (`cat`, `head`, `grep`, `python <file>`, `cp` from it, `< file` ...), a
+best-effort word scan (a script that opens the file is not caught). Listing names (Glob, `ls`) stays allowed. The
+PreToolUse matcher gains `Read|Grep` only when a `no-read` rule exists. Every refusal is recorded as `guard.denied`.
+Harness commands (scheduler jobs) are not agent reads or writes; `path-refs` does not read inside a
+no-read area. `dureh protected list [--json]` (allowed with `--observe`) prints each rule with its level and source
+(package id, version, revision), or "none declared: interim default (workspace rule 2)": the harness applies no
+default of its own.
+
+### Single package source (release 46, option A)
+
+A site runs a copy of one committed package revision. `install` and `adapter sync [--package-rev REV]` export the
+source (`config.json` `startup.source`) with `git archive <rev>` (default: its committed HEAD) into `startup.new/`,
+refuse a source with uncommitted or untracked changes, validate the copy, swap it in for `startup/`, and record
+`package.synced {from, to, changed}` when the revision or the files changed; `startup.rev` (and `startup.version`)
+follow, and `deployment.json` pins the same revision (no more `+dirty`). A source without git is copied and its
+revision is a content hash. When `startup.source` is unset or missing, `startup/` is kept as installed. Everything
+else (`config_defaults`, skills, roles, templates, the deployment pin) is read from `startup/` only. A failed
+validation leaves the installed package untouched. `adapter sync` runs only where it already ran: install, merge
+windows and the desk's switch to a landed release.
+
 ## `config_defaults` in a startup package
 
 `startup.yaml` may carry a `config_defaults` block with any of `project`, `containers`, `slurm`, `checks`, `env`,
@@ -54,29 +144,25 @@ identity, harness root, models or state backend. `validate_package` refuses othe
 - **Install.** `install._config` merges it below the preset: a key the preset sets stands; a mapping is merged key
   by key; `modules` entries are matched by id (a later `site link-module <id>` keeps the seeded keys, for example
   `submit`); lists are not merged.
-- **Existing sites.** `dureh adapter sync` reads the block from the package source tree (`startup.source`, else the
-  site's `startup/` copy) and adds the keys the site's `config.json` lacks, once; a value the site has is never
+- **Existing sites.** `dureh adapter sync` re-copies the package first (above), then reads the block from the
+  installed `startup/` and adds the keys the site's `config.json` lacks, once; a value the site has is never
   changed. It prints `config.json: added from the package's config_defaults: ...` when it did.
 
-The block the camri-org package (`startup-packages/camri-org/startup.yaml`) needs, so that today's behaviour is kept:
+Example (neutral names):
 
 ```yaml
 config_defaults:
   project:
-    manifest: camri-manifest.yaml
-    pipeline_version_key: camri_version
-    derivative_entry: "{family}_camri_{species}_{suffix}"
+    manifest: example-manifest.yaml
   containers:
-    cache_env: CAMRI_CONTAINER_CACHE
-    manifest_globs: ["*manifest*.yaml", "*manifest*.yml", "*manifest*.json"]
+    cache_env: EXAMPLE_IMAGE_CACHE
+  slurm:
+    external_match: ["exmod-*"]
   modules:
-    - id: camri
+    - id: exmod
       submit:
         record_arg: --submission-record
         log_arg: --log-dir
         after_arg: --after
         items_arg: --items
 ```
-
-Until the package carries it and `adapter sync` has run at the site, the same values go into the site's
-`config.json` by hand (`project`, `containers.cache_env`, `containers.manifest_globs`, `modules[camri].submit`).

@@ -172,8 +172,8 @@ What the plan approval covers (agreed with a company desk, 2026-10-03):
   to approved (`wi approve` cannot); a promoted item never changes, and an item of a verified or promoted bundle
   is refused (re-open the bundle first). Without `--reopen`, amending a verified item is refused with this
   command in the message.
-- Gate 2 for checker-verified module and project WIs in the plan. Promotion into derivatives and
-  harness/package contributions wait for the end report.
+- Gate 2 for checker-verified module and project WIs in the plan. Harness/package
+  contributions wait for the end report.
 - After the end time, one checker run for an item staged during the day. A re-dispatch after a failed
   check is overtime (for a plan item, recorded by the harness under the finish-plan rule).
 
@@ -277,7 +277,7 @@ with the new absolute paths (`bin/dureh` and the hooks find the site from their 
 (informational: every command uses the directory it runs in) and records one `site.moved` event `{from, to}` the
 first time it sees the new location; a second sync records nothing. Records are append-only and keep the paths
 they were written with (worktrees, job scripts, log directories, exec trees, container caches); readers that open
-such a path (`dispatch brief` rework blocks, `verify --collect`, `slurm status|wait`, `purge`, `container status`,
+such a path (`dispatch brief` rework blocks, `verify --collect`, `slurm status|wait`, `purge`,
 `slurm submit --resubmit-failed`, `path-refs`) first map it through `Site.relocate`: a path under the live root is
 used as is, one under a previous root (the `from` of the `site.moved` events, config `site.previous_roots` when
 present, or a stale `site.root` the sync has not seen yet) is re-rooted, and a path outside the site is left alone.

@@ -7,7 +7,7 @@ developers in one uniform, traceable form, so the harness improves from real use
 
 | Problem is in | Route |
 |---|---|
-| camri module, package, project | normal work item (WI) or finding at this site |
+| a company module, package, project | normal work item (WI) or finding at this site |
 | harness: `dureh_core`, hooks, `org/roles.yaml`, schemas, permission model, `wi`/`dispatch` behavior | upstream request (this protocol) |
 
 ## Rules
@@ -45,7 +45,7 @@ Site and upstream work at the same time. Four things can collide; each has one r
 |---|---|
 | Code: a site harness WI and upstream write the same branch | The site reports harness problems as URs, never fixes them in a harness WI. |
 | Live swap: the harness changes under running agents | Sites run read-only release checkouts; a site switches release (`adapter sync --harness`) only in a merge window, while idle. |
-| Project files: `adapter sync` commits into linked projects | Same merge window; no data-steward or pipeline-runner runs in that project meanwhile. |
+| Project files: `adapter sync` commits into linked projects | Same merge window; no role runs jobs or promotions in that project meanwhile. |
 | Site records | Upstream never writes them; it reads in observe mode. |
 
 Site (desk) order: stop the affected WI at a safe point; record the finding and the UR with
@@ -71,6 +71,15 @@ own message; the site picks the change up with the next release it syncs.
 WI branches are `wi/<site-id>/<WI>` (decision D4), so two sites never share a branch. Branches made by
 older harnesses (`wi/<WI>`) keep working; `dureh purge` deletes a legacy branch only when its tip is a
 commit this site recorded for that WI.
+
+## Roles: generic in the harness, company roles in the package (decision D3, revised 2026-10-08, O10)
+
+`org/roles.yaml` holds only the generic roles the harness governs (desk, manager, worker, checker), changed upstream
+with the Director's merge like any harness code. A company's own roles live in its startup package (`startup.yaml`
+schema 2 `roles:`, docs/config.md): to add, change or remove one, the desk drafts a package WI (target `package`,
+which ends as a `contrib/` branch), upstream reviews it and cuts the package release, and the Director approves it;
+the site takes it with `adapter sync` in a merge window (the package is re-copied from the committed revision). A
+role is never added to the harness for one company.
 
 ## Mailbox (DUREH-Exchange)
 
