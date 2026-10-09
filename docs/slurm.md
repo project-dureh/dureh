@@ -291,6 +291,11 @@ dureh verify --wi <WI> --collect [RUN]   # checker, re-dispatched: record the ve
   target has `env_rebuild`, the worktree's own `.venv` built first (`rebuild`: inside the checks job for the slurm
   runner, exit 95 when it fails; in the verify process for the local runner); else nothing (`none`, as before). No
   desk repair is needed for a new worktree; a stale `.venv` is still refused with the `worktree repair` hint.
+  Since release 48 (company finding d381ae6b) `own` activates that `.venv` the same way (`VIRTUAL_ENV`, `PATH`,
+  `UV_PROJECT_ENVIRONMENT`, `UV_NO_SYNC=1`; no `PYTHONPATH` change), for the local runner and in the checks job
+  script, so a check calling a bare `python` runs the work root's environment, not the system python. This holds
+  for the WI worktree's own `.venv` (including the shared form) and for a target main tree's `.venv`; a work root
+  with no `.venv` at all still activates nothing.
 - **Worktree environment at dispatch (release 47, UR-20261009-01).** The worker's own commands need an environment
   too, so `dispatch brief` gives a new (or reused, `.venv`-less) WI worktree of a module or project target that
   has `env_rebuild` its `.venv` before the brief returns (`workflow.provision_worktree_env`); a target without
