@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import fnmatch
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -675,6 +676,8 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None) -> 
         why += f"; escalated after {rework_limit} reworks"
     if role.is_worker and role.write_scopes and not checking and role.isolation == "worktree":
         wt = _create_worktree(site, wi, p["target"])
+        if wt.get("worktree"):
+            wt["env"] = _dispatch_worktree_env(site, led, wi, by, Path(wt["worktree"]), p["target"])
     else:
         wt = {"worktree": str(site.worktrees / wi) if checking and (site.worktrees / wi).is_dir() else None,
               "base": None, "note": "role writes no files"}
@@ -685,16 +688,57 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None) -> 
         fail(f"brief for {wi} is {len(body)} bytes, over the {limit}-byte limit; split the work item")
     # release 37 (UR-20261005-02): a rework brief carries the last failed verification, outside the budget
     block = "" if checking or led.wi_status(wi)["rework"] <= 0 else last_verification_block(led, wi)
+    block += _env_brief_line(wt)  # release 47: outside the budget, as the verification block
     full = text + block
     digest = hashlib.sha256(full.encode("utf-8")).hexdigest()[:16]
     header = f"{BRIEF_TAG} {wi} role={role.name} brief={digest}"
     led.event("dispatch.prepared", by, wi, {"role": role.name, "brief": digest, "bytes": len(body), "checking": checking,
                                             "model": entry["model"], "qualification": why,
                                             "worktree": wt["worktree"], "base": wt["base"], "by": by,
+                                            **({"worktree_env": wt["env"]} if wt.get("env") else {}),
                                             **({"verification_bytes": len(block.encode("utf-8"))} if block else {}),
                                             **({"supersedes": supersedes} if supersedes else {})})
     return {"header": header, "brief": header + "\n\n" + full, "model": entry["model"], "worktree": wt["worktree"],
-            "subagent_type": role.name}
+            "subagent_type": role.name, **({"worktree_env": wt["env"]} if wt.get("env") else {})}
+
+
+def _dispatch_worktree_env(site: Site, led: Ledger, wi: str, by: str, wt: Path, target: str) -> dict | None:
+    """Release 47 (UR-20261009-01): a WI worktree of a target with `env_rebuild` gets its Python environment
+    before the brief returns (provision_worktree_env). A worktree that already has a `.venv` keeps it (a stale one
+    is the desk's `worktree repair`, as before). A failed build refuses the brief and is recorded as
+    `worktree.env-failed`."""
+    from .util import DurehError
+
+    if not _env_target(target) or not _env_rebuild_command(site, target):
+        return None
+    venv = wt / ".venv"
+    if venv.exists():
+        mark = shared_env_of(venv)
+        return {"env": "existing", "env_mode": "shared-venv" if mark is not None else "own", "venv": str(venv),
+                **({"shared": mark.get("venv")} if mark else {})}
+    try:
+        return provision_worktree_env(site, wt, target)
+    except DurehError as exc:
+        if not site.observe:
+            led.event("worktree.env-failed", by, wi, {"worktree": str(wt), "target": target, "error": str(exc)[-1500:],
+                                                      "command": _env_rebuild_command(site, target)})
+        fail(f"{wi}: the worktree has no Python environment: {exc}. No brief was prepared. Fix the cause (config"
+             f" env_rebuild, env.rebuild_timeout, network or cache), then run `dureh worktree repair --wi {wi}` and"
+             " dispatch again")
+
+
+def _env_brief_line(wt: dict) -> str:
+    """One line telling the worker which Python environment its worktree has (release 47)."""
+    env = wt.get("env") or {}
+    venv = env.get("venv")
+    if not venv:
+        return ""
+    if env.get("env_mode") == "shared-venv":
+        return (f"\nPython env: {venv} shares the target main tree's environment ({env.get('shared')}, same uv.lock),"
+                " your package directory first. Use `.venv/bin/python`, `source .venv/bin/activate` or `uv run --no-sync`;"
+                " a plain `uv run`, `uv sync` or `uv add` here installs the full lock into this worktree's own .venv"
+                " (network and time), never into the shared one.\n")
+    return f"\nPython env: {venv} (this worktree's own; built with env_rebuild). Use `.venv/bin/python` or `uv run`.\n"
 
 
 VERIFICATION_BLOCK_BYTES = 4096
@@ -941,6 +985,16 @@ def venv_stale(venv: Path) -> str | None:
     if not bindir.is_dir():
         return None
     own = {os.path.normpath(venv), os.path.realpath(venv)}
+    mark = shared_env_of(venv)
+    if mark is not None:  # release 47: the shared form is stale when the environment it layers on is
+        main, root = mark.get("venv"), mark.get("root")
+        if not main or not os.path.isdir(os.path.join(main, "bin")):
+            return main or str(venv / SHARED_MARK)
+        if root and os.path.normpath(root) not in {os.path.normpath(venv.parent), os.path.realpath(venv.parent)}:
+            return root
+        inner = venv_stale(Path(main))
+        if inner:
+            return inner
 
     for f in sorted(bindir.iterdir()):
         if f.is_symlink() or not f.is_file():
@@ -972,6 +1026,129 @@ def venv_stale(venv: Path) -> str | None:
     return None
 
 
+SHARED_MARK = "DUREH-SHARED"  # in a worktree `.venv` made by share_worktree_env: the environment it layers on
+SHARED_PTH = "_dureh_shared.pth"
+ENV_REBUILD_TIMEOUT_DEFAULT = 900
+
+
+def shared_env_of(venv: Path) -> dict | None:
+    """The shared-form marker of a worktree `.venv` (release 47), or None for an ordinary environment."""
+    mark = Path(venv) / SHARED_MARK
+    if not mark.is_file():
+        return None
+    try:
+        data = json.loads(mark.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def env_rebuild_timeout(site: Site) -> int:
+    """Seconds an `env_rebuild` run by `dispatch brief` or `worktree repair` may take (config
+    `env.rebuild_timeout`, release 47)."""
+    try:
+        return max(1, int((site.config.get("env") or {}).get("rebuild_timeout") or ENV_REBUILD_TIMEOUT_DEFAULT))
+    except (TypeError, ValueError):
+        fail("config env.rebuild_timeout must be a number of seconds")
+
+
+def _uv_free_env(site: Site) -> dict:
+    """The site environment without an active virtualenv or uv project environment of the calling process, so a
+    command run for one tree never writes into another tree's environment."""
+    env = site.env()
+    for k in ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "PYTHONHOME", "UV_NO_SYNC"):
+        env.pop(k, None)
+    return env
+
+
+def share_worktree_env(site: Site, wt: Path, troot: Path) -> dict:
+    """Give a WI worktree the target main tree's environment in a form its own commands pick up (release 47,
+    UR-20261009-01): `<wt>/.venv` becomes a small virtualenv of the same base interpreter (`python -m venv
+    --without-pip`, no network) whose site-packages carries one `.pth`: the worktree's package directory first,
+    then the main tree's site-packages (with its own `.pth` files, so editable installs of other modules resolve).
+    `.venv/bin/python`, an activated `.venv` and `uv run` (which finds the project `.venv`) all import the
+    worktree's code with the main tree's dependencies. Nothing in it points uv at the main environment: a `uv
+    sync`/`uv add` in the worktree installs into this `.venv` (the worktree's own), never into the shared one,
+    whose packages it only reads. A `DUREH-SHARED` marker names the shared environment; venv_stale follows it."""
+    from .exectree import package_dir
+
+    main = Path(troot) / ".venv"
+    venv = Path(wt) / ".venv"
+    py = main / "bin" / "python"
+    env = _uv_free_env(site)
+    env.pop("PYTHONPATH", None)
+    system = False
+    cfg = main / "pyvenv.cfg"
+    if cfg.is_file():
+        for line in cfg.read_text(errors="replace").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "include-system-site-packages":
+                system = value.strip().lower() == "true"
+
+    def run(args: list[str]) -> str:
+        proc = subprocess.run(args, capture_output=True, text=True, env=env, timeout=300, cwd=wt)
+        if proc.returncode != 0:
+            raise OSError(f"`{' '.join(args)}` exit {proc.returncode}: {(proc.stderr or proc.stdout).strip()[-400:]}")
+        return proc.stdout.strip()
+
+    purelib = "import sysconfig; print(sysconfig.get_path('purelib'))"
+    try:
+        main_sp = run([str(py), "-I", "-c", purelib])
+        base = run([str(py), "-I", "-c", "import sys; print(getattr(sys, '_base_executable', '') or sys.executable)"])
+        run([base, "-m", "venv", "--without-pip", *(["--system-site-packages"] if system else []), str(venv)])
+        own_sp = Path(run([str(venv / "bin" / "python"), "-I", "-c", purelib]))
+        own_sp.mkdir(parents=True, exist_ok=True)
+        (own_sp / SHARED_PTH).write_text(f"{package_dir(Path(wt))}\nimport site; site.addsitedir({main_sp!r})\n",
+                                         encoding="utf-8")
+        lock = Path(wt) / "uv.lock"
+        (venv / SHARED_MARK).write_text(json.dumps({
+            "venv": str(main), "root": str(wt), "site_packages": main_sp,
+            "lock_sha256": sha256_file(lock) if lock.is_file() else None}, indent=1) + "\n", encoding="utf-8")
+    except (OSError, subprocess.SubprocessError) as exc:
+        shutil.rmtree(venv, ignore_errors=True)
+        fail(f"sharing {main} with {wt} failed: {exc}")
+    return {"env": "shared", "env_mode": "shared-venv", "venv": str(venv), "shared": str(main)}
+
+
+def provision_worktree_env(site: Site, wt: Path, target: str) -> dict:
+    """The Python environment of a WI worktree that has no `.venv`, for a target with `env_rebuild` (release 47):
+    the shared form (share_worktree_env) when the worktree's dependencies are the main tree's (same rule as
+    checks_env_plan `shared-venv`) and the main tree's `.venv` exists and is not stale; else the worktree's own
+    `.venv` built with `env_rebuild`, bounded by `env.rebuild_timeout`. A failed build leaves no `.venv` (a
+    partial one is moved to `.venv.stale-<time>`, which `worktree repair --prune-stale` removes) and fails."""
+    wt = Path(wt)
+    cmd = _env_rebuild_command(site, target)
+    if not cmd or not _env_target(target):
+        return {"env": "none"}
+    venv = wt / ".venv"
+    troot = target_root(site, target)
+    if troot is not None and (troot / ".venv").is_dir() and not stale_venv(troot) and _same_deps(wt, troot):
+        return share_worktree_env(site, wt, troot)
+    timeout = env_rebuild_timeout(site)
+    t0 = time.monotonic()
+    try:
+        proc = subprocess.run(cmd, shell=True, cwd=wt, capture_output=True, text=True, timeout=timeout,
+                              env=_uv_free_env(site))
+        err = None if proc.returncode == 0 else f"exit {proc.returncode}: {(proc.stderr or proc.stdout).strip()[-600:]}"
+    except subprocess.TimeoutExpired:
+        err = f"timed out after {timeout} s (config env.rebuild_timeout)"
+    except OSError as exc:
+        err = str(exc)
+    if err is None and not venv.is_dir():
+        err = f"it did not create {venv}"
+    if err is None and venv_stale(venv):
+        err = f"{venv} names {venv_stale(venv)}"
+    if err:
+        kept = ""
+        if venv.exists() or venv.is_symlink():
+            aside = venv.with_name(f".venv.stale-{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}-partial")
+            os.rename(venv, aside)
+            kept = f"; the partial environment was moved to {aside}"
+        fail(f"environment build `{cmd}` in {wt} failed ({err}){kept}")
+    return {"env": "rebuilt", "env_mode": "rebuild", "venv": str(venv), "command": cmd,
+            "seconds": round(time.monotonic() - t0, 1)}
+
+
 def _env_rebuild_command(site: Site, target: str) -> str | None:
     for key in ("modules", "projects"):
         for entry in site.config.get(key) or []:
@@ -981,20 +1158,45 @@ def _env_rebuild_command(site: Site, target: str) -> str | None:
 
 
 def _repair_env(site: Site, root: Path, target: str, venv: Path | None = None, force: bool = False,
-                dry_run: bool = False) -> dict:
+                dry_run: bool = False, share: bool = True) -> dict:
     """Rebuild `venv` (default <root>/.venv) with the target's env_rebuild, run in `root`, when it is stale (or
     `force`), and create it when it is missing. An existing environment is moved aside first
     (`<venv>.stale-<time>`): a sync into the old directory keeps the installed scripts and their old shebangs, so
     the rebuild must start from nothing; the copy (and any earlier failed attempt's) is removed once the rebuild
     succeeds and kept, named in the error, when it fails. An
     environment elsewhere than <root>/.venv (an exec tree's sibling) is named to the command through VIRTUAL_ENV
-    and UV_PROJECT_ENVIRONMENT, as the job wrapper does. `dry_run` only reports."""
+    and UV_PROJECT_ENVIRONMENT, as the job wrapper does. `dry_run` only reports.
+
+    Release 47: for a WI worktree's `.venv` (with `share`), a missing environment or a shared-form one that is
+    stale (or forced) is provisioned again as `dispatch brief` does (provision_worktree_env: the shared form when
+    the dependencies still match, else `env_rebuild`); an own environment is rebuilt as before."""
     venv = Path(venv) if venv is not None else Path(root) / ".venv"
     stale = venv_stale(venv)
     missing = not venv.exists()
     if not stale and not missing and not force:
         return {"env": "ok"}
     cmd = _env_rebuild_command(site, target)
+    if (share and cmd and _env_target(target) and venv == Path(root) / ".venv"
+            and Path(root).parent == site.worktrees and (missing or shared_env_of(venv) is not None)):
+        extra = {"missing": True} if missing else {}
+        if dry_run:
+            return {"env": "rebuilt", "command": cmd, "stale_interpreter": stale, "dry_run": True, **extra}
+        aside = None
+        if not missing:
+            aside = venv.with_name(f"{venv.name}.stale-{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}")
+            os.rename(venv, aside)
+        try:
+            r = provision_worktree_env(site, Path(root), target)
+        except Exception:
+            if aside is not None and not venv.exists():
+                os.rename(aside, venv)  # the old shared form stays (stale): nothing is lost
+            raise
+        for leftover in venv.parent.glob(f"{venv.name}.stale-*"):  # as below: the copy and earlier failed attempts'
+            shutil.rmtree(leftover, ignore_errors=True)
+        if aside is not None:
+            extra["moved_aside"] = f"{aside} (removed)"
+        return {"env": "rebuilt", "command": r.get("command") or f"shared {r.get('shared')}",
+                "stale_interpreter": stale, "env_mode": r["env_mode"], **extra}
     if not cmd:
         if missing:
             return {"env": "ok"}  # a target without env_rebuild may not use a virtualenv
@@ -1009,10 +1211,14 @@ def _repair_env(site: Site, root: Path, target: str, venv: Path | None = None, f
         aside = venv.with_name(f"{venv.name}.stale-{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}")
         os.rename(venv, aside)
         extra["moved_aside"] = str(aside)
-    env = site.env()
+    env = _uv_free_env(site)
     if venv != Path(root) / ".venv":
         env.update(VIRTUAL_ENV=str(venv), UV_PROJECT_ENVIRONMENT=str(venv))
-    proc = subprocess.run(cmd, shell=True, cwd=root, capture_output=True, text=True, timeout=3600, env=env)
+    try:
+        proc = subprocess.run(cmd, shell=True, cwd=root, capture_output=True, text=True, timeout=3600, env=env)
+    except subprocess.TimeoutExpired:
+        fail(f"environment rebuild `{cmd}` in {root} timed out after 3600 s"
+             + (f". The stale environment was moved to {aside}." if aside else ""))
     kept = f" The stale environment was moved to {aside}." if aside else ""
     if proc.returncode != 0:
         fail(f"environment rebuild `{cmd}` failed in {root} (exit {proc.returncode}): "
@@ -1096,45 +1302,77 @@ def wi_checks_runner(site: Site, payload: dict) -> tuple[str, str]:
     return checks_runner(site), "site"
 
 
+def _same_deps(cwd: Path, troot: Path) -> bool:
+    """The worktree's dependencies are the main tree's: `uv.lock` byte-identical, or neither has one and
+    `pyproject.toml` is identical (the shared-venv rule of `slurm submit --module` and of checks_env_plan)."""
+    lock, live = Path(cwd) / "uv.lock", Path(troot) / "uv.lock"
+    if lock.is_file() and live.is_file():
+        return lock.read_bytes() == live.read_bytes()
+    a, b = Path(cwd) / "pyproject.toml", Path(troot) / "pyproject.toml"
+    return not lock.exists() and not live.exists() and a.is_file() and b.is_file() and a.read_bytes() == b.read_bytes()
+
+
+def _env_target(target: str | None) -> bool:
+    """A target whose code runs in its own Python environment: a module or a project tree."""
+    return bool(target) and target.startswith(("modules/", "projects/"))
+
+
 def checks_env_plan(site: Site, wi: str, cwd: Path, troot: Path) -> dict:
     """The Python environment a WI's declared checks run in (release 46, company finding 2026-10-09: a new WI
     worktree has no `.venv`, since it is untracked, so checks fell back to a bare `python`). Modes:
 
     - `own`: the work root has its own `.venv` (or is the target's main tree): used as today.
-    - `shared-venv`: the worktree has none, the target's main tree has a usable (not stale) `.venv`, and the
+    - `shared-venv`: the worktree has no own environment (none, or the shared form `dispatch brief` gives it since
+      release 47, see share_worktree_env), the target's main tree has a usable (not stale) `.venv`, and the
       worktree's `uv.lock` is byte-identical to the main tree's (or neither has one and `pyproject.toml` is
       identical): the checks run with that environment activated (VIRTUAL_ENV, PATH, UV_PROJECT_ENVIRONMENT,
       UV_NO_SYNC=1 so nothing syncs or changes it) and the worktree's package directory first on PYTHONPATH, so the
       code under test is the worktree's. The same rule as `slurm submit --module` (exectree env mode `shared-venv`).
     - `rebuild`: the dependencies differ (or the main tree has no usable env) and the target has `env_rebuild`:
       the checks first build the worktree's own `.venv` with it (inside the checks job for the slurm runner, in
-      the verify process for the local runner), then run with it activated.
+      the verify process for the local runner), then run with it activated. A shared-form `.venv` is replaced.
     - `none`: nothing to activate (no env_rebuild, no main-tree env): as before release 46.
+    - `missing` (release 47): a module or project target with `env_rebuild` whose work root is its main tree
+      and has no `.venv`: `verify --wi` refuses ("worktree env missing") instead of running a bare python.
     No desk repair is needed for a new worktree in any mode; a stale `.venv` is still refused (`_check_venv`)."""
     from .exectree import package_dir
-
-    cwd, troot = Path(cwd), Path(troot)
-    if cwd.resolve() == troot.resolve() or (cwd / ".venv").exists():
-        return {"mode": "own", "exports": {}}
-    main = troot / ".venv"
-    lock, live = cwd / "uv.lock", troot / "uv.lock"
-    same_deps = (lock.is_file() and live.is_file() and lock.read_bytes() == live.read_bytes()) or (
-        not lock.exists() and not live.exists() and (cwd / "pyproject.toml").is_file()
-        and (troot / "pyproject.toml").is_file()
-        and (cwd / "pyproject.toml").read_bytes() == (troot / "pyproject.toml").read_bytes())
-    if main.is_dir() and not stale_venv(troot) and same_deps:
-        return {"mode": "shared-venv", "venv": str(main),
-                "exports": {"VIRTUAL_ENV": str(main), "UV_PROJECT_ENVIRONMENT": str(main), "UV_NO_SYNC": "1",
-                            "PATH_PREPEND": str(main / "bin"), "PYTHONPATH_PREPEND": str(package_dir(cwd))}}
     from .paths import wi_target
 
+    cwd, troot = Path(cwd), Path(troot)
+    own = cwd / ".venv"
+    shared_form = shared_env_of(own) is not None
     target = wi_target(site, wi)
-    cmd = _env_rebuild_command(site, target) if target else None
+    cmd = _env_rebuild_command(site, target) if _env_target(target) else None
+    if cwd.resolve() == troot.resolve():
+        if not own.exists() and cmd:
+            return {"mode": "missing", "exports": {}, "target": target}
+        return {"mode": "own", "exports": {}}
+    if own.exists() and not shared_form:
+        return {"mode": "own", "exports": {}}
+    main = troot / ".venv"
+    if main.is_dir() and not stale_venv(troot) and _same_deps(cwd, troot):
+        return {"mode": "shared-venv", "venv": str(main),
+                **({"worktree_env": "shared"} if shared_form else {}),
+                "exports": {"VIRTUAL_ENV": str(main), "UV_PROJECT_ENVIRONMENT": str(main), "UV_NO_SYNC": "1",
+                            "PATH_PREPEND": str(main / "bin"), "PYTHONPATH_PREPEND": str(package_dir(cwd))}}
+    if cmd is None and target:
+        cmd = _env_rebuild_command(site, target)  # release 46 behaviour for other targets
     if cmd:
-        venv = cwd / ".venv"
-        return {"mode": "rebuild", "venv": str(venv), "command": cmd, "target": target,
-                "exports": {"VIRTUAL_ENV": str(venv), "PATH_PREPEND": str(venv / "bin")}}
+        return {"mode": "rebuild", "venv": str(own), "command": cmd, "target": target,
+                **({"replace": True} if shared_form else {}),
+                "exports": {"VIRTUAL_ENV": str(own), "PATH_PREPEND": str(own / "bin")}}
+    if shared_form:  # env_rebuild was removed from config after the dispatch: the shared form as it stands
+        return {"mode": "own", "exports": {}}
     return {"mode": "none", "exports": {}}
+
+
+def _check_env_present(site: Site, wi: str, cwd: Path, troot: Path) -> None:
+    """Release 47 (UR-20261009-01): refuse checks that would run a bare python for a target with env_rebuild."""
+    plan = checks_env_plan(site, wi, cwd, troot)
+    if plan["mode"] == "missing":
+        fail(f"{wi}: worktree env missing: run worktree repair (`dureh worktree repair --wi {wi}`, or `--target"
+             f" {plan['target']}` for the main tree {troot}); {plan['target']} has env_rebuild but {cwd} has no .venv"
+             " and no shared environment applies, so the checks would run a bare python. Nothing was recorded.")
 
 
 def _apply_exports(env: dict, exports: dict) -> dict:
@@ -1160,7 +1398,7 @@ def _run_checks_local(site: Site, wi: str, cwd: Path, troot: Path, checks: list[
     results = []
     plan = plan if plan is not None else checks_env_plan(site, wi, cwd, troot)
     if plan["mode"] == "rebuild":  # the worktree's own environment, built once before the checks
-        _repair_env(site, Path(cwd), plan["target"])
+        _repair_env(site, Path(cwd), plan["target"], force=bool(plan.get("replace")), share=False)
     env = _checks_env(site, wi, cwd, troot, plan)
     for cmd in checks:
         t0 = time.monotonic()
@@ -1189,6 +1427,8 @@ def _checks_script(wi: str, cwd: Path, troot: Path, site_root: Path, prefix: Pat
     if plan["mode"] != "none" and plan["mode"] != "own":
         lines.append(f"# checks environment: {plan['mode']} ({plan.get('venv')})")
     if plan["mode"] == "rebuild":  # the worktree's own .venv, built in the job (scheduler work, not session work)
+        if plan.get("replace"):  # the shared form dispatch gave the worktree (release 47): its own env replaces it
+            lines.append(f"rm -rf -- {shlex.quote(plan['venv'])}")
         lines += [f"echo '+ env: {plan['mode']}:' {shlex.quote(plan['command'])}",
                   f"( unset VIRTUAL_ENV; sh -c {shlex.quote(plan['command'])} ) > {shlex.quote(f'{prefix}.env.out')} 2>&1"
                   " || { echo 'dureh: env_rebuild failed (see .env.out)' >&2; exit 95; }"]
@@ -1318,6 +1558,8 @@ def verify_wi(site: Site, actor: str, wi: str, timeout: int = 1800, local: bool 
         return _verify_bundle(site, actor, wi, start)
     cwd, troot, checks = ctx["cwd"], ctx["troot"], ctx["checks"]
     _check_venv(wi, cwd)
+    if checks:
+        _check_env_present(site, wi, cwd, troot)
     paths, head = changed_paths(site, wi)
     # release 27: checks are a scheduler job, not session work; release 45: unless the WI chose the local runner
     runner, source = ("local", "override") if local else wi_checks_runner(site, ctx["p"])
@@ -1415,6 +1657,7 @@ def verify_submit(site: Site, actor: str, wi: str, timeout: int = 1800) -> dict:
              f" run `dureh verify --wi {wi} --collect` {ops.job_end_phrase(site)}")
     cwd, troot = ctx["cwd"], ctx["troot"]
     _check_venv(wi, cwd)
+    _check_env_present(site, wi, cwd, troot)
     _, head = changed_paths(site, wi)
     job = _submit_checks_job(site, wi, cwd, troot, ctx["checks"])
     run = led.append("run", "verify", actor, wi, {

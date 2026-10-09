@@ -495,7 +495,7 @@ def _claude_md(site: Site) -> str:
               " (and notifies upstream through the mailbox when one is configured). WI branches are named `wi/<site-id>/<WI>`; older `wi/<WI>` branches keep working.",
               f"6. Findings are records, not work items: `{dureh} ledger add finding --summary ... --evidence-level measured|reviewed|inferred|proposed`.",
               f"7. Before moving or deleting a path, run `{dureh} path-refs <path>`. Delete only through `{dureh} purge`."
-              f" If a dispatch or verify reports a broken worktree or a stale `.venv` (for example after the site moved), run `{dureh} worktree repair --wi <WI>`"
+              f" If a dispatch or verify reports a broken worktree, a stale `.venv` (for example after the site moved) or a missing worktree env, run `{dureh} worktree repair --wi <WI>`"
               f" (or `--target <target>` for a main tree's `.venv`); it rebuilds the environment with `env_rebuild` from config.json."
               f" After the site moved or was renamed, `{dureh} worktree repair --all` does this for every worktree and environment at once (`--dry-run` first)."
               " Never edit `.git` files or rebuild environments by hand.",

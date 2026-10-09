@@ -204,6 +204,11 @@ def cmd_dispatch_brief(a):
     if why:
         fail(why)
     r = dispatch_brief(site, a.wi, _actor(a), a.role)
+    env = r.get("worktree_env") or {}
+    if env.get("env") in ("shared", "rebuilt"):
+        how = (f"shares {env.get('shared')}" if env["env"] == "shared"
+               else f"built with `{env.get('command')}` in {env.get('seconds')} s")
+        print(f"# worktree env: {env.get('venv')} {how}")
     print(f"# spawn subagent_type={r['subagent_type']} model={r['model']}; pass everything below as the prompt")
     print(r["brief"], end="")
 
