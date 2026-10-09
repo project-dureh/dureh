@@ -2,8 +2,8 @@
 
 Precedence (release 46, proposals/boundary-design-2026-10-08.md 3.5): the harness's generic roles (org/roles.yaml:
 desk, manager, worker, checker), then the package's `roles` (which add roles or replace `manager`/`worker`; the
-checker may only be re-skinned), then the package's `desk:` additions. A schema-1 package resolves its
-`organization` enable list against the generic roles plus org/legacy/schema1-roles.yaml (release 46 only).
+checker may only be re-skinned), then the package's `desk:` additions. The package's `roles` is authoritative:
+schema 1 and the `organization` enable list are refused (release 49).
 """
 from __future__ import annotations
 
@@ -55,7 +55,7 @@ class Role:
     skill: str | None = None              # package-relative skill file for the role's brief and agent file
     instructions: list[str] = field(default_factory=list)  # extra agent-file lines from the package
     project: bool = False                 # also generate a project-level agent file (projectgen)
-    source: str = "harness"               # harness | legacy | package
+    source: str = "harness"               # harness | package
 
     @property
     def is_manager(self) -> bool:
@@ -148,9 +148,8 @@ class Org:
         self.warnings = list(warnings or [])
 
     @classmethod
-    def load(cls, harness_root: Path = HARNESS_ROOT, enabled: list[str] | None = None,
-             manifest: dict | None = None) -> "Org":
-        from .package import CHECKER_RESKIN_KEYS, ROLE_KEYS, ROLE_NAME_RE, schema_of
+    def load(cls, harness_root: Path = HARNESS_ROOT, manifest: dict | None = None) -> "Org":
+        from .package import CHECKER_RESKIN_KEYS, ROLE_KEYS, ROLE_NAME_RE, require_schema2
 
         data = yamlsub.load_file(harness_root / "org" / "roles.yaml")
         tiers_doc = yamlsub.load_file(harness_root / "org" / "tiers.yaml")
@@ -161,87 +160,62 @@ class Org:
             roles[name] = _role(name, spec, "org/roles.yaml", "harness")
         if "desk" not in roles:
             fail("org/roles.yaml must define the desk")
-        strict = True
         if manifest is not None:
-            schema = schema_of(manifest)
-            organization = manifest.get("organization") or {}
-            listed = list(organization.get("managers") or []) + list(organization.get("workers") or [])
-            if schema == 1:
-                strict = False
-                legacy = yamlsub.load_file(harness_root / "org" / "legacy" / "schema1-roles.yaml")
-                for name, spec in (legacy.get("roles") or {}).items():
-                    roles[name] = _role(name, spec, "org/legacy/schema1-roles.yaml", "legacy")
-                _desk_additions(roles["desk"], legacy.get("desk"), "org/legacy/schema1-roles.yaml")
-            else:
-                pkg_roles = manifest.get("roles") or {}
-                if not isinstance(pkg_roles, dict):
-                    fail("startup.yaml roles must map a role name to its definition")
-                for name, spec in pkg_roles.items():
-                    where = "startup.yaml roles"
-                    if not ROLE_NAME_RE.match(str(name)):
-                        fail(f"{where}: role name {name!r} must match {ROLE_NAME_RE.pattern}")
-                    if not isinstance(spec, dict):
-                        fail(f"{where}: role {name} must be a mapping")
-                    extra = sorted(set(spec) - set(ROLE_KEYS))
-                    if extra:
-                        fail(f"{where}: role {name}: unknown key(s) {', '.join(extra)}")
-                    if name == "desk":
-                        fail(f"{where}: desk is reserved; extend it through the top-level `desk:` block")
-                    if name == "checker":
-                        bad = sorted(set(spec) - set(CHECKER_RESKIN_KEYS))
-                        if bad:
-                            fail(f"{where}: checker is reserved: a package may re-skin it ({', '.join(CHECKER_RESKIN_KEYS)})"
-                                 f" but not change {', '.join(bad)} (it keeps verify and no write scopes)")
-                        c = roles["checker"]
-                        c.skill = spec.get("skill") or c.skill
-                        c.instructions = _texts(spec.get("instructions"), f"{where}: checker instructions")
-                        c.description = spec.get("description") or c.description
-                        c.output = spec.get("output") or c.output
-                        c.never = spec.get("never") or c.never
-                        c.project = bool(spec.get("project", c.project))
-                        c.source = "package"
-                        continue
-                    if spec.get("kind") not in ("manager", "worker"):
-                        fail(f"{where}: role {name}: kind must be manager or worker")
-                    roles[name] = _role(name, spec, where, "package")
-                    _check_scopes(roles[name], where)
-                # Director 2026-10-09: a package that declares its own managers (workers) does not get the generic
-                # `manager` (`worker`) as well, so the generic worker's module scopes cannot bypass the package's own
-                # narrower ones; a package may still declare `manager`/`worker` itself. Desk and checker always stay.
-                for kind in ("manager", "worker"):
-                    if kind not in pkg_roles and any(isinstance(sp, dict) and sp.get("kind") == kind and n != "checker"
-                                                     for n, sp in pkg_roles.items()):
-                        del roles[kind]
-                        for other in roles.values():
-                            other.may_dispatch = [t for t in other.may_dispatch if t != kind]
-                _desk_additions(roles["desk"], manifest.get("desk"), "startup.yaml")
-                _check_scopes(roles["desk"], "startup.yaml desk")
-            if listed and enabled is None:
-                enabled = listed
-        defined = set(roles)
-        if enabled is not None:
-            unknown = [n for n in enabled if n not in roles]
-            if unknown and strict:
-                fail(f"startup package enables roles unknown to this harness: {', '.join(unknown)}")
-            if unknown:
-                warnings.append(f"schema-1 package enables roles this harness no longer defines (release 46 removed or"
-                                f" moved them to packages): {', '.join(unknown)}; they are dropped")
-            keep = set(enabled) | {"desk"}
-            roles = {n: r for n, r in roles.items() if n in keep}
+            require_schema2(manifest)
+            pkg_roles = manifest.get("roles") or {}
+            if not isinstance(pkg_roles, dict):
+                fail("startup.yaml roles must map a role name to its definition")
+            for name, spec in pkg_roles.items():
+                where = "startup.yaml roles"
+                if not ROLE_NAME_RE.match(str(name)):
+                    fail(f"{where}: role name {name!r} must match {ROLE_NAME_RE.pattern}")
+                if not isinstance(spec, dict):
+                    fail(f"{where}: role {name} must be a mapping")
+                extra = sorted(set(spec) - set(ROLE_KEYS))
+                if extra:
+                    fail(f"{where}: role {name}: unknown key(s) {', '.join(extra)}")
+                if name == "desk":
+                    fail(f"{where}: desk is reserved; extend it through the top-level `desk:` block")
+                if name == "checker":
+                    bad = sorted(set(spec) - set(CHECKER_RESKIN_KEYS))
+                    if bad:
+                        fail(f"{where}: checker is reserved: a package may re-skin it ({', '.join(CHECKER_RESKIN_KEYS)})"
+                             f" but not change {', '.join(bad)} (it keeps verify and no write scopes)")
+                    c = roles["checker"]
+                    c.skill = spec.get("skill") or c.skill
+                    c.instructions = _texts(spec.get("instructions"), f"{where}: checker instructions")
+                    c.description = spec.get("description") or c.description
+                    c.output = spec.get("output") or c.output
+                    c.never = spec.get("never") or c.never
+                    c.project = bool(spec.get("project", c.project))
+                    c.source = "package"
+                    continue
+                if spec.get("kind") not in ("manager", "worker"):
+                    fail(f"{where}: role {name}: kind must be manager or worker")
+                roles[name] = _role(name, spec, where, "package")
+                _check_scopes(roles[name], where)
+            # Director 2026-10-09: a package that declares its own managers (workers) does not get the generic
+            # `manager` (`worker`) as well, so the generic worker's module scopes cannot bypass the package's own
+            # narrower ones; a package may still declare `manager`/`worker` itself. Desk and checker always stay.
+            for kind in ("manager", "worker"):
+                if kind not in pkg_roles and any(isinstance(sp, dict) and sp.get("kind") == kind and n != "checker"
+                                                 for n, sp in pkg_roles.items()):
+                    del roles[kind]
+                    for other in roles.values():
+                        other.may_dispatch = [t for t in other.may_dispatch if t != kind]
+            _desk_additions(roles["desk"], manifest.get("desk"), "startup.yaml")
+            _check_scopes(roles["desk"], "startup.yaml desk")
         desk = roles["desk"]
-        for r in roles.values():
-            # a target disabled by the enable list is dropped; an undefined one stays and fails validation
-            r.may_dispatch = [t for t in r.may_dispatch if t in roles or t not in defined]
         for r in roles.values():
             if r.kind == "manager" or (r.kind == "worker" and r.has("verify")):
                 if r.name not in desk.may_dispatch:
                     desk.may_dispatch.append(r.name)
         org = cls(roles, tiers, tiers_doc.get("limits") or {}, data.get("event_authority") or {},
                   int(data.get("max_depth") or 2), data.get("capability_authority") or {}, warnings)
-        org._validate(strict)
+        org._validate()
         return org
 
-    def _validate(self, strict: bool) -> None:
+    def _validate(self) -> None:
         roles = self.roles
         verifiers = [r.name for r in roles.values() if r.kind != "desk" and r.has("verify")]
         for role in roles.values():

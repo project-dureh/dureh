@@ -601,7 +601,7 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
 
 
 def _skill_for(site: Site, role: str, value: str | None) -> str | None:
-    """The role's own skill (package `roles.<r>.skill`), else the schema-1 `skills` map, else its value's skill."""
+    """The role's own skill (package `roles.<r>.skill`), else the package's `skills` map (role -> skill), else its value's skill."""
     r = site.org.get(role)
     skills = (site.package_manifest().get("skills") or {})
     rel = (r.skill if r else None) or skills.get(role)

@@ -6,9 +6,8 @@ policy text, project template and config defaults. The harness knows roles only 
 by capability (CAPABILITIES, a closed set). A package can tighten what the harness allows; it never loosens an
 invariant (proposals/boundary-design-2026-10-08.md sections 3 and 5).
 
-Schema 1 still loads in release 46 with a warning: its `organization` enable list resolves against the generic
-roles plus the legacy schema-1 roles (org/legacy/schema1-roles.yaml), and its labels are LEGACY_LABELS. Both go when
-schema 1 is refused.
+Schema 1 (and its `organization` enable list) loaded in release 46 only; from release 49 it is refused with a pointer
+to schema 2, as are unknown top-level keys (design 3.4 item 1).
 """
 from __future__ import annotations
 
@@ -18,7 +17,7 @@ from pathlib import Path
 from . import HARNESS_RELEASE, yamlsub
 from .util import fail
 
-SCHEMA_VERSIONS = (1, 2)
+SCHEMA_VERSIONS = (2,)
 CAPABILITIES = ("submit_jobs", "verify", "network")
 RESERVED_ROLES = ("desk", "manager", "worker", "checker")
 ROLE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
@@ -27,10 +26,14 @@ PROTECT_LEVELS = ("no-read", "read-only", "none")  # none: lifts the package's o
 LAYOUT_KEYS = ("staging", "final", "reports")
 # the harness's own layout words when a package names none (`final` has no harness default)
 DEFAULT_LAYOUT = {"staging": "checkpoints", "final": None, "reports": "reports"}
-# top-level keys of a schema-2 startup.yaml; anything else is warned about in release 46 (refused from release 49)
+# top-level keys of a schema-2 startup.yaml; anything else is refused (warned in releases 46-48)
 KNOWN_KEYS = ("schema_version", "package", "desk", "roles", "values", "skills", "policies", "protected", "labels",
-              "templates", "guards", "config_defaults", "lessons", "bootstrap", "dependencies", "organization", "state",
-              "projects", "scheduler_tools")
+              "templates", "guards", "config_defaults", "lessons", "bootstrap", "dependencies", "state", "projects",
+              "scheduler_tools")
+SCHEMA1_REFUSAL = ("startup.yaml schema 1 is no longer supported (it loaded in release 46 only): move the package to"
+                   " schema 2 (`schema_version: 2`, package `roles`, `labels`, `protected`; docs/config.md)")
+ORGANIZATION_REFUSAL = ("startup.yaml organization (the managers/workers enable list) is no longer read (release 46"
+                        " only): the package's `roles` is authoritative; remove the key")
 # commands no agent runs directly, whatever a package declares (the Bash guard's always-deny list and the harness's
 # scheduler-only defaults): a scheduler tool's command may not start with one of them
 HARNESS_DIRECT_COMMANDS = ("sbatch", "srun", "salloc", "scancel", "nohup", "setsid", "disown", "screen", "tmux",
@@ -40,22 +43,23 @@ ROLE_KEYS = ("kind", "tier", "description", "output", "never", "isolation", "wri
 CHECKER_RESKIN_KEYS = ("skill", "instructions", "description", "output", "never", "project")
 SCOPE_PREFIXES = ("modules/", "projects/", "package/", "harness/")
 
-# Schema-1 packages had no labels: the words the harness carried before release 46. Kept for schema 1 only (one
-# release); a schema-2 package declares its own `labels`. Allow-listed in tests/test_no_company_names.py.
-LEGACY_LABELS = {
-    "levels": ["file", "session", "subject"],
-    "layout": {"staging": "checkpoints", "final": "derivatives", "reports": "reports"},
-    "item_grammar": {"subject": r"^sub-(?P<sub>[A-Za-z0-9]+)$",
-                     "session": r"^sub-(?P<sub>[A-Za-z0-9]+)_ses-(?P<ses>[A-Za-z0-9]+)$"},
-}
-
-
 def schema_of(manifest: dict | None) -> int:
     raw = (manifest or {}).get("schema_version", 1)
     try:
         return int(raw)
     except (TypeError, ValueError):
-        fail(f"startup.yaml schema_version must be 1 or 2, not {raw!r}")
+        fail(f"startup.yaml schema_version must be 2, not {raw!r}")
+
+
+def require_schema2(manifest: dict | None) -> None:
+    """Refuse a manifest this harness no longer loads: schema 1 (or none), the `organization` enable list."""
+    schema = schema_of(manifest)
+    if schema == 1:
+        fail(SCHEMA1_REFUSAL)
+    if schema not in SCHEMA_VERSIONS:
+        fail(f"startup.yaml schema_version {schema} is not supported by this harness (2)")
+    if "organization" in (manifest or {}):
+        fail(ORGANIZATION_REFUSAL)
 
 
 def _glob_ok(glob: str) -> bool:
@@ -107,11 +111,8 @@ def globs_overlap(a: str, b: str) -> bool:
 
 def labels(manifest: dict | None) -> dict:
     """{levels: [finest, ..., coarsest], layout: {staging, final, reports}, item_grammar: {level: compiled regex}}.
-    Schema 1: LEGACY_LABELS. Schema 2: the package's `labels` over DEFAULT_LAYOUT (no levels, no grammar by default)."""
-    if manifest is None or schema_of(manifest) == 1:
-        raw = LEGACY_LABELS
-    else:
-        raw = manifest.get("labels") or {}
+    The package's `labels` over DEFAULT_LAYOUT (no levels, no grammar by default)."""
+    raw = (manifest or {}).get("labels") or {}
     layout = dict(DEFAULT_LAYOUT)
     layout.update({k: v for k, v in (raw.get("layout") or {}).items() if v})
     return {"levels": list(raw.get("levels") or []), "layout": layout,
@@ -119,15 +120,15 @@ def labels(manifest: dict | None) -> dict:
 
 
 def protected_rules(manifest: dict | None) -> list[dict]:
-    """The package's protected paths [{path, level, why}] (schema 2; schema 1 declares none)."""
-    if manifest is None or schema_of(manifest) == 1:
+    """The package's protected paths [{path, level, why}]."""
+    if manifest is None:
         return []
     return [dict(r) for r in manifest.get("protected") or []]
 
 
 def loop_policy(manifest: dict | None) -> dict:
     """`policies.loop_rule` {text, refuse}: the package's own loop rule wording (desk/agent text, refusal text)."""
-    if manifest is None or schema_of(manifest) == 1:
+    if manifest is None:
         return {}
     return dict(((manifest.get("policies") or {}).get("loop_rule") or {}))
 
@@ -180,8 +181,8 @@ def _check_protected(raw) -> None:
 
 def scheduler_tools(manifest: dict | None) -> list[dict]:
     """The package's scheduler tools [{name, commands, exclude, job_match, description}] (Director 2026-10-09,
-    compute route B): the company's own commands that schedule its own compute. Schema 2 only."""
-    if manifest is None or schema_of(manifest) == 1:
+    compute route B): the company's own commands that schedule its own compute."""
+    if manifest is None:
         return []
     return [dict(t) for t in manifest.get("scheduler_tools") or []]
 
@@ -245,19 +246,14 @@ def check(manifest: dict, root: Path | None = None) -> list[str]:
     if not isinstance(manifest, dict):
         fail("startup.yaml must be a mapping")
     warnings: list[str] = []
-    schema = schema_of(manifest)
-    if schema not in SCHEMA_VERSIONS:
-        fail(f"startup.yaml schema_version {schema} is not supported by this harness (1 or 2)")
+    require_schema2(manifest)
     pkg = manifest.get("package")
     if not isinstance(pkg, dict) or not pkg.get("id") or not pkg.get("name"):
         fail("startup.yaml must declare package.id and package.name")
-    if schema == 1:
-        warnings.append("startup.yaml schema 1 is deprecated: it loads in release 46 with the legacy roles and labels;"
-                        " move the package to schema 2 (roles, labels, protected; docs/config.md)")
-        return warnings
     unknown = sorted(set(manifest) - set(KNOWN_KEYS))
     if unknown:
-        warnings.append(f"startup.yaml: unknown top-level key(s) {', '.join(unknown)} (ignored; refused from release 49)")
+        fail(f"startup.yaml: unknown top-level key(s) {', '.join(unknown)} (refused since release 49; known keys:"
+             f" {', '.join(KNOWN_KEYS)})")
     hmin = pkg.get("harness_min")
     if hmin is not None:
         try:
@@ -276,9 +272,6 @@ def check(manifest: dict, root: Path | None = None) -> list[str]:
                             " (it lifts nothing)")
     _check_policies(manifest.get("policies"))
     _check_scheduler_tools(manifest.get("scheduler_tools"))
-    if manifest.get("organization"):
-        warnings.append("startup.yaml organization.managers/workers is an enable list for release 46 only; from the"
-                        " next release the package's `roles` is authoritative")
     templates = manifest.get("templates") or {}
     if not isinstance(templates, dict) or set(templates) - {"project"}:
         fail("startup.yaml templates takes only project: <dir in the package>")

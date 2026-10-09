@@ -208,8 +208,7 @@ class Site:
 
     @property
     def org(self) -> Org:
-        """The generic roles, the package's roles and desk additions (release 46; schema 1: the enable list over
-        the generic and legacy roles)."""
+        """The generic roles, the package's roles and desk additions (release 46; schema 2 only since release 49)."""
         if self._org is None:
             self._org = Org.load(HARNESS_ROOT, manifest=self.package_manifest())
             overrides = self.config.get("limits") or {}
@@ -224,13 +223,13 @@ class Site:
         return labels(self.package_manifest())
 
     def scheduler_tools(self) -> list[dict]:
-        """The package's scheduler tools (package.scheduler_tools); none for schema 1."""
+        """The package's scheduler tools (package.scheduler_tools)."""
         from .package import scheduler_tools
 
         return scheduler_tools(self.package_manifest())
 
     def protected(self) -> list[dict]:
-        """The package's protected paths [{path, level, why}] (package.protected_rules); none for schema 1."""
+        """The package's protected paths [{path, level, why}] (package.protected_rules)."""
         from .package import protected_rules
 
         return protected_rules(self.package_manifest())

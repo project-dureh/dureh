@@ -12,7 +12,7 @@ from pathlib import Path
 
 from . import SCHEMA_VERSION, yamlsub
 from .org import HARNESS_ROOT, Org
-from .package import check as check_package, role_scope_conflicts, schema_of
+from .package import check as check_package, role_scope_conflicts
 from .site import RECORD_KINDS, Site
 from .util import DurehError, dumps, fail, git_revision, read_json, utc_now, write_replace
 
@@ -27,23 +27,19 @@ DEFAULT_MODELS = {
 
 
 def package_warnings(startup: Path) -> list[str]:
-    """Warnings of a valid package (schema 1, unknown keys, dropped schema-1 roles); [] when it does not load."""
+    """Warnings of a valid package (protected rules that lift nothing); [] when it does not load."""
     try:
         m = yamlsub.load_file(startup / "startup.yaml")
         org = Org.load(HARNESS_ROOT, manifest=m)
-        stale = [f"{v.get('id')} -> {v['manager']}" for v in m.get("values") or []
-                 if v.get("manager") and v["manager"] not in org.roles]
-        return (check_package(m, startup) + org.warnings
-                + ([f"values name managers this organization does not have (bootstrap items of those values go to"
-                    f" the generic manager): {', '.join(stale)}"] if stale else []))
+        return check_package(m, startup) + org.warnings
     except DurehError:
         return []
 
 
 def validate_package(startup: Path) -> dict:
     """Install, `adapter sync` and `verify --self` (proposals/boundary-design-2026-10-08.md 3.4): the manifest
-    (schema 1 or 2), the roles it builds with the harness's generic roles, protected paths, labels, files it names,
-    no symlinks, no state. Fails on the first error; warnings come from `package_warnings`."""
+    (schema 2; schema 1, `organization` and unknown top-level keys are refused since release 49), the roles it
+    builds with the harness's generic roles, protected paths, labels, files it names, no symlinks, no state. Fails on the first error; warnings come from `package_warnings`."""
     if startup.is_symlink() or not startup.is_dir():
         fail(f"startup package must be a directory: {startup}")
     manifest_path = startup / "startup.yaml"
@@ -70,10 +66,9 @@ def validate_package(startup: Path) -> dict:
     conflicts = role_scope_conflicts(m, org.roles.values())
     if conflicts:
         fail("startup.yaml: a write scope may not cover a protected path: " + "; ".join(conflicts))
-    if schema_of(m) == 2:  # a schema-1 value naming a removed manager only warns (package_warnings)
-        for v in m.get("values") or []:
-            if v.get("manager") and v["manager"] not in org.roles:
-                fail(f"value {v.get('id')} names manager {v['manager']!r}, which is not a role of this organization")
+    for v in m.get("values") or []:
+        if v.get("manager") and v["manager"] not in org.roles:
+            fail(f"value {v.get('id')} names manager {v['manager']!r}, which is not a role of this organization")
     boot = m.get("bootstrap") or {}
     for rel in list(boot.get("work_items") or []) + ([boot["persona_questions"]] if boot.get("persona_questions") else []):
         p = startup / rel
@@ -495,7 +490,7 @@ def install(startup_arg: str, site_arg: str, preset_path: str | None = None, per
 def _role_for(manifest: dict, spec: dict, org: Org | None = None) -> str:
     """The role of a bootstrap work item without one: the manager its value names (package `values[].manager`, when
     the organization has it), else the manager whose role declares that value, else the generic `manager` (or, when
-    a schema-1 enable list left it out, the first manager)."""
+    the package's own managers replace it, the first of them)."""
     value = spec.get("value")
     for v in manifest.get("values") or []:
         if value and v.get("id") == value and v.get("manager") and (org is None or v["manager"] in org.roles):
@@ -506,7 +501,7 @@ def _role_for(manifest: dict, spec: dict, org: Org | None = None) -> str:
             if value and r.value == value:
                 return r.name
         if "manager" not in org.roles and managers:
-            return managers[0].name  # a schema-1 enable list without the generic manager
+            return managers[0].name  # package managers replace the generic one
     return "manager"
 
 

@@ -1,6 +1,6 @@
 """Release 45: `dureh status` lists the site user's scheduler jobs that no harness record owns ("External jobs"),
 and `day close` warns about them without refusing. Release 46: only names matching config `slurm.external_match`
-(an include list) are listed; empty or absent lists none; `slurm.external_ignore` is ignored with a warning. Fake
+(an include list) are listed; empty or absent lists none; `slurm.external_ignore` is refused (release 49). Fake
 squeue only (never the real queue); the job ids below are made up."""
 import json
 import os
@@ -74,14 +74,16 @@ class ExternalJobs(SiteCase):
         (self.site_root / "config.json").write_text(json.dumps(cfg))
         self.assertIsNone(ops.external_jobs(self.site()))
 
-    def test_external_ignore_is_ignored_with_a_warning(self):
+    def test_external_ignore_is_refused(self):
         self.config(external_match=None, external_ignore=["keep-*"])
         self.squeue("900050|other|RUNNING|1:00\n")
         self.assertIsNone(ops.external_jobs(self.s), "the old key lists nothing by itself")
-        warn = [w for w in ops.config_warnings(self.s) if "external_ignore" in w]
-        self.assertEqual(len(warn), 1)
-        self.assertIn("slurm.external_match", warn[0])
-        self.assertIn("Warning: config slurm.external_ignore is ignored", render_status(status(self.s)))
+        self.assertFalse([w for w in ops.config_warnings(self.s) if "external_ignore" in w], "no longer a warning")
+        err = ops.config_errors(self.s)
+        self.assertEqual(len(err), 1)
+        self.assertIn("refused since release 49", err[0])
+        self.assertIn("slurm.external_match", err[0])
+        self.assertIn("Warning: config slurm.external_ignore is refused", render_status(status(self.s)))
 
     def test_limit_and_count(self):
         self.squeue("".join(f"9001{i:02d}|j{i}|PENDING|0:00\n" for i in range(15)))

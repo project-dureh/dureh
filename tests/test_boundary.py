@@ -7,9 +7,9 @@ import json
 import os
 import subprocess
 import unittest
+import unittest.mock
 from pathlib import Path
 
-from dureh_core.package import LEGACY_LABELS
 from dureh_core import install, yamlsub
 from dureh_core.cli import main
 from dureh_core.org import HARNESS_ROOT, Org
@@ -91,9 +91,12 @@ class Validation(unittest.TestCase):
     def test_good_package_has_no_warnings(self):
         self.assertEqual(self.load(lambda m: None), [])
 
-    def test_unknown_top_level_key_is_a_warning(self):
-        warns = self.load(lambda m: m.update(iterators={"x": {}}))
-        self.assertTrue(any("unknown top-level key(s) iterators" in w for w in warns), warns)
+    def test_unknown_top_level_key_is_refused(self):
+        self.refused(lambda m: m.update(iterators={"x": {}}), "unknown top-level key\\(s\\) iterators \\(refused since release 49")
+
+    def test_organization_enable_list_is_refused(self):
+        self.refused(lambda m: m.update(organization={"managers": ["coordinator"], "workers": ["builder"]}),
+                     "organization .*no longer read.*`roles` is authoritative")
 
     def test_harness_min(self):
         self.refused(lambda m: m["package"].update(harness_min=999), "needs harness release 999")
@@ -146,25 +149,39 @@ class Validation(unittest.TestCase):
 
 
 class Schema1(SiteCase):
-    def test_schema_1_loads_with_a_warning_and_drops_removed_roles(self):
-        m = self.package / "startup.yaml"
-        m.write_text("schema_version: 1\npackage:\n  id: old\n  name: Old\nvalues:\n  - id: refactor-to-modules\n"
-                     "    title: Modules\n    skill: skills/code/SKILL.md\n    manager: pm-gone\nskills:\n  py-writer: skills/code/SKILL.md\n"
-                     "organization:\n  managers: [pm-modules, pm-gone]\n  workers: [py-writer, worker-gone, checker]\n"
-                     "bootstrap:\n  work_items: [bootstrap/wi-one.yaml]\n  persona_questions: bootstrap/persona.yaml\n")
-        warns = install.package_warnings(self.package)
-        self.assertTrue(any("schema 1 is deprecated" in w for w in warns), warns)
-        self.assertTrue(any("pm-gone, worker-gone" in w and "dropped" in w for w in warns), warns)
-        self.assertTrue(any("refactor-to-modules -> pm-gone" in w for w in warns), warns)
-        r = self.install()
-        self.assertEqual(r["selftest"]["result"], "pass", r["selftest"])
-        self.assertTrue(any("schema 1" in w for w in r["selftest"]["counts"]["warnings"]))
+    """Release 49: schema 1 (it loaded in release 46 only) is refused at install, `adapter sync` and `verify --self`."""
+
+    OLD = ("package:\n  id: old\n  name: Old\nvalues:\n  - id: v1\n    title: Modules\n    skill: skills/code/SKILL.md\n"
+           "organization:\n  managers: [manager]\n  workers: [worker, checker]\n")
+
+    def test_schema_1_is_refused_at_install(self):
+        for head in ("schema_version: 1\n", ""):  # an explicit 1, or no schema_version at all
+            (self.package / "startup.yaml").write_text(head + self.OLD)
+            with self.assertRaisesRegex(DurehError, "schema 1 is no longer supported.*move the package to schema 2"):
+                install.validate_package(self.package)
+            self.assertEqual(install.package_warnings(self.package), [], "a package that does not load warns nothing")
+            with self.assertRaisesRegex(DurehError, "schema 1 is no longer supported"):
+                self.install()
+        self.assertFalse((HARNESS_ROOT / "org" / "legacy").exists(), "the legacy schema-1 roles are gone")
+
+    def test_schema_1_is_refused_by_sync_and_verify_self(self):
+        self.install()
         s = self.site()
-        self.assertEqual(set(s.org.roles), {"desk", "pm-modules", "py-writer", "checker"})
-        self.assertEqual(s.labels["layout"]["final"], LEGACY_LABELS["layout"]["final"], "schema 1 keeps the legacy labels for one release")
-        self.assertEqual(s.protected(), [])
-        w = Ledger(s).work_items()[0]
-        self.assertEqual(w["role"], "pm-modules", "the value's legacy manager")
+        (s.startup / "startup.yaml").chmod(0o644)
+        (s.startup / "startup.yaml").write_text("schema_version: 1\n" + self.OLD)
+        run_self = __import__("dureh_core.selftest", fromlist=["run_self"]).run_self
+        with unittest.mock.patch.dict(os.environ, {"DUREH_OBSERVE": "1"}):  # `--observe verify --self`
+            r = run_self(self.site(), unit=False)
+        self.assertEqual(r["result"], "fail")
+        self.assertTrue(any("schema 1 is no longer supported" in p for p in r["problems"]), r["problems"])
+        for call in (lambda: run_self(self.site(), unit=False), lambda: self.site().org):  # recording needs the org
+            with self.assertRaisesRegex(DurehError, "schema 1 is no longer supported"):
+                call()
+        (self.package / "startup.yaml").write_text("schema_version: 1\n" + self.OLD)  # the package source
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["--site", str(self.site_root), "adapter", "sync"]), 2)
+        self.assertIn("schema 1 is no longer supported", err.getvalue())
 
 
 class Capabilities(ExampleSiteCase):
@@ -597,8 +614,8 @@ class WatchDefault(SiteCase):
 
 
 class ConfigWarnings(SiteCase):
-    def test_keys_this_release_ignores_are_named(self):
-        from dureh_core.ops import config_warnings
+    def test_keys_this_release_ignores_or_refuses_are_named(self):
+        from dureh_core.ops import config_errors, config_warnings
 
         self.install()
         cfg = json.loads((self.site_root / "config.json").read_text())
@@ -607,12 +624,24 @@ class ConfigWarnings(SiteCase):
         cfg["slurm"]["external_ignore"] = ["cc-*"]
         (self.site_root / "config.json").write_text(json.dumps(cfg))
         w = config_warnings(self.site())
-        self.assertEqual(len(w), 3, w)
-        self.assertIn("project.pipeline_version_key, project.derivative_entry", w[1])
-        self.assertIn("containers.manifest_globs, containers.mem", w[2])
+        self.assertEqual(len(w), 2, w)
+        self.assertIn("project.pipeline_version_key, project.derivative_entry", w[0])
+        self.assertIn("containers.manifest_globs, containers.mem", w[1])
+        e = config_errors(self.site())
+        self.assertEqual(len(e), 1, e)
+        self.assertIn("slurm.external_ignore is refused since release 49", e[0])
+        r = __import__("dureh_core.selftest", fromlist=["run_self"]).run_self(self.site(), unit=False)
+        self.assertEqual(r["result"], "fail", r)
+        self.assertEqual(len(r["counts"]["warnings"]), 2)
+        self.assertTrue(any("external_ignore" in p for p in r["problems"]), r["problems"])
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["--site", str(self.site_root), "adapter", "sync"]), 2)
+        self.assertIn("slurm.external_ignore is refused", err.getvalue())
+        cfg["slurm"].pop("external_ignore")
+        (self.site_root / "config.json").write_text(json.dumps(cfg))
         r = __import__("dureh_core.selftest", fromlist=["run_self"]).run_self(self.site(), unit=False)
         self.assertEqual(r["result"], "pass", r)
-        self.assertEqual(len(r["counts"]["warnings"]), 3)
 
 
 class RemovedRoles(SiteCase):

@@ -70,6 +70,11 @@ def cmd_adapter_sync(a):
         if other != site.harness_root.resolve():
             os.execv(str(exe), [str(exe), "--site", str(site.root), "adapter", "sync",
                                 *(["--package-rev", a.package_rev] if a.package_rev else [])])
+    from .ops import config_errors
+
+    refused = config_errors(site)
+    if refused:
+        fail("; ".join(refused))
     old_root = (site.config.get("harness") or {}).get("root")
     stored_site_root = site.stored_root
     from .install import apply_config_defaults, sync_package

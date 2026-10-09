@@ -312,7 +312,7 @@ def external_jobs(site: Site, led: Ledger | None = None) -> dict | None:
     Release 46: only jobs whose name matches config `slurm.external_match` (an include list of name patterns, e.g.
     `["<prefix>-*"]`) are listed; empty or absent lists none and asks squeue nothing. Excluded always: jobs a run or
     session record names and the calling job ($SLURM_JOB_ID, the session itself). The old `slurm.external_ignore` is
-    ignored (config_warnings says so). {jobs: [{job_id, name, state, time}] (at most EXTERNAL_LIMIT), count}; None
+    refused since release 49 (config_errors). {jobs: [{job_id, name, state, time}] (at most EXTERNAL_LIMIT), count}; None
     when nothing is matched, config `slurm.external_jobs` is false or squeue cannot be asked (never an error)."""
     cfg = site.config.get("slurm") or {}
     if cfg.get("external_jobs", True) is False:
@@ -355,13 +355,21 @@ def external_jobs(site: Site, led: Ledger | None = None) -> dict | None:
             "tool_count": len(ours)}
 
 
-def config_warnings(site: Site) -> list[str]:
-    """Config keys a site still carries that this release ignores (shown by status, `adapter sync`, `verify --self`)."""
+def config_errors(site: Site) -> list[str]:
+    """Config keys this release refuses: `adapter sync` fails on them, `verify --self` lists them as problems and
+    `status` shows them as warnings. `slurm.external_ignore` was ignored with a warning for one release (46-48)."""
     out = []
     slurm = site.config.get("slurm") or {}
     if "external_ignore" in slurm:
-        out.append("config slurm.external_ignore is ignored since release 46: external jobs are listed only when their"
-                   " name matches slurm.external_match (an include list of name patterns; empty or absent lists none)")
+        out.append("config slurm.external_ignore is refused since release 49 (ignored with a warning in 46-48): remove"
+                   " it; external jobs are listed only when their name matches slurm.external_match (an include list"
+                   " of name patterns; empty or absent lists none)")
+    return out
+
+
+def config_warnings(site: Site) -> list[str]:
+    """Config keys a site still carries that this release ignores (shown by status and `verify --self`)."""
+    out = []
     proj = site.config.get("project") or {}
     gone = [k for k in ("pipeline_version_key", "derivative_entry") if k in proj]
     if gone:
@@ -436,7 +444,7 @@ def status(site: Site) -> dict:
 def status_warnings(site: Site, wis: list[dict]) -> list[str]:
     """Config keys this release ignores, package/org load warnings, and open WIs whose role this organization no
     longer defines (release 46 removed roles from the harness default org)."""
-    out = config_warnings(site)
+    out = config_errors(site) + config_warnings(site)
     try:
         out += site.org.warnings
         open_states = ("proposed", "approved", "dispatched", "staged", "rework", "verified")

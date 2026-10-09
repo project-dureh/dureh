@@ -22,7 +22,6 @@ TERMS = {
 PATTERN = re.compile("|".join(f"(?:{t})" for t in TERMS.values()), re.I)
 # (path relative to the repository, substring of the one allowed line): why
 ALLOWED = (
-    ("dureh_core/package.py", '"layout": {"staging": "checkpoints", "final": "derivatives"'),  # LEGACY_LABELS: schema 1, release 46 only
     ("tests/test_boundary.py", 'for gone in ("pipeline-runner", "data-steward", "interpreter:", "pm-projects"'),  # asserts the removal
     ("tests/test_boundary.py", '"tool-writer", "web-writer"):'),  # asserts the removal (continued line)
     ("tests/test_boundary.py", 'for gone in ("container build", "pipeline-runner", "data-steward"'),  # asserts the removal

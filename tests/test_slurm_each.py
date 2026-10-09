@@ -9,12 +9,11 @@ import os
 import subprocess
 from pathlib import Path
 
-from dureh_core.package import LEGACY_LABELS
 from dureh_core import ops
 from dureh_core import workflow as wf
 from dureh_core.records import Ledger
 from dureh_core.util import DurehError
-from tests.helpers import ExampleSiteCase, SiteCase
+from tests.helpers import ExampleSiteCase
 
 SUBJ = ["sample-01", "sample-02", "sample-03", "sample-04", "sample-05"]
 
@@ -397,21 +396,3 @@ class Each(ExampleSiteCase):
         self.s._manifest = {**self.s.package_manifest(), "labels": {}}
         self.assertEqual(ops.each_level(self.s), "any")
         self.assertEqual(ops.item_env(self.s), ops.DEFAULT_ITEM_ENV)
-
-
-class LegacySchemaOneItems(SiteCase):
-    """A schema-1 package (release 46 only) keeps the item grammar and levels the harness had before."""
-
-    def test_legacy_grammar_and_levels(self):
-        m = self.package / "startup.yaml"
-        m.write_text("schema_version: 1\npackage:\n  id: legacy\n  name: Legacy\nvalues:\n  - id: refactor-to-modules\n"
-                     "    title: Modules\n    skill: skills/code/SKILL.md\norganization:\n  managers: [pm-modules]\n"
-                     "  workers: [py-writer, checker]\nbootstrap:\n  work_items: [bootstrap/wi-one.yaml]\n"
-                     "  persona_questions: bootstrap/persona.yaml\n")
-        self.install(slurm={"each_level": "any", "external_jobs": False})
-        s = self.site()
-        g = s.labels["item_grammar"]
-        self.assertEqual(ops.item_entities("sub-01_ses-2", g), ("session", {"sub": "01", "ses": "2"}))
-        self.assertEqual(ops.item_env(s)["sub"], "DUREH_ITER_SUB")
-        self.assertEqual(s.labels["levels"], ["file", "session", "subject"])
-        self.assertEqual(s.labels["layout"]["final"], LEGACY_LABELS["layout"]["final"])
