@@ -5,12 +5,14 @@ import json
 import os
 import secrets
 import shutil
+import subprocess
 import sys
 from datetime import date, timedelta
 from pathlib import Path
 
 from . import SCHEMA_VERSION, yamlsub
 from .org import HARNESS_ROOT, Org
+from .package import check as check_package, role_scope_conflicts, schema_of
 from .site import RECORD_KINDS, Site
 from .util import DurehError, dumps, fail, git_revision, read_json, utc_now, write_replace
 
@@ -24,7 +26,24 @@ DEFAULT_MODELS = {
 }
 
 
+def package_warnings(startup: Path) -> list[str]:
+    """Warnings of a valid package (schema 1, unknown keys, dropped schema-1 roles); [] when it does not load."""
+    try:
+        m = yamlsub.load_file(startup / "startup.yaml")
+        org = Org.load(HARNESS_ROOT, manifest=m)
+        stale = [f"{v.get('id')} -> {v['manager']}" for v in m.get("values") or []
+                 if v.get("manager") and v["manager"] not in org.roles]
+        return (check_package(m, startup) + org.warnings
+                + ([f"values name managers this organization does not have (bootstrap items of those values go to"
+                    f" the generic manager): {', '.join(stale)}"] if stale else []))
+    except DurehError:
+        return []
+
+
 def validate_package(startup: Path) -> dict:
+    """Install, `adapter sync` and `verify --self` (proposals/boundary-design-2026-10-08.md 3.4): the manifest
+    (schema 1 or 2), the roles it builds with the harness's generic roles, protected paths, labels, files it names,
+    no symlinks, no state. Fails on the first error; warnings come from `package_warnings`."""
     if startup.is_symlink() or not startup.is_dir():
         fail(f"startup package must be a directory: {startup}")
     manifest_path = startup / "startup.yaml"
@@ -34,6 +53,12 @@ def validate_package(startup: Path) -> dict:
     pkg = m.get("package") if isinstance(m, dict) else None
     if not isinstance(pkg, dict) or not pkg.get("id") or not pkg.get("name"):
         fail(f"startup.yaml must declare package.id and package.name: {manifest_path}")
+    for base, dirs, files in os.walk(startup, followlinks=False):
+        dirs[:] = [d for d in dirs if d != ".git"]
+        for name in dirs + files:
+            if (Path(base) / name).is_symlink():
+                fail(f"startup package may not contain symlinks: {Path(base) / name}")
+    check_package(m, startup)
     for d in FORBIDDEN_PACKAGE_DIRS:
         if (startup / d).exists():
             fail(f"startup package may not contain site state ({d}/); state is site-owned")
@@ -41,8 +66,14 @@ def validate_package(startup: Path) -> dict:
         fail("startup package may not carry a state submodule or recovery pointer")
     if (m.get("state") or {}).get("package_contains_state") not in (False, None):
         fail("startup.yaml declares package state; packages must not contain state")
-    org = m.get("organization") or {}
-    Org.load(HARNESS_ROOT, list(org.get("managers") or []) + list(org.get("workers") or []) or None)
+    org = Org.load(HARNESS_ROOT, manifest=m)
+    conflicts = role_scope_conflicts(m, org.roles.values())
+    if conflicts:
+        fail("startup.yaml: a write scope may not cover a protected path: " + "; ".join(conflicts))
+    if schema_of(m) == 2:  # a schema-1 value naming a removed manager only warns (package_warnings)
+        for v in m.get("values") or []:
+            if v.get("manager") and v["manager"] not in org.roles:
+                fail(f"value {v.get('id')} names manager {v['manager']!r}, which is not a role of this organization")
     boot = m.get("bootstrap") or {}
     for rel in list(boot.get("work_items") or []) + ([boot["persona_questions"]] if boot.get("persona_questions") else []):
         p = startup / rel
@@ -72,6 +103,153 @@ def copy_package(src: Path, dst: Path) -> None:
             if filename in (".DS_Store",):
                 continue
             shutil.copy2(source, out / filename)
+
+
+# ------------------------------------------------------------ single package source (release 46, option A)
+def tree_digest(root: Path) -> str:
+    """A content hash of a package tree (relative paths and bytes, .git excluded): the revision of a source
+    without git, and what `adapter sync` compares to list changed files."""
+    import hashlib
+
+    h = hashlib.sha256()
+    for rel, digest in sorted(_file_digests(root).items()):
+        h.update(rel.encode() + b"\0" + digest.encode() + b"\n")
+    return "sha256:" + h.hexdigest()
+
+
+def _file_digests(root: Path) -> dict[str, str]:
+    import hashlib
+
+    out = {}
+    if not root.is_dir():
+        return out
+    for base, dirs, files in os.walk(root, followlinks=False):
+        dirs[:] = sorted(d for d in dirs if d != ".git")
+        for f in files:
+            p = Path(base) / f
+            if p.is_file() and not p.is_symlink():
+                out[p.relative_to(root).as_posix()] = hashlib.sha256(p.read_bytes()).hexdigest()
+    return out
+
+
+def _git_source(src: Path) -> bool:
+    from .util import git
+
+    return git(["rev-parse", "--is-inside-work-tree"], src, check=False) == "true"
+
+
+def fetch_package(src: Path, dst: Path, rev: str | None = None) -> str:
+    """Put the package at `src` into the new directory `dst` and return its revision. A git source is exported with
+    `git archive <rev>` (default HEAD) and refused while it has uncommitted or untracked changes; a source without
+    git is copied (no symlinks) and its revision is a content hash. Option A of the boundary design, section 4."""
+    import io
+    import tarfile
+
+    from .util import git
+
+    if src.is_symlink() or not src.is_dir():
+        fail(f"startup package source must be a directory: {src}")
+    if not _git_source(src):
+        if rev:
+            fail(f"--package-rev needs a git package source; {src} is not a git work tree")
+        copy_package(src, dst)
+        return tree_digest(dst)
+    dirty = git(["status", "--porcelain", "--untracked-files=normal", "--", "."], src, check=False)
+    if dirty:
+        fail(f"the package source {src} has uncommitted changes; commit them first (the site installs only a committed"
+             f" revision):\n{dirty[:800]}")
+    full = git(["rev-parse", "--verify", f"{rev or 'HEAD'}^{{commit}}"], src, check=False)
+    if not full:
+        fail(f"package source {src}: unknown revision {rev or 'HEAD'!r}")
+    prefix = git(["rev-parse", "--show-prefix"], src)
+    proc = subprocess.run(["git", "archive", "--format=tar", f"{full}:{prefix}" if prefix else full], cwd=src,
+                          capture_output=True, timeout=300)
+    if proc.returncode != 0:
+        fail(f"git archive of {src} at {full[:12]} failed: {proc.stderr.decode(errors='replace').strip()}")
+    dst.mkdir(parents=True)
+    with tarfile.open(fileobj=io.BytesIO(proc.stdout)) as tar:
+        for m in tar.getmembers():
+            name = m.name.lstrip("./")
+            if not name:
+                continue
+            if m.issym() or m.islnk():
+                fail(f"startup package may not contain symlinks: {m.name} at {full[:12]}")
+            if m.name.startswith("/") or ".." in Path(m.name).parts:
+                fail(f"package archive member outside the package: {m.name}")
+            out = dst / name
+            if m.isdir():
+                out.mkdir(parents=True, exist_ok=True)
+            elif m.isfile():
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(tar.extractfile(m).read())
+                out.chmod(0o755 if m.mode & 0o111 else 0o644)
+    if not (dst / "startup.yaml").is_file():
+        fail(f"{src} at {full[:12]} has no committed startup.yaml")
+    return full
+
+
+def _rmtree_writable(path: Path) -> None:
+    def unlock(func, p, _exc):
+        os.chmod(os.path.dirname(p), 0o700)
+        if not os.path.islink(p):
+            os.chmod(p, 0o700)
+        func(p)
+
+    if path.exists() or path.is_symlink():
+        shutil.rmtree(path, onerror=unlock)
+
+
+def sync_package(site, rev: str | None = None) -> dict:
+    """`adapter sync [--package-rev REV]`: re-copy startup/ from config `startup.source` at a committed revision
+    (default its HEAD), validate the copy, swap it in, and record `package.synced` {from, to, changed} when the
+    revision or the files changed; config `startup.rev` and `startup.version` follow. Without a configured or
+    existing source, startup/ is kept as installed (the site stays self-contained)."""
+    from .records import Ledger
+
+    src = site.package_source()
+    cfg = dict(site.config.get("startup") or {})
+    if src is None or not src.is_dir():
+        if rev:
+            fail("--package-rev needs config startup.source naming an existing package source")
+        why = "no startup.source in config.json" if src is None else f"startup.source {src} does not exist"
+        return {"skipped": f"{why}; startup/ kept as installed", "warnings": package_warnings(site.startup)}
+    new = site.root / "startup.new"
+    old = site.root / "startup.old"
+    for leftover in (new, old):
+        _rmtree_writable(leftover)
+    try:
+        to = fetch_package(src, new, rev)
+        manifest = validate_package(new)
+        warnings = package_warnings(new)
+    except BaseException:
+        _rmtree_writable(new)
+        raise
+    if manifest["package"]["id"] != cfg.get("id", manifest["package"]["id"]):
+        _rmtree_writable(new)
+        fail(f"the package source holds {manifest['package']['id']!r}, but this site runs {cfg.get('id')!r}")
+    before, after = _file_digests(site.startup), _file_digests(new)
+    changed = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+    frm = cfg.get("rev")
+    if changed:
+        if site.startup.exists():
+            site.startup.rename(old)
+        new.rename(site.startup)
+        _rmtree_writable(old)
+    else:
+        _rmtree_writable(new)
+    if frm != to or changed:
+        cfg.update(rev=to, version=manifest["package"].get("version"))
+        conf = dict(site.config)
+        conf["startup"] = cfg
+        write_replace(site.config_path, json.dumps(conf, indent=2, ensure_ascii=False) + "\n",
+                      site.config_path.stat().st_mode & 0o777)
+        site.config = conf
+        site._manifest = None
+        site._org = None
+        Ledger(site).event("package.synced", "desk", None, {"package": manifest["package"]["id"], "from": frm, "to": to,
+                                                            "version": manifest["package"].get("version"),
+                                                            "changed": changed[:200], "changed_count": len(changed)})
+    return {"id": manifest["package"]["id"], "from": frm, "to": to, "changed": changed, "warnings": warnings}
 
 
 def _answers(questions: list[dict], supplied: dict, interactive: bool) -> dict:
@@ -150,11 +328,11 @@ def merge_config_defaults(config: dict, defaults: dict) -> tuple[dict, list[str]
 
 def apply_config_defaults(site, manifest: dict | None = None) -> list[str]:
     """For an existing site (`adapter sync`): add the package's `config_defaults` the site's config.json lacks
-    (never changing a value the site has). Reads the package source tree's startup.yaml when it exists, else the
-    site's copy. Returns the dotted keys added; config.json is rewritten only when something was added."""
+    (never changing a value the site has). Reads the installed package (`startup/startup.yaml`) only: `adapter sync`
+    re-copies it from the committed source first (release 46, single package source). Returns the dotted keys added;
+    config.json is rewritten only when something was added."""
     if manifest is None:
-        src = site.package_source() or site.startup
-        path = src / "startup.yaml"
+        path = site.startup / "startup.yaml"
         if not path.is_file():
             return []
         manifest = yamlsub.load_file(path) or {}
@@ -169,7 +347,7 @@ def apply_config_defaults(site, manifest: dict | None = None) -> list[str]:
     return added
 
 
-def _config(site: Path, manifest: dict, startup: Path, preset: dict) -> dict:
+def _config(site: Path, manifest: dict, startup: Path, preset: dict, rev: str | None = None) -> dict:
     models = {}
     waiver = (date.today() + timedelta(days=int(preset.get("waiver_days", 31)))).isoformat()
     for tier, model in {**DEFAULT_MODELS, **(preset.get("models") or {})}.items():
@@ -188,7 +366,7 @@ def _config(site: Path, manifest: dict, startup: Path, preset: dict) -> dict:
                  "root": str(site)},
         "harness": {"root": str(HARNESS_ROOT)},
         "startup": {"id": manifest["package"]["id"], "version": manifest["package"].get("version"),
-                    "source": str(startup)},
+                    "source": str(startup), "rev": rev},
         "references": preset.get("references") or [],
         "runtime": {"adapter": preset.get("adapter", "claude-code")},
         "models": models,
@@ -203,6 +381,10 @@ def _config(site: Path, manifest: dict, startup: Path, preset: dict) -> dict:
     config, _ = merge_config_defaults(config, package_config_defaults(manifest))
     for key, value in harness_defaults.items():
         config.setdefault(key, value)
+    # release 46 (O6): a new site learns of job ends on demand (no standing watch Monitor); an existing site without
+    # the key keeps `monitor` (ops.watch_mode). A preset or the package's config_defaults may set another mode.
+    if isinstance(config.get("slurm"), dict):
+        config["slurm"] = {**config["slurm"], "watch": config["slurm"].get("watch") or "on-demand"}
     return config
 
 
@@ -216,7 +398,7 @@ def install(startup_arg: str, site_arg: str, preset_path: str | None = None, per
     if site_p.is_symlink():
         fail(f"site path may not be a symlink: {site_p}")
     site_root = site_p.resolve()
-    manifest = validate_package(startup)
+    manifest = validate_package(startup)  # the source as given; the installed copy is validated again below
     preset = read_json(Path(preset_path)) if preset_path else {}
     supplied = dict(preset.get("persona") or {})
     if persona_path:
@@ -235,12 +417,14 @@ def install(startup_arg: str, site_arg: str, preset_path: str | None = None, per
     created_root = not site_root.exists()
     site_root.mkdir(parents=True, exist_ok=True)
     try:
-        copy_package(startup, site_root / "startup")
+        # release 46 (single package source): the committed revision of a git source, else a copy with a content hash
+        package_rev = fetch_package(startup, site_root / "startup")
+        manifest = validate_package(site_root / "startup")
         for kind in RECORD_KINDS:
             (site_root / "state" / "records" / kind).mkdir(parents=True)
         for d in ("state/persona", "state/memory", "projects", "modules", "references", "inbox", "worktrees", "notes"):
             (site_root / d).mkdir(parents=True, exist_ok=True)
-        config = _config(site_root, manifest, startup, preset)
+        config = _config(site_root, manifest, startup, preset, package_rev)
         (site_root / "config.json").write_text(json.dumps(config, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
         for ref in config["references"]:
             src = Path(ref["path"]).expanduser()
@@ -264,8 +448,8 @@ def install(startup_arg: str, site_arg: str, preset_path: str | None = None, per
                                                    "package_version": manifest["package"].get("version")})
         created = []
         for rel in (manifest.get("bootstrap") or {}).get("work_items") or []:
-            spec = yamlsub.load_file(startup / rel)
-            rec = wi_new(site, "desk", title=spec["title"], goal=spec["goal"], role=spec.get("role") or _role_for(manifest, spec),
+            spec = yamlsub.load_file(site_root / "startup" / rel)
+            rec = wi_new(site, "desk", title=spec["title"], goal=spec["goal"], role=spec.get("role") or _role_for(manifest, spec, site.org),
                          target=spec.get("target") or "site", acceptance=list(spec.get("acceptance") or []),
                          lane="work", value=spec.get("value"), constraints=list(spec.get("constraints") or []),
                          source=f"startup/{rel}")
@@ -284,7 +468,7 @@ def install(startup_arg: str, site_arg: str, preset_path: str | None = None, per
             "schema_version": SCHEMA_VERSION,
             "harness": {"url": _remote(HARNESS_ROOT), "rev": git_revision(HARNESS_ROOT)},
             "package": {"id": manifest["package"]["id"], "name": manifest["package"]["name"],
-                        "url": _remote(startup), "rev": git_revision(startup),
+                        "url": _remote(startup), "rev": package_rev,
                         "version": manifest["package"].get("version")},
             "state": {"backend": config["state"]["backend"], "url": config["state"].get("ria"),
                       "rev": state_result.get("revision"), "schema_version": 1},
@@ -308,11 +492,22 @@ def install(startup_arg: str, site_arg: str, preset_path: str | None = None, per
             "selftest": self_result, "state": state_result, "deployment": deployment}
 
 
-def _role_for(manifest: dict, spec: dict) -> str:
+def _role_for(manifest: dict, spec: dict, org: Org | None = None) -> str:
+    """The role of a bootstrap work item without one: the manager its value names (package `values[].manager`, when
+    the organization has it), else the manager whose role declares that value, else the generic `manager` (or, when
+    a schema-1 enable list left it out, the first manager)."""
     value = spec.get("value")
-    mapping = {"refactor-to-modules": "pm-modules", "reproducible-projects": "pm-projects",
-               "evidence-based-interpretation": "pm-projects", "harness": "pm-harness"}
-    return mapping.get(value, "pm-projects")
+    for v in manifest.get("values") or []:
+        if value and v.get("id") == value and v.get("manager") and (org is None or v["manager"] in org.roles):
+            return v["manager"]
+    if org is not None:
+        managers = [r for r in org.roles.values() if r.is_manager]
+        for r in managers:
+            if value and r.value == value:
+                return r.name
+        if "manager" not in org.roles and managers:
+            return managers[0].name  # a schema-1 enable list without the generic manager
+    return "manager"
 
 
 def _remote(path: Path) -> str | None:
@@ -329,10 +524,13 @@ def refresh_deployment(site: Site) -> dict:
 
     path = site.root / "deployment.json"
     dep = read_json(path)
-    src = site.package_source() or site.startup
     new = dict(dep)
     new["harness"] = {"url": _remote(HARNESS_ROOT), "rev": git_revision(HARNESS_ROOT)}
-    new["package"] = {**dep.get("package", {}), "rev": git_revision(src) if src.exists() else dep.get("package", {}).get("rev")}
+    # the installed package is the pin (release 46): config startup.rev, which `adapter sync` sets from the revision
+    # it copied, else the content hash of startup/ (a site not synced since release 46)
+    rev = (site.config.get("startup") or {}).get("rev") or tree_digest(site.startup)
+    new["package"] = {**dep.get("package", {}), "rev": rev,
+                      "version": (site.config.get("startup") or {}).get("version") or dep.get("package", {}).get("version")}
     old_root = (site.config.get("harness") or {}).get("root")
     root_changed = old_root != str(HARNESS_ROOT)
     stored_site_root, live_root = site.stored_root, str(site.root)

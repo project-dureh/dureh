@@ -91,6 +91,17 @@ def run_self(site: Site | None, actor: str = "checker", unit: bool = True) -> di
         if proc.returncode != 0:
             problems.append("unit tests failed: " + " | ".join(tail))
     if site is not None:
+        from .install import package_warnings, validate_package
+        from .ops import config_warnings
+        from .util import DurehError
+
+        try:  # release 46: the installed package validates on this harness (schema, roles, protected, labels)
+            validate_package(site.startup)
+        except DurehError as exc:
+            problems.append(f"installed package does not validate: {exc}")
+        warnings = package_warnings(site.startup) + config_warnings(site)
+        if warnings:
+            counts["warnings"] = warnings
         problems += harness_checks(site)
         problems += tool_coverage(site)
         from .runtimes.claude_code import drift
