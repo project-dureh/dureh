@@ -134,7 +134,7 @@ def write_decision(site: Site, role: str, raw: str | Path, cwd: Path | None = No
     if t.zone == "reference":
         return False, "reference material is read-only for every role"
     if t.zone == "container-cache":
-        return False, "the container cache is written only by `dureh container build` jobs; no role writes it directly"
+        return False, "the container cache is not written by any role directly"
     if t.zone == "records":
         return False, "records are append-only and written only through the dureh ledger tools"
     if t.zone in ("generated", "deployment"):
@@ -147,6 +147,12 @@ def write_decision(site: Site, role: str, raw: str | Path, cwd: Path | None = No
         return True, "scratch space"
     if t.zone == "outside":
         return False, "path is outside the site and scratch space"
+    from .protect import write_refusal
+
+    why = write_refusal(site, raw if Path(raw).is_absolute() else (cwd or site.root) / raw,
+                        t.logical if t.zone in ("worktree", "target") else None)
+    if why:  # release 46: protected paths bind every role, the desk included, before any scope
+        return False, why
     if r.kind == "desk":
         if t.zone == "worktree":
             return False, "the desk does not edit a worker's WI worktree; stop or rework the WI instead"
