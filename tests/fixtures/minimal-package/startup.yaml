@@ -1,17 +1,58 @@
-schema_version: 1
+schema_version: 2
 package:
   id: minimal-test
   name: Minimal Test Package
   version: 0.0.1
+  harness_min: 46
 values:
   - id: refactor-to-modules
     title: Modules
     skill: skills/code/SKILL.md
-skills:
-  py-writer: skills/code/SKILL.md
-organization:
-  managers: [pm-modules]
-  workers: [py-writer, researcher, checker, doc-writer]
+    manager: pm-modules
+desk:
+  may_dispatch: [researcher, doc-writer]
+  write_scopes:
+    - projects/*/README.md
+roles:
+  pm-modules:
+    kind: manager
+    tier: pm
+    value: refactor-to-modules
+    description: Manager for reusable module work.
+    may_dispatch: [py-writer, doc-writer, researcher, checker]
+  py-writer:
+    kind: worker
+    tier: worker
+    output: Python code and its unit tests for one module.
+    never: Verification verdicts, data paths, pipeline execution.
+    skill: skills/code/SKILL.md
+    write_scopes:
+      - modules/*/src/**
+      - modules/*/tests/**
+      - modules/*/pyproject.toml
+      - modules/*/uv.lock
+      - modules/*/containers/**
+      - modules/*/tools/**
+      - projects/*/code/notebooks/**
+  doc-writer:
+    kind: worker
+    tier: worker
+    output: Technical documents and package proposals.
+    never: Data interpretation, research, code.
+    write_scopes:
+      - projects/*/reports/manuscript/**
+      - projects/*/code/devnotes/**
+      - modules/*/docs/**
+      - modules/*/README.md
+      - harness/docs/**
+      - package/proposals/**
+      - package/docs/**
+  researcher:
+    kind: worker
+    tier: worker
+    output: A sourced research summary of at most one page, recorded as a finding.
+    never: Code or document writes, judgment on behalf of the desk.
+    capabilities: [network]
 guards:
   scheduler_only_commands: ["fsl*", "ants*"]
 state:

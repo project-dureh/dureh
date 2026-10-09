@@ -1,0 +1,92 @@
+# A neutral example package (schema 2) used by the harness tests. It names no company and no domain: a small
+# organization that builds tools, runs batch jobs over samples, and keeps a catalog of its results.
+schema_version: 2
+package:
+  id: example-org
+  name: Example Organization
+  version: 1.0.0
+  harness_min: 46
+values:
+  - id: build-tools
+    title: Reusable tools
+    skill: skills/build/SKILL.md
+    manager: coordinator
+desk:
+  may_dispatch: [scout]
+  write_scopes:
+    - projects/*/README.md
+roles:
+  coordinator:
+    kind: manager
+    tier: pm
+    value: build-tools
+    description: Manager for tool and batch work. Splits a bundle into one-worker items and integrates their results.
+    may_dispatch: [builder, runner, publisher, scout, checker]
+  builder:
+    kind: worker
+    tier: worker
+    output: Code and its unit tests for one module.
+    never: Verification verdicts, scheduler jobs.
+    skill: skills/build/SKILL.md
+    write_scopes:
+      - modules/*/src/**
+      - modules/*/tests/**
+      - modules/*/pyproject.toml
+  runner:
+    kind: worker
+    tier: worker
+    isolation: scratch
+    project: true
+    output: Scheduler jobs submitted and recorded through the slurm tool, one array task per sample.
+    never: Code changes, tracked-file edits.
+    capabilities: [submit_jobs]
+    skill: skills/run/SKILL.md
+    instructions:
+      - "- Name job scripts after their step: checkpoints/<step>/<step>.sh."
+    write_scopes:
+      - projects/*/checkpoints/**
+      - projects/*/README.md
+  publisher:
+    kind: worker
+    tier: worker
+    project: true
+    output: The project catalog of results.
+    never: Code changes, scheduler jobs.
+    write_scopes:
+      - projects/*/catalog.yaml
+  scout:
+    kind: worker
+    tier: worker
+    output: A sourced summary of at most one page, recorded as a finding.
+    never: File writes.
+    capabilities: [network]
+  checker:
+    skill: skills/check/SKILL.md
+    instructions:
+      - "- Report the number of checks that passed first."
+labels:
+  levels: [part, sample, batch]
+  layout:
+    staging: checkpoints
+    final: published
+    reports: reports
+  item_grammar:
+    sample: '^sample-(?P<sample>[A-Za-z0-9]+)$'
+    batch: '^sample-(?P<sample>[A-Za-z0-9]+)_batch-(?P<batch>[A-Za-z0-9]+)$'
+policies:
+  loop_rule:
+    text: "Example rule: every step loops over samples with `--each`; a group step goes `--after` the array."
+    refuse: "example-org loops every step over samples: submit with --each <samples>"
+protected:
+  - {path: projects/*/inputs/**, level: no-read, why: example raw inputs are never read by agents}
+  - {path: projects/*/published/**, level: read-only, why: published results are never edited by an agent}
+templates:
+  project: templates/project
+guards:
+  scheduler_only_commands: ["heavy-tool*"]
+state:
+  owner: site
+  package_contains_state: false
+bootstrap:
+  work_items: [bootstrap/wi-tools.yaml]
+  persona_questions: bootstrap/persona.yaml

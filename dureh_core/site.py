@@ -12,18 +12,15 @@ from .util import DurehError, fail, is_within, read_json
 RECORD_KINDS = ("work-item", "run", "decision", "session", "finding", "event")
 READ_ONLY_SITE_DIRS = ("references", "startup")
 _VAR = re.compile(r"\$\{(\w+)(?::-([^}]*))?\}|\$(\w+)")
-TOOL_NAMES = ("wi", "dispatch", "verify", "ledger", "status", "slurm", "container", "path-refs", "purge", "push", "usage", "upstream", "promote", "worktree", "day", "slack", "report")
+TOOL_NAMES = ("wi", "dispatch", "verify", "ledger", "status", "slurm", "path-refs", "purge", "push", "usage", "upstream", "worktree", "day", "slack", "report", "protected")
 
 # Company-specific names the harness used to carry in code (UP-0069): now config keys with generic defaults. A startup
 # package supplies its own values through `config_defaults` in startup.yaml (merged at install, docs/config.md).
 PROJECT_DEFAULTS = {
-    "manifest": "manifest.yaml",             # the one project manifest the harness reads (pins, data flow); null = off
-    "pipeline_version_key": "version",       # key of a pipeline entry that names the pipeline's software version
-    "derivative_entry": "{family}_{species}_{suffix}",  # derivative name a pipeline entry produces (str.format fields)
+    "manifest": "manifest.yaml",             # the one project manifest the harness reads (module pins); null = off
 }
 CONTAINER_DEFAULTS = {
     "cache_env": "DUREH_CONTAINER_CACHE",    # env var that names the container cache when containers.cache is unset
-    "manifest_globs": ["*manifest*.yaml", "*manifest*.yml", "*manifest*.json"],  # project files an image may be pinned in
 }
 
 
@@ -211,14 +208,26 @@ class Site:
 
     @property
     def org(self) -> Org:
+        """The generic roles, the package's roles and desk additions (release 46; schema 1: the enable list over
+        the generic and legacy roles)."""
         if self._org is None:
-            manifest = self.package_manifest()
-            organization = manifest.get("organization") or {}
-            enabled = list(organization.get("managers") or []) + list(organization.get("workers") or [])
-            self._org = Org.load(HARNESS_ROOT, enabled or None)
+            self._org = Org.load(HARNESS_ROOT, manifest=self.package_manifest())
             overrides = self.config.get("limits") or {}
             self._org.limits.update(overrides)
         return self._org
+
+    @property
+    def labels(self) -> dict:
+        """The package's labels: item levels and grammar, layout words (package.labels)."""
+        from .package import labels
+
+        return labels(self.package_manifest())
+
+    def protected(self) -> list[dict]:
+        """The package's protected paths [{path, level, why}] (package.protected_rules); none for schema 1."""
+        from .package import protected_rules
+
+        return protected_rules(self.package_manifest())
 
     def limit(self, name: str, default=None):
         return self.org.limits.get(name, default)
@@ -230,11 +239,11 @@ class Site:
         return defaults[key]
 
     def project_setting(self, key: str):
-        """config `project.<key>` (manifest, pipeline_version_key, derivative_entry), else PROJECT_DEFAULTS."""
+        """config `project.<key>` (manifest), else PROJECT_DEFAULTS."""
         return self._setting("project", PROJECT_DEFAULTS, key)
 
     def container_setting(self, key: str):
-        """config `containers.<key>` (cache_env, manifest_globs), else CONTAINER_DEFAULTS."""
+        """config `containers.<key>` (cache_env), else CONTAINER_DEFAULTS."""
         return self._setting("containers", CONTAINER_DEFAULTS, key)
 
     def project_manifest(self) -> str | None:

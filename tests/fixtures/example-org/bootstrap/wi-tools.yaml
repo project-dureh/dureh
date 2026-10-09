@@ -1,0 +1,6 @@
+id: bootstrap-tools
+title: Start the tools module
+value: build-tools
+goal: Exercise bootstrap work item creation through the value's manager.
+acceptance:
+  - A record exists.

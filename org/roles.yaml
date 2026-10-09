@@ -1,166 +1,73 @@
 # Runtime-neutral organization definition (DUREH harness).
-# Single source of truth for roles, dispatch authority, tiers, and write scopes.
-# Runtime adapters (runtimes/) generate their own files from this; generated
-# output is never edited by hand.
+# The harness holds only generic roles, governed upstream (decision D3 as revised 2026-10-08, O10): the desk, a
+# generic manager, a generic worker and the checker. A company's own roles live in its startup package (`roles:`
+# in startup.yaml schema 2), which adds roles or replaces `manager`/`worker`; the checker can be re-skinned (skill,
+# instructions) but keeps `verify` and no write scopes. Runtime adapters (runtimes/) generate their own files from
+# the result; generated output is never edited by hand.
+#
+# Roles are known to the harness only by kind (desk, manager, worker) and by capability, a closed set:
+#   submit_jobs  `slurm submit/status/wait/resubmit-failed` and the run events
+#   verify       `verify --wi`, verification.recorded, wi.verified
+#   network      WebFetch / WebSearch
 #
 # Write scopes are globs over *logical paths*. A logical path is
 #   <target>/<path inside the target>
 # where <target> is one of:
 #   modules/<name>    a module repository linked or cloned into the site
-#   projects/<name>   a site project (DataLad superdataset)
+#   projects/<name>   a site project
 #   harness           the DUREH harness repository (via a WI worktree only)
 #   package           the startup package repository (via a WI worktree only)
 # Writes inside a WI worktree are mapped back to the WI's target first.
 # Globs are segment-aware: `*` and `?` match within one path segment and never
 # cross `/`; a whole `**` segment matches any depth below (one or more segments
 # at the end of a pattern, zero or more in the middle).
-schema_version: 1
+schema_version: 2
 max_depth: 2
 roles:
   desk:
     kind: desk
     tier: desk
     persistent: true
-    description: The only persistent agent. Speaks to the Director, owns persona and memory, dispatches, stops, verifies through the checker, and promotes.
-    may_dispatch: [pm-modules, pm-projects, pm-harness, researcher, doc-writer, checker]
+    description: The only persistent agent. Speaks to the Director, owns persona and memory, dispatches, stops, verifies through the checker, and promotes (Gate 2).
+    # every manager and every verify role is added at load time; a package adds direct workers through `desk:`
+    may_dispatch: [manager, checker]
+    capabilities: [submit_jobs, verify, network]
     # The desk writes site organization files directly; records only via tools.
     write_scopes:
       - site:state/persona/**
       - site:state/memory/**
       - site:inbox/**
       - site:notes/**
-      - package/**
-      - projects/*/README.md
-  pm-modules:
+  manager:
     kind: manager
     tier: pm
-    value: refactor-to-modules
-    description: Manager for reusable module work. Splits a bundle into one-worker work items, orders them, integrates results, and returns one Gate 2 bundle.
-    may_dispatch: [py-writer, doc-writer, researcher, checker]
+    description: Generic manager. Splits a bundle into one-worker work items, orders them, integrates results, and returns one Gate 2 bundle.
+    may_dispatch: [worker, checker]
     write_scopes: []
-  pm-projects:
-    kind: manager
-    tier: pm
-    value: reproducible-projects
-    description: Manager for project work, pipeline runs, and interpretation. Splits a bundle into one-worker work items and integrates their results.
-    may_dispatch: [data-steward, pipeline-runner, interpreter, doc-writer, researcher, checker]
-    write_scopes: []
-  pm-harness:
-    kind: manager
-    tier: pm
-    value: harness
-    description: Manager for console, hooks, tools, schemas, and skills. Harness changes land only through WI worktrees and Gate 2.
-    may_dispatch: [tool-writer, web-writer, doc-writer, checker]
-    write_scopes: []
-  py-writer:
+  worker:
     kind: worker
     tier: worker
-    output: Python code and its unit tests for one module.
-    never: Verification verdicts, data paths, pipeline execution.
+    output: Code, tests and documentation of one module for one work item.
+    never: Verification verdicts, data paths, scheduler jobs.
     may_dispatch: []
     write_scopes:
       - modules/*/src/**
       - modules/*/tests/**
-      - modules/*/pyproject.toml
-      - modules/*/uv.lock
-      - modules/*/containers/**
-      - modules/*/tools/**
-      - projects/*/code/notebooks/**
-  web-writer:
-    kind: worker
-    tier: worker
-    output: Console pages, components, and their tests.
-    never: Hooks, tools, records.
-    may_dispatch: []
-    write_scopes:
-      - harness/apps/console/src/**
-      - harness/apps/console/test/**
-  tool-writer:
-    kind: worker
-    tier: worker
-    output: Harness tools, hooks, schemas, org skills, installer, runtime adapters.
-    never: Console pages, project data.
-    may_dispatch: []
-    write_scopes:
-      - harness/dureh_core/**
-      - harness/org/hooks/**
-      - harness/org/skills/**
-      - harness/org/exams/**
-      - harness/schemas/**
-      - harness/tests/**
-      - harness/install.sh
-      - harness/runtimes/**
-  data-steward:
-    kind: worker
-    tier: worker
-    output: DataLad structure and project metadata (init, subdataset registration, links, manifest), and promotion of verified results into derivatives/.
-    never: Editing sourcedata or raw BIDS data, pipeline execution, code (except landing container recipes under code/containers/ from a pinned source).
-    may_dispatch: []
-    write_scopes:
-      - projects/*/derivatives/**
-      - projects/*/camri-manifest.yaml
-      - projects/*/dataset_description.json
-      - projects/*/.datalad/**
-      - projects/*/.gitattributes
-      - projects/*/.gitmodules
-      - projects/*/.bidsignore
-      - projects/*/sourcedata/atlases/**
-      - projects/*/code/containers/**
-  pipeline-runner:
-    kind: worker
-    tier: worker
-    # scratch: no WI worktree; writes go to the untracked checkpoints/ of the real project.
-    # Promotion into derivatives/ (a DataLad subdataset) needs a per-WI clone and is not enabled yet.
-    isolation: scratch
-    output: Scheduler jobs submitted and recorded through the slurm tool. Submit one job per subject with `slurm submit --each <subjects>` (all subjects at once, no cap); during development one array per step, the next step with `--after <run>`; a chained workflow is one array over subjects; group-level steps as separate jobs `--after` the subject array; never loop submits by hand. Use `--module <m>` whenever the job runs module code (a pinned read-only tree; read the module root from its root_env variable, e.g. $CAMRI_PROJECT, or $DUREH_MODULE_ROOT; never set it to modules/<m>); container images only through `container build`; job scripts and run manifests under checkpoints/.
-    never: Code changes, interpretation, tracked-file edits (except the notebooks and README "data usage" entries each workflow run regenerates).
-    may_dispatch: []
-    write_scopes:
-      - projects/*/checkpoints/**
-      - projects/*/code/notebooks/**
-      - projects/*/README.md
-  interpreter:
-    kind: worker
-    tier: worker
-    output: Interpretation reports grounded in outputs and provenance.
-    never: Data writes, pipeline execution, code.
-    may_dispatch: []
-    write_scopes:
-      - projects/*/reports/interpretation/**
-      - package/lessons/evals/interpreter/**
-  doc-writer:
-    kind: worker
-    tier: worker
-    output: Technical and academic documents and package proposals.
-    never: Data interpretation, research, code.
-    may_dispatch: []
-    write_scopes:
-      - projects/*/reports/manuscript/**
-      - projects/*/code/devnotes/**
       - modules/*/docs/**
-      - modules/*/README.md
-      - harness/docs/**
-      - package/proposals/**
-      - package/docs/**
-  researcher:
-    kind: worker
-    tier: worker
-    output: A sourced research summary of at most one page, recorded as a finding.
-    never: Code or document writes, judgment on behalf of the desk.
-    may_dispatch: []
-    write_scopes: []
   checker:
     kind: worker
     tier: recount
     output: Measured verification results recorded through the verify tool.
     never: Repairing the artifact it checks, verdict words beyond measured results.
     may_dispatch: []
+    capabilities: [verify]
     write_scopes: []
-# Event types each role may append through the ledger. The desk may append any.
-# Lifecycle events are also checked against the WI state machine.
+# Event types a role may append through the ledger: its kind's list plus the lists of its capabilities.
+# The desk may append any. Lifecycle events are also checked against the WI state machine.
 event_authority:
   manager: [guard.denied, finding.created, wi.staged, rework.requested, dispatch.prepared, wi.dispatched, checker.dispatched, agent.started, agent.finished, wi.stopped, bundle.ready, agent.cleaned, lane.refused]
   worker: [guard.denied, finding.created, wi.staged, agent.started, agent.finished, agent.cleaned]
-  checker: [guard.denied, finding.created, verification.recorded, wi.verified, rework.requested, run.completed, agent.started, agent.finished, agent.cleaned]
-  pipeline-runner: [guard.denied, finding.created, wi.staged, run.completed, run.status, slurm.via-failed, container.built, agent.started, agent.finished, agent.cleaned]
-  data-steward: [guard.denied, finding.created, wi.staged, container.retired, agent.started, agent.finished, agent.cleaned]
+capability_authority:
+  submit_jobs: [run.completed, run.status, slurm.via-failed]
+  verify: [verification.recorded, wi.verified, rework.requested, run.completed]
+  network: []

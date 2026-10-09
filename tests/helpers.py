@@ -11,6 +11,46 @@ from pathlib import Path
 
 HARNESS = Path(__file__).resolve().parent.parent
 FIXTURE_PACKAGE = HARNESS / "tests" / "fixtures" / "minimal-package"
+# the neutral schema-2 example package (release 46): package roles with capabilities, labels, protected paths
+EXAMPLE_PACKAGE = HARNESS / "tests" / "fixtures" / "example-org"
+
+
+# datalad and git-annex for the suites that need them (where git-annex lives when it is not on PATH; override with
+# DUREH_TEST_ANNEX_BIN); None when unavailable, and those tests are not run
+ANNEX_BIN = Path(os.environ.get("DUREH_TEST_ANNEX_BIN") or Path.home() / "micromamba" / "envs" / "annex" / "bin")
+
+
+def _tools_path():
+    path = os.environ.get("PATH", "")
+    if ANNEX_BIN.is_dir():
+        path = f"{ANNEX_BIN}{os.pathsep}{path}"
+    return path if shutil.which("datalad", path=path) and shutil.which("git-annex", path=path) else None
+
+
+TOOLS = _tools_path()
+
+
+def run(cmd, cwd=None):
+    proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"{' '.join(cmd[:3])} exited {proc.returncode}: {(proc.stderr or proc.stdout).strip()[-1500:]}")
+    return proc.stdout
+
+
+def minimal_org():
+    """The organization the minimal package (schema 2: pm-modules, py-writer, doc-writer, researcher) builds."""
+    from dureh_core import yamlsub
+    from dureh_core.org import Org
+
+    return Org.load(HARNESS, manifest=yamlsub.load_file(FIXTURE_PACKAGE / "startup.yaml"))
+
+
+def example_org():
+    """The organization the example package builds on this harness."""
+    from dureh_core import yamlsub
+    from dureh_core.org import Org
+
+    return Org.load(HARNESS, manifest=yamlsub.load_file(EXAMPLE_PACKAGE / "startup.yaml"))
 GIT_ENV = {"GIT_AUTHOR_NAME": "DUREH Test", "GIT_AUTHOR_EMAIL": "test@example.invalid",
            "GIT_COMMITTER_NAME": "DUREH Test", "GIT_COMMITTER_EMAIL": "test@example.invalid"}
 
@@ -27,7 +67,10 @@ def copy_writable(src, dst, **kw) -> None:
 
 
 class SiteCase(unittest.TestCase):
-    """Creates tmp/{package, site, ref}. The package is a git repo so installs record a revision."""
+    """Creates tmp/{package, site, ref}. The package is a copy of PACKAGE (the minimal package unless a subclass
+    names another fixture)."""
+
+    PACKAGE = FIXTURE_PACKAGE
 
     def setUp(self):
         self._env = dict(os.environ)
@@ -39,7 +82,7 @@ class SiteCase(unittest.TestCase):
         os.environ["TMPDIR"] = str(self.tmp / "nodelocal")
         (self.tmp / "nodelocal").mkdir()
         self.package = self.tmp / "package"
-        copy_writable(FIXTURE_PACKAGE, self.package)
+        copy_writable(self.PACKAGE, self.package)
         self.ref = self.tmp / "reference-repo"
         (self.ref / "docs").mkdir(parents=True)
         (self.ref / "docs" / "old.md").write_text("old rules; do not follow\n")
@@ -84,6 +127,39 @@ class SiteCase(unittest.TestCase):
         subprocess.run(["git", "add", "-A"], cwd=mod, check=True)
         subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=mod, check=True)
         return mod
+
+
+RUNNER_ROLES = """  coordinator:
+    kind: manager
+    tier: pm
+    description: Manager for batch work on projects.
+    may_dispatch: [runner, py-writer, doc-writer, researcher, checker]
+  runner:
+    kind: worker
+    tier: worker
+    isolation: scratch
+    output: Scheduler jobs submitted and recorded through the slurm tool.
+    never: Code changes.
+    capabilities: [submit_jobs]
+    write_scopes:
+      - projects/*/checkpoints/**
+      - projects/*/code/notebooks/**
+      - projects/*/README.md
+"""
+
+
+def add_runner_roles(package: Path) -> None:
+    """Add a manager `coordinator` and a scratch `runner` (submit_jobs) to a copy of the minimal package: the suites
+    that exercise scheduler plumbing need a role with the submit_jobs capability (release 46: no harness role has it)."""
+    m = Path(package) / "startup.yaml"
+    text = m.read_text()
+    m.write_text(text.replace("\nroles:\n", "\nroles:\n" + RUNNER_ROLES, 1))
+
+
+class ExampleSiteCase(SiteCase):
+    """A site of the neutral example package (example-org, schema 2)."""
+
+    PACKAGE = EXAMPLE_PACKAGE
 
 
 def hook(site, **data):
