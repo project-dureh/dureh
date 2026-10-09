@@ -651,6 +651,12 @@ def generate(site: Site) -> dict:
     for role in site.org.roles.values():
         if role.kind != "desk":
             files[f".claude/agents/{role.name}.md"] = _agent_file(site, role)
+    from ..protect import LINKS_REL, links_file_text
+
+    links = links_file_text(site)  # release 46: resolved symlink targets of protected areas (names-only walk)
+    if links is not None:
+        files[LINKS_REL] = links
+        site._protected_links = None
     for skill in sorted((site.startup / "skills").glob("*/SKILL.md")):
         name = skill.parent.name
         files[f".claude/skills/{name}/SKILL.md"] = _skill_frontmatter(name, skill.read_text(encoding="utf-8"))

@@ -75,7 +75,7 @@ values: [{id, title, skill, manager}]              # manager: the role a bootstr
 policies:
   loop_rule: {text: <desk/agent text>, refuse: <added to the loop-rule refusal>}
 protected:
-  - {path: <site-relative glob>, level: no-read | read-only, why: <text>}
+  - {path: <site-relative glob>, level: no-read | read-only | none, why: <text>}
 labels:
   levels: [<finest>, ..., <coarsest>]              # slurm.each_level is one of these (or any)
   layout: {staging: <dir>, final: <dir>, reports: <dir>}   # defaults: checkpoints, (none), reports
@@ -105,7 +105,8 @@ organization: {managers, workers}                  # release 46 only: an enable 
   known targets, every dispatching manager can dispatch a verify role, at least one verify role, a verify role has no
   write scopes; write scopes are segment-aware globs under `modules/`, `projects/`, `package/`, `harness/` and none
   covers a protected path; capabilities from the closed set; skills and the
-  project template exist inside the package; no symlinks; protected levels are `no-read` or `read-only`.
+  project template exist inside the package; no symlinks; protected levels are `no-read`, `read-only` or `none`
+  (a `none` rule that overlaps no stricter rule of the package warns).
 - **Schema 1** still loads in release 46 with a warning: its `organization` enable list resolves against the
   generic roles plus `org/legacy/schema1-roles.yaml` (pm-modules, py-writer, doc-writer, researcher), names that no
   longer exist are dropped with a warning, and its labels are the pre-46 words (`LEGACY_LABELS`). Both go when schema
@@ -120,8 +121,22 @@ best-effort word scan (a script that opens the file is not caught). Listing name
 PreToolUse matcher gains `Read|Grep` only when a `no-read` rule exists. Every refusal is recorded as `guard.denied`.
 Harness commands (scheduler jobs) are not agent reads or writes; `path-refs` does not read inside a
 no-read area. `dureh protected list [--json]` (allowed with `--observe`) prints each rule with its level and source
-(package id, version, revision), or "none declared: interim default (workspace rule 2)": the harness applies no
-default of its own.
+(package id, version, revision) and the resolved symlink targets below, or "none declared: interim default
+(workspace rule 2)": the harness applies no default of its own.
+
+- **`level: none` and precedence** (Director, 2026-10-09). The most specific matching rule decides, compared
+  segment by segment from the left (a literal segment beats a partial wildcard, which beats `*`, which beats `**`;
+  at an equal prefix the longer glob wins); on a tie the later rule wins. `none` lifts the package's own rules for
+  that path (example: `projects/*/published/** read-only` + `projects/p-test/** none` leaves the test project to
+  the role scopes). It never lifts a harness write zone (records, generated files, the installed package, config,
+  references, the container cache, worktrees of other items: section 5 invariants), which are checked first.
+- **Symlink targets** (Director, 2026-10-09). At install and `adapter sync` the harness walks each protected area
+  (rules other than `none`) by names only (bounded depth, entries and link count; nothing is opened) and records
+  every symlink in it, the area itself included, with its resolved real path and the rule's level in the generated
+  file `.claude/dureh-protected-links.json` (a link a more specific `none` rule lifts, or one whose target is inside
+  the site, is not stored). The guard (Read, Grep, Write/Edit through the write guard, and the Bash word scan)
+  checks the path as given, its resolved real path against the site-relative rules, and the real path against the
+  stored target prefixes. New links are seen at the next `adapter sync`.
 
 ### Single package source (release 46, option A)
 

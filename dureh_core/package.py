@@ -23,7 +23,7 @@ CAPABILITIES = ("submit_jobs", "verify", "network")
 RESERVED_ROLES = ("desk", "manager", "worker", "checker")
 ROLE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
 WORD_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
-PROTECT_LEVELS = ("no-read", "read-only")
+PROTECT_LEVELS = ("no-read", "read-only", "none")  # none: lifts the package's own rules (most specific wins)
 LAYOUT_KEYS = ("staging", "final", "reports")
 # the harness's own layout words when a package names none (`final` has no harness default)
 DEFAULT_LAYOUT = {"staging": "checkpoints", "final": None, "reports": "reports"}
@@ -171,7 +171,7 @@ def _check_protected(raw) -> None:
         if not _glob_ok(str(r["path"])):
             fail(f"{where}.path {r['path']!r} is not a site-relative, segment-aware glob")
         if r.get("level") not in PROTECT_LEVELS:
-            fail(f"{where}.level must be no-read or read-only, not {r.get('level')!r}")
+            fail(f"{where}.level must be no-read, read-only or none, not {r.get('level')!r}")
 
 
 def _check_policies(raw) -> None:
@@ -223,6 +223,12 @@ def check(manifest: dict, root: Path | None = None) -> list[str]:
             fail(f"package {pkg['id']} needs harness release {need} or later; this harness is release {HARNESS_RELEASE}")
     _check_labels(manifest.get("labels"))
     _check_protected(manifest.get("protected"))
+    rs = manifest.get("protected") or []
+    for r in rs:
+        if r.get("level") == "none" and not any(o.get("level") != "none" and globs_overlap(r["path"], o["path"])
+                                                for o in rs):
+            warnings.append(f"startup.yaml protected: `{r['path']} none` lies under no stricter rule of the package"
+                            " (it lifts nothing)")
     _check_policies(manifest.get("policies"))
     if manifest.get("organization"):
         warnings.append("startup.yaml organization.managers/workers is an enable list for release 46 only; from the"
@@ -241,7 +247,7 @@ def check(manifest: dict, root: Path | None = None) -> list[str]:
 
 def role_scope_conflicts(manifest: dict, roles) -> list[str]:
     """Write scopes (of package roles and desk additions) that cover a protected path: refused (3.4 rule 4)."""
-    rules = protected_rules(manifest)
+    rules = [r for r in protected_rules(manifest) if r.get("level") != "none"]
     out = []
     for r in roles:
         for s in r.write_scopes:

@@ -126,7 +126,7 @@ class Validation(unittest.TestCase):
         self.refused(lambda m: m["labels"]["item_grammar"].update(other="^x$"), "not a level")
         self.refused(lambda m: m["labels"]["item_grammar"].update(sample="(unclosed"), "not a regular expression")
         self.refused(lambda m: m["labels"]["layout"].update(final="a/b"), "one directory name")
-        self.refused(lambda m: m["protected"].append({"path": "x/**", "level": "secret"}), "no-read or read-only")
+        self.refused(lambda m: m["protected"].append({"path": "x/**", "level": "secret"}), "no-read, read-only or none")
         self.refused(lambda m: m["protected"].append({"path": "/abs/**", "level": "no-read"}), "segment-aware glob")
         self.refused(lambda m: m["protected"].append({"path": "a/../b", "level": "no-read"}), "segment-aware glob")
         self.refused(lambda m: m["policies"].update(other={}), "only loop_rule")
@@ -297,6 +297,104 @@ class Protected(ExampleSiteCase):
         self.assertEqual([r["level"] for r in out["rules"]], ["no-read", "read-only"])
         self.assertEqual(out["rules"][0]["source"]["package"], "example-org")
         self.assertEqual(len(Ledger(self.s).load("event")), len(Ledger(self.site()).load("event")))
+
+
+class ProtectedNoneAndLinks(ExampleSiteCase):
+    """Director, 2026-10-09: `level: none` lifts the package's own rules (most specific wins, later on a tie), never a
+    harness zone; symlinks inside a protected area are resolved at sync and their real targets are guarded too."""
+
+    def setUp(self):
+        super().setUp()
+        m = self.package / "startup.yaml"
+        m.write_text(m.read_text().replace(
+            "  - {path: projects/*/published/**, level: read-only, why: published results are never edited by an agent}\n",
+            "  - {path: projects/*/published/**, level: read-only, why: published results are never edited by an agent}\n"
+            "  - {path: projects/p-test/**, level: none, why: the test project is unprotected}\n"))
+        self.outside = self.tmp / "lab-data"
+        (self.outside / "raw").mkdir(parents=True)
+        (self.outside / "raw" / "f.txt").write_text("raw\n")
+        (self.outside / "other").mkdir()
+        (self.outside / "other" / "g.txt").write_text("other\n")
+        self.install()
+        for name in ("p1", "p-test"):
+            (self.site_root / "projects" / name / "inputs").mkdir(parents=True)
+            (self.site_root / "projects" / name / "inputs" / "a.txt").write_text("x\n")
+        (self.site_root / "projects" / "p1" / "inputs" / "raw").symlink_to(self.outside / "raw")
+        (self.site_root / "projects" / "p-test" / "inputs" / "other").symlink_to(self.outside / "other")
+        (self.site_root / "projects" / "p2").mkdir()
+        (self.site_root / "projects" / "p2" / "inputs").symlink_to(self.outside)  # the area itself is a link
+        cc.generate(self.site())
+        self.s = self.site()
+
+    def pre(self, tool, role="desk", **ti):
+        data = dict(hook_event_name="PreToolUse", tool_name=tool, tool_input=ti, cwd=str(self.site_root))
+        if role != "desk":
+            data.update(agent_type=role, agent_id="a1")
+        return hook(self.s, **data)
+
+    def test_none_lifts_the_package_rules_only(self):
+        lifted = self.site_root / "projects" / "p-test" / "inputs" / "a.txt"
+        self.assertFalse(denied(self.pre("Read", file_path=str(lifted))))
+        self.assertFalse(denied(self.pre("Bash", command=f"cat {lifted}")))
+        self.assertTrue(denied(self.pre("Read", file_path=str(self.site_root / "projects" / "p1" / "inputs" / "a.txt"))))
+        ok, why = write_decision(self.s, "runner", self.site_root / "projects" / "p-test" / "published" / "x")
+        self.assertFalse(ok)
+        self.assertNotIn("protected", why, "lifted: the role scope decides")
+        ok, _ = write_decision(self.s, "runner", self.site_root / "projects" / "p-test" / "checkpoints" / "x")
+        self.assertTrue(ok)
+        ok, why = write_decision(self.s, "runner", self.site_root / "projects" / "p1" / "published" / "x")
+        self.assertIn("is protected", why)
+
+    def test_none_never_lifts_a_harness_zone(self):
+        m = self.site_root / "startup" / "startup.yaml"
+        m.chmod(0o644)
+        m.write_text(m.read_text().replace("  - {path: projects/p-test/**, level: none",
+                                           "  - {path: '**', level: none, why: all}\n  - {path: projects/p-test/**, level: none"))
+        s = self.site()
+        for rel, zone in (("state/records/event/x.json", "records"), ("config.json", None), (".claude/settings.json", "generated"),
+                          ("startup/startup.yaml", "installed package")):
+            ok, why = write_decision(s, "builder", self.site_root / rel)
+            self.assertFalse(ok, rel)
+        ok, why = write_decision(s, "desk", self.site_root / "state" / "records" / "x")
+        self.assertIn("append-only", why)
+
+    def test_most_specific_then_later_wins(self):
+        from dureh_core.protect import best_rule
+
+        rs = [{"path": "projects/*/inputs/**", "level": "no-read"}, {"path": "projects/p/inputs/**", "level": "read-only"},
+              {"path": "projects/p/inputs/**", "level": "none"}]
+        self.assertEqual(best_rule(rs, ["projects/p/inputs/a"])["level"], "none", "a tie: the later rule")
+        self.assertEqual(best_rule(rs[:2], ["projects/p/inputs/a"])["level"], "read-only", "the more specific rule")
+        self.assertEqual(best_rule(rs, ["projects/q/inputs/a"])["level"], "no-read")
+
+    def test_none_outside_any_stricter_rule_warns(self):
+        m = example_manifest()
+        m["protected"].append({"path": "modules/*/scratch/**", "level": "none"})
+        warns = check(m)
+        self.assertTrue(any("modules/*/scratch/** none` lies under no stricter rule" in w for w in warns), warns)
+        m["protected"].pop()
+        m["protected"].append({"path": "projects/p-test/**", "level": "none"})
+        self.assertEqual(check(m), [])
+
+    def test_symlink_targets_are_resolved_and_guarded(self):
+        data = json.loads((self.site_root / ".claude" / "dureh-protected-links.json").read_text())
+        targets = {(x["link"], x["target"], x["level"]) for x in data["links"]}
+        self.assertIn(("projects/p1/inputs/raw", str((self.outside / "raw").resolve()), "no-read"), targets)
+        self.assertIn(("projects/p2/inputs", str(self.outside.resolve()), "no-read"), targets)
+        self.assertFalse(any(x["link"].startswith("projects/p-test/") for x in data["links"]), "a lifted link is not stored")
+        real = self.outside / "raw" / "f.txt"
+        for role in ("desk", "builder"):
+            self.assertTrue(denied(self.pre("Read", role, file_path=str(real))), role)
+            self.assertTrue(denied(self.pre("Grep", role, pattern="x", path=str(self.outside / "raw"))), role)
+            self.assertTrue(denied(self.pre("Bash", role, command=f"head {real}")), role)
+        self.assertTrue(denied(self.pre("Read", file_path=str(self.outside / "other" / "g.txt"))),
+                        "reached through p2's protected link too")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(main(["--site", str(self.site_root), "--observe", "protected", "list"]), 0)
+        self.assertIn(f"{(self.outside / 'raw').resolve()}  no-read  (link projects/p1/inputs/raw, rule projects/*/inputs/**)",
+                      buf.getvalue())
+        self.assertEqual(cc.drift(self.site()), [], "the links file is a tracked generated file")
 
 
 class NoProtection(SiteCase):
