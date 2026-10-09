@@ -268,6 +268,15 @@ dureh verify --wi <WI> --collect [RUN]   # checker, re-dispatched: record the ve
   latest failed verify run: failed check ids and commands, exit codes, the last 20 output lines of each, per-check
   log paths and the job logs, violations and missing outputs. The block is outside the 2048-byte brief budget
   (which covers the desk-written part) and capped at 4 KB.
+- **Checks environment (release 46).** A new WI worktree has no `.venv` (it is untracked). `verify --wi` picks
+  the environment itself (`workflow.checks_env_plan`, recorded as `checks_env` on the verify run): the worktree's
+  own `.venv` (`own`); else, when the worktree's `uv.lock` is byte-identical to the target main tree's (or neither
+  has one and `pyproject.toml` is identical) and the main tree's `.venv` is not stale, that environment activated
+  (`shared-venv`: `VIRTUAL_ENV`, `PATH`, `UV_PROJECT_ENVIRONMENT`, `UV_NO_SYNC=1` so a check never syncs or changes
+  it, and the worktree's package directory first on `PYTHONPATH`, as `slurm submit --module` does); else, when the
+  target has `env_rebuild`, the worktree's own `.venv` built first (`rebuild`: inside the checks job for the slurm
+  runner, exit 95 when it fails; in the verify process for the local runner); else nothing (`none`, as before). No
+  desk repair is needed for a new worktree; a stale `.venv` is still refused with the `worktree repair` hint.
 - The synchronous `verify --wi` stays for the local runner and small checks. Never run verify in the background.
 
 ## One array per step: `--each`, `--after`, `--resubmit-failed` (release 26; release 46: package labels)

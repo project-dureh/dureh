@@ -1096,14 +1096,72 @@ def wi_checks_runner(site: Site, payload: dict) -> tuple[str, str]:
     return checks_runner(site), "site"
 
 
-def _checks_env(site: Site, wi: str, cwd: Path, troot: Path) -> dict:
-    return {**site.env(), "PYTHONDONTWRITEBYTECODE": "1", "DUREH_WORK_ROOT": str(cwd),
-            "DUREH_TARGET_ROOT": str(troot), "DUREH_WI": wi}
+def checks_env_plan(site: Site, wi: str, cwd: Path, troot: Path) -> dict:
+    """The Python environment a WI's declared checks run in (release 46, company finding 2026-10-09: a new WI
+    worktree has no `.venv`, since it is untracked, so checks fell back to a bare `python`). Modes:
+
+    - `own`: the work root has its own `.venv` (or is the target's main tree): used as today.
+    - `shared-venv`: the worktree has none, the target's main tree has a usable (not stale) `.venv`, and the
+      worktree's `uv.lock` is byte-identical to the main tree's (or neither has one and `pyproject.toml` is
+      identical): the checks run with that environment activated (VIRTUAL_ENV, PATH, UV_PROJECT_ENVIRONMENT,
+      UV_NO_SYNC=1 so nothing syncs or changes it) and the worktree's package directory first on PYTHONPATH, so the
+      code under test is the worktree's. The same rule as `slurm submit --module` (exectree env mode `shared-venv`).
+    - `rebuild`: the dependencies differ (or the main tree has no usable env) and the target has `env_rebuild`:
+      the checks first build the worktree's own `.venv` with it (inside the checks job for the slurm runner, in
+      the verify process for the local runner), then run with it activated.
+    - `none`: nothing to activate (no env_rebuild, no main-tree env): as before release 46.
+    No desk repair is needed for a new worktree in any mode; a stale `.venv` is still refused (`_check_venv`)."""
+    from .exectree import package_dir
+
+    cwd, troot = Path(cwd), Path(troot)
+    if cwd.resolve() == troot.resolve() or (cwd / ".venv").exists():
+        return {"mode": "own", "exports": {}}
+    main = troot / ".venv"
+    lock, live = cwd / "uv.lock", troot / "uv.lock"
+    same_deps = (lock.is_file() and live.is_file() and lock.read_bytes() == live.read_bytes()) or (
+        not lock.exists() and not live.exists() and (cwd / "pyproject.toml").is_file()
+        and (troot / "pyproject.toml").is_file()
+        and (cwd / "pyproject.toml").read_bytes() == (troot / "pyproject.toml").read_bytes())
+    if main.is_dir() and not stale_venv(troot) and same_deps:
+        return {"mode": "shared-venv", "venv": str(main),
+                "exports": {"VIRTUAL_ENV": str(main), "UV_PROJECT_ENVIRONMENT": str(main), "UV_NO_SYNC": "1",
+                            "PATH_PREPEND": str(main / "bin"), "PYTHONPATH_PREPEND": str(package_dir(cwd))}}
+    from .paths import wi_target
+
+    target = wi_target(site, wi)
+    cmd = _env_rebuild_command(site, target) if target else None
+    if cmd:
+        venv = cwd / ".venv"
+        return {"mode": "rebuild", "venv": str(venv), "command": cmd, "target": target,
+                "exports": {"VIRTUAL_ENV": str(venv), "PATH_PREPEND": str(venv / "bin")}}
+    return {"mode": "none", "exports": {}}
 
 
-def _run_checks_local(site: Site, wi: str, cwd: Path, troot: Path, checks: list[str], timeout: int) -> list[dict]:
+def _apply_exports(env: dict, exports: dict) -> dict:
+    env = dict(env)
+    for k, v in exports.items():
+        if k == "PATH_PREPEND":
+            env["PATH"] = os.pathsep.join([v, env.get("PATH", "")])
+        elif k == "PYTHONPATH_PREPEND":
+            env["PYTHONPATH"] = os.pathsep.join([v] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+        else:
+            env[k] = v
+    return env
+
+
+def _checks_env(site: Site, wi: str, cwd: Path, troot: Path, plan: dict | None = None) -> dict:
+    env = {**site.env(), "PYTHONDONTWRITEBYTECODE": "1", "DUREH_WORK_ROOT": str(cwd),
+           "DUREH_TARGET_ROOT": str(troot), "DUREH_WI": wi}
+    return _apply_exports(env, (plan or {}).get("exports") or {})
+
+
+def _run_checks_local(site: Site, wi: str, cwd: Path, troot: Path, checks: list[str], timeout: int,
+                      plan: dict | None = None) -> list[dict]:
     results = []
-    env = _checks_env(site, wi, cwd, troot)
+    plan = plan if plan is not None else checks_env_plan(site, wi, cwd, troot)
+    if plan["mode"] == "rebuild":  # the worktree's own environment, built once before the checks
+        _repair_env(site, Path(cwd), plan["target"])
+    env = _checks_env(site, wi, cwd, troot, plan)
     for cmd in checks:
         t0 = time.monotonic()
         try:
@@ -1115,7 +1173,8 @@ def _run_checks_local(site: Site, wi: str, cwd: Path, troot: Path, checks: list[
     return results
 
 
-def _checks_script(wi: str, cwd: Path, troot: Path, site_root: Path, prefix: Path, checks: list[str]) -> str:
+def _checks_script(wi: str, cwd: Path, troot: Path, site_root: Path, prefix: Path, checks: list[str],
+                   plan: dict | None = None) -> str:
     """One job script: cd into the work root, export the same variables as the in-session run, then run each
     declared check through `sh -c` (as `subprocess.run(shell=True)` does), keeping its exit code, wall time
     and combined output in files next to the job log (`<prefix>.check<i>.{exit,ms,out}`)."""
@@ -1126,6 +1185,20 @@ def _checks_script(wi: str, cwd: Path, troot: Path, site_root: Path, prefix: Pat
              f"export PYTHONDONTWRITEBYTECODE=1 DUREH_SITE={shlex.quote(str(site_root))} DUREH_WORK_ROOT={shlex.quote(str(cwd))}"
              f" DUREH_TARGET_ROOT={shlex.quote(str(troot))} DUREH_WI={shlex.quote(wi)}",
              "unset DUREH_ACTOR DUREH_AGENT_ID", "status=0"]
+    plan = plan or {"mode": "none", "exports": {}}
+    if plan["mode"] != "none" and plan["mode"] != "own":
+        lines.append(f"# checks environment: {plan['mode']} ({plan.get('venv')})")
+    if plan["mode"] == "rebuild":  # the worktree's own .venv, built in the job (scheduler work, not session work)
+        lines += [f"echo '+ env: {plan['mode']}:' {shlex.quote(plan['command'])}",
+                  f"( unset VIRTUAL_ENV; sh -c {shlex.quote(plan['command'])} ) > {shlex.quote(f'{prefix}.env.out')} 2>&1"
+                  " || { echo 'dureh: env_rebuild failed (see .env.out)' >&2; exit 95; }"]
+    for k, v in plan.get("exports", {}).items():
+        if k == "PATH_PREPEND":
+            lines.append(f'export PATH={shlex.quote(v)}:"$PATH"')
+        elif k == "PYTHONPATH_PREPEND":
+            lines.append(f'export PYTHONPATH={shlex.quote(v)}"${{PYTHONPATH:+:$PYTHONPATH}}"')
+        else:
+            lines.append(f"export {k}={shlex.quote(v)}")
     for i, cmd in enumerate(checks, 1):
         out = shlex.quote(f"{prefix}.check{i}")
         lines += [f"echo '+ check {i}:' {shlex.quote(cmd)}", "t0=$(date +%s%N)",
@@ -1148,7 +1221,8 @@ def _submit_checks_job(site: Site, wi: str, cwd: Path, troot: Path, checks: list
     logs.mkdir(parents=True, exist_ok=True)
     prefix = logs / f"verify-{utc_compact()}"
     script = Path(f"{prefix}.sh")
-    script.write_text(_checks_script(wi, cwd, troot, site.root, prefix, checks), encoding="utf-8")
+    plan = checks_env_plan(site, wi, cwd, troot)
+    script.write_text(_checks_script(wi, cwd, troot, site.root, prefix, checks, plan), encoding="utf-8")
     script.chmod(0o755)
     wall = str(cfg.get("time") or slurm.get("time") or CHECKS_TIME_DEFAULT)
     cmd = ["sbatch", "--parsable", f"--job-name={ops.job_prefix(site)}-verify-{wi}", f"--time={wall}", f"--chdir={cwd}",
@@ -1158,7 +1232,7 @@ def _submit_checks_job(site: Site, wi: str, cwd: Path, troot: Path, checks: list
             cmd.append(f"{flag}={slurm[key]}")
     # the log options come last so a checks.sbatch_args -o/-e never moves them out of the log dir
     cmd += [str(a) for a in (cfg.get("sbatch_args") or [])] + [f"--output={prefix}.out", f"--error={prefix}.err", str(script)]
-    env = _checks_env(site, wi, cwd, troot)
+    env = _checks_env(site, wi, cwd, troot)  # the plan's exports live in the script, after `cd`
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
@@ -1168,7 +1242,8 @@ def _submit_checks_job(site: Site, wi: str, cwd: Path, troot: Path, checks: list
         fail(f"{wi}: sbatch failed for the checks job: {proc.stderr.strip()[-2000:]}; nothing was recorded. Set config"
              " checks.runner to local or run `dureh verify --wi ... --local` on a machine without a scheduler")
     return {"job_id": proc.stdout.strip().split(";")[0], "script": str(script), "prefix": str(prefix),
-            "log_out": f"{prefix}.out", "log_err": f"{prefix}.err", "command": cmd, "time": wall}
+            "log_out": f"{prefix}.out", "log_err": f"{prefix}.err", "command": cmd, "time": wall,
+            "checks_env": plan["mode"]}
 
 
 def _read_check_results(prefix: str, checks: list[str], job_id: str, state: str) -> list[dict]:
@@ -1252,8 +1327,11 @@ def verify_wi(site: Site, actor: str, wi: str, timeout: int = 1800, local: bool 
     if checks and runner == "slurm":
         results, job = _run_checks_slurm(site, wi, cwd, troot, checks)
     elif checks:
-        results = _run_checks_local(site, wi, cwd, troot, checks, timeout)
+        plan = checks_env_plan(site, wi, cwd, troot)
+        results = _run_checks_local(site, wi, cwd, troot, checks, timeout, plan)
     extra = {"runner_source": source}
+    if checks:
+        extra["checks_env"] = (job or {}).get("checks_env") or plan["mode"]
     if ctx["p"].get("checks_runner") == "local" and source == "site":
         extra["runner_note"] = "the WI chose local, but its checks no longer match checks.local_allow; ran on the site runner"
     return _record_verification(site, ctx, actor, wi, paths, head, results, runner, job, start, local=local,
@@ -1342,7 +1420,7 @@ def verify_submit(site: Site, actor: str, wi: str, timeout: int = 1800) -> dict:
     run = led.append("run", "verify", actor, wi, {
         "run_type": "verify", "status": "submitted", "runner": "slurm", "job_id": job["job_id"], "head": head,
         "checks": ctx["checks"], "script": job["script"], "prefix": job["prefix"], "log_out": job["log_out"],
-        "log_err": job["log_err"], "command": job["command"], "time": job["time"],
+        "log_err": job["log_err"], "command": job["command"], "time": job["time"], "checks_env": job["checks_env"],
         "note": f"declared checks submitted as scheduler job {job['job_id']}; collect with `verify --wi {wi} --collect`"})
     return {"submitted": True, "run": run["id"], "job_id": job["job_id"], "head": head, "script": job["script"],
             "log_out": job["log_out"], "log_err": job["log_err"],
