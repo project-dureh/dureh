@@ -42,6 +42,7 @@ DEFAULT_HOURS = 8.0
 DEFAULT_OVERTIME_HOURS = 16.0  # the session job's wall time covers the day plus this, capped at 24 h
 OVERTIME_PLAN = "day.overtime-plan"  # the overtime portion's own plan (Director, 2026-10-06)
 OVERTIME_BEGAN = "day.overtime-started"  # written by the gate at the first work unit it admits in overtime
+DAY_CHOICE = "day-choice"  # decision record type written by `day decide --option ...` (release 53)
 DAY_TYPES = ("day.planned", "day.approved", "day.decision", "day.ended", "day.overtime", OVERTIME_PLAN, OVERTIME_BEGAN,
              "day.closed")
 UNIT_TYPES = ("wi.dispatched", "checker.dispatched")  # a work unit: an agent spawn the gate admitted
@@ -280,6 +281,12 @@ def day(site: Site, events: list[dict] | None = None) -> dict:
     overtime = [e for e in cur if e["type"] == "day.overtime"]
     decisions = [{"id": e["id"], "title": e["payload"]["title"], "commit": e["payload"].get("commit")}
                  for e in cur if e["type"] == "day.decision"]
+    if decisions:  # typed blocks live on `day-choice` decision records that reference the event (release 53)
+        typed = {ref: r for r in Ledger(site).load("decision") if r["type"] == DAY_CHOICE and r["payload"].get("typed")
+                 for ref in r["refs"]}
+        for dec in decisions:
+            if dec["id"] in typed:
+                dec["decision"], dec["typed"] = typed[dec["id"]]["id"], typed[dec["id"]]["payload"]["typed"]
     out = {"plan": plan["id"], "date": plan["payload"].get("date"), "goal": plan["payload"].get("goal"),
            "decisions": decisions, **_session_clock(site, session)}
     if closed:
@@ -848,8 +855,11 @@ def _state_head(site: Site) -> str | None:
         return None
 
 
-def decide(site: Site, actor: str, title: str, choice: str, why: str, revs: list[str]) -> dict:
-    """Record a decision point (following the desk's own proposal) and commit state as a rollback point."""
+def decide(site: Site, actor: str, title: str, choice: str, why: str, revs: list[str],
+           typed: dict | None = None, by: str | None = None) -> dict:
+    """Record a decision point (following the desk's own proposal) and commit state as a rollback point.
+    With a typed block (release 53) a `day-choice` decision record is appended too, referencing the event; the
+    event keeps its shape and stays the rollback point."""
     from .state import save_state
 
     _require_on(site)
@@ -858,11 +868,17 @@ def decide(site: Site, actor: str, title: str, choice: str, why: str, revs: list
         fail(f"decisions are recorded during the working day (phase {d['phase']})")
     if not (title.strip() and choice.strip() and why.strip()):
         fail("--title, --choice and --why are required")
-    rec = Ledger(site).event("day.decision", actor, None, {"title": title, "choice": choice, "why": why,
-                                                           "revs": revs, "state_before": _state_head(site)},
-                             [d["plan"]])
+    led = Ledger(site)
+    rec = led.event("day.decision", actor, None, {"title": title, "choice": choice, "why": why,
+                                                  "revs": revs, "state_before": _state_head(site)}, [d["plan"]])
+    out = {"record": rec["id"]}
+    if typed:
+        dec = led.append("decision", DAY_CHOICE, actor, None,
+                         {"subject": title, "disposition": "record", "by": by or actor, "memo": why, "typed": typed},
+                         [rec["id"], d["plan"]])
+        out["decision"] = dec["id"]
     saved = save_state(site, f"workday decision {rec['id']}: {title}")
-    return {"record": rec["id"], "state_commit": _state_head(site) if saved.get("saved") else None,
+    return {**out, "state_commit": _state_head(site) if saved.get("saved") else None,
             "saved": saved, "rollback": "the Director decides rollbacks in the end report; after one, fix forward "
                                         "and reflect every change made since this point"}
 

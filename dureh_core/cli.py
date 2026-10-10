@@ -290,9 +290,14 @@ def cmd_ledger_add(a):
             fail(f"{a.type} events are written only by `dureh day`, `dureh site workday` and `dureh site session start`")
         rec = led.event(a.type or fail("--type is required for events"), actor, a.wi, payload, a.ref)
     elif a.kind == "decision":
-        rec = led.append("decision", a.type or "record", actor, a.wi,
-                         {"subject": a.summary or fail("--summary is required"), "disposition": a.disposition,
-                          "by": a.by, "memo": a.memo or ""})
+        payload = {"subject": a.summary or fail("--summary is required"), "disposition": a.disposition,
+                   "by": a.by, "memo": a.memo or ""}
+        if a.question or a.option or a.chosen or a.fact:
+            from .records import parse_fact, typed_block
+
+            payload["typed"] = typed_block(a.question or "", a.option or [], a.chosen or "", a.confidence, a.action,
+                                           dict(parse_fact(f) for f in a.fact or []), a.by, actor)
+        rec = led.append("decision", a.type or "record", actor, a.wi, payload, a.ref)
     else:
         fail(f"use the dedicated tool for {a.kind} records")
     _print(rec)
@@ -530,7 +535,13 @@ def cmd_day(a):
     elif c == "approve":
         _print(workday.approve(site, actor, a.memo))
     elif c == "decide":
-        _print(workday.decide(site, actor, a.title, a.choice, a.why, a.rev or []))
+        typed = None
+        if a.option or a.question or a.fact:
+            from .records import parse_fact, typed_block
+
+            typed = typed_block(a.question or a.title, a.option or [], a.choice, a.confidence, a.action,
+                                dict(parse_fact(f) for f in a.fact or []), a.by or "", actor)
+        _print(workday.decide(site, actor, a.title, a.choice, a.why, a.rev or [], typed=typed, by=a.by or actor))
     elif c == "end":
         _print(workday.end(site, actor, a.done, a.problems or "", a.overtime or [], a.early or ""))
     elif c == "overtime":
@@ -912,6 +923,15 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--disposition", default="record", choices=["approve", "revise", "defer", "reject", "record"])
     x.add_argument("--by", default="desk")
     x.add_argument("--memo")
+    x.add_argument("--question", help="typed decision: the one question answered (with --option, --chosen; "
+                                      "`--type triage` for UR triage)")
+    x.add_argument("--option", action="append", help="typed decision: one of the fixed options (repeat, two or more)")
+    x.add_argument("--chosen", help="typed decision: the option chosen")
+    x.add_argument("--confidence", default="medium", choices=["high", "medium", "low"],
+                   help="typed decision: low requires --action escalated or provisional")
+    x.add_argument("--action", default="acted", choices=["acted", "escalated", "provisional"],
+                   help="typed decision: escalated names the Director in --by; provisional is listed in the end report")
+    x.add_argument("--fact", action="append", help="typed decision: name=yes|no the choice rests on (repeatable)")
     x.add_argument("--actor")
     x = add(led, "query", cmd_ledger_query, "read-only SQL over the rebuildable index")
     x.add_argument("sql")
@@ -1069,6 +1089,14 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--choice", required=True)
     x.add_argument("--why", required=True)
     x.add_argument("--rev", action="append", help="commit(s) made for this decision (repeatable)")
+    x.add_argument("--option", action="append", help="typed decision (release 53): the fixed options --choice was "
+                                                      "picked from (repeat, two or more); also writes a `day-choice` "
+                                                      "decision record referencing the event")
+    x.add_argument("--question", help="typed decision: the question answered (default: --title)")
+    x.add_argument("--confidence", default="medium", choices=["high", "medium", "low"])
+    x.add_argument("--action", default="acted", choices=["acted", "escalated", "provisional"])
+    x.add_argument("--fact", action="append", help="typed decision: name=yes|no the choice rests on (repeatable)")
+    x.add_argument("--by", help="typed decision: who decides; required (not the desk) with --action escalated")
     x = add(dy, "end", cmd_day, "record the end report (done, problems, proposed overtime WIs); after the end time "
                                 "only when the plan is finished or a stop hit (usage share, data at risk, wall time)")
     x.add_argument("--done", required=True)
