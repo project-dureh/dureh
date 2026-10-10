@@ -73,6 +73,64 @@ def titled_text(text: str, labels: dict[str, str]) -> str:
     return "`".join(parts)
 
 
+# Typed decision block (release 53, proposals/typed-decisions-and-model-routing.md A1): one question, a fixed
+# list of options, the choice, its confidence and what was done with it. Facts are booleans only; prose stays
+# in `memo`. The block is optional on every dec-* record; records without it keep their shape.
+CONFIDENCE = ("high", "medium", "low")
+ACTIONS = ("acted", "escalated", "provisional")
+_FACT_WORDS = {"yes": True, "true": True, "1": True, "no": False, "false": False, "0": False}
+
+
+def parse_fact(text: str) -> tuple[str, bool]:
+    """`name=yes|no` (also true/false, 1/0) -> (name, bool)."""
+    name, sep, value = text.partition("=")
+    if not sep or not name.strip() or value.strip().lower() not in _FACT_WORDS:
+        fail(f"--fact takes name=yes|no, got {text!r}")
+    return name.strip(), _FACT_WORDS[value.strip().lower()]
+
+
+def typed_block(question: str, options: list[str], chosen: str, confidence: str = "medium", action: str = "acted",
+                facts: dict[str, bool] | None = None, by: str = "", actor: str = "") -> dict:
+    """Build and check a typed decision block. Rules beyond the schema: the choice is one of the options,
+    `low` confidence is never `acted`, and an `escalated` choice names in `by` someone other than the deciding
+    desk (the Director)."""
+    options = [o.strip() for o in options or []]
+    if not (question or "").strip():
+        fail("a typed decision needs --question")
+    if len(options) < 2 or len(set(options)) != len(options) or not all(options):
+        fail("a typed decision needs two or more distinct, nonempty --option values")
+    if (chosen or "").strip() not in options:
+        fail(f"--chosen {chosen!r} is not one of the options {options}")
+    if confidence not in CONFIDENCE:
+        fail(f"--confidence must be one of {', '.join(CONFIDENCE)}")
+    if action not in ACTIONS:
+        fail(f"--action must be one of {', '.join(ACTIONS)}")
+    if confidence == "low" and action == "acted":
+        fail("confidence low requires --action escalated or provisional")
+    if action == "escalated" and (not by.strip() or by.strip().lower() in {"desk", (actor or "").lower()}):
+        fail("--action escalated names the Director (or whoever decides) in --by, not the desk itself")
+    facts = dict(facts or {})
+    for name, value in facts.items():
+        if not isinstance(value, bool) or not str(name).strip():
+            fail(f"facts are booleans only: {name}={value!r}")
+    block = {"question": question.strip(), "options": options, "chosen": chosen.strip(), "confidence": confidence,
+             "action": action}
+    if facts:
+        block["facts"] = facts
+    return block
+
+
+def typed_line(typed: dict | None) -> str:
+    """One line for show/list output: `chosen (of a | b | c), confidence medium, acted; facts x=yes, y=no`."""
+    if not typed:
+        return ""
+    line = (f"{typed['chosen']} (of {' | '.join(typed['options'])}), confidence {typed['confidence']}, "
+            f"{typed['action']}")
+    if typed.get("facts"):
+        line += "; facts " + ", ".join(f"{k}={'yes' if v else 'no'}" for k, v in typed["facts"].items())
+    return line
+
+
 _RECORD_CACHE: dict[str, dict[str, tuple[tuple[int, int], str]]] = {}  # dir -> file name -> (size, mtime), json
 
 
