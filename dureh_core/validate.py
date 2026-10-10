@@ -1,5 +1,5 @@
 """A small JSON Schema subset validator (type, const, enum, required, properties,
-additionalProperties, items, minItems, minLength, pattern). Unknown keywords
+additionalProperties (false or a schema), items, minItems, minLength, pattern). Unknown keywords
 other than annotations fail so a schema cannot silently weaken."""
 from __future__ import annotations
 
@@ -59,6 +59,8 @@ def errors(value, schema: dict, where: str = "$") -> list[str]:
                 out.extend(errors(item, props[key], f"{where}.{key}"))
             elif schema.get("additionalProperties") is False:
                 out.append(f"{where}: unexpected field {key!r}")
+            elif isinstance(schema.get("additionalProperties"), dict):
+                out.extend(errors(item, schema["additionalProperties"], f"{where}.{key}"))
     return out
 
 

@@ -79,6 +79,56 @@
         },
         "binding": {
           "type": "object"
+        },
+        "typed": {
+          "description": "release 53 (typed decisions, item A1): one question, a fixed list of options, the choice, its confidence and what was done with it; facts are the booleans the choice rests on. Optional.",
+          "type": "object",
+          "required": [
+            "question",
+            "options",
+            "chosen",
+            "confidence",
+            "action"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "question": {
+              "type": "string",
+              "minLength": 1
+            },
+            "options": {
+              "type": "array",
+              "minItems": 2,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "chosen": {
+              "type": "string",
+              "minLength": 1
+            },
+            "confidence": {
+              "enum": [
+                "high",
+                "medium",
+                "low"
+              ]
+            },
+            "action": {
+              "enum": [
+                "acted",
+                "escalated",
+                "provisional"
+              ]
+            },
+            "facts": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "boolean"
+              }
+            }
+          }
         }
       }
     }
