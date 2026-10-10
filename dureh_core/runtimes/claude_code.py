@@ -1094,8 +1094,9 @@ def _has_flag(words: list[str], short: str, long: str) -> bool:
 
 def scan_roots(first: str, words: list[str]) -> list[str] | None:
     """The directories a filesystem scan starts from, or None when the command is not a scan: `find` (always),
-    `grep -r/-R`, `rg` (always), `du` (always), `ls -R`, `tree`; no path argument means the current directory."""
-    args = words[1:]
+    `grep -r/-R`, `rg` (always), `du` (always), `ls -R`, `tree`; no path argument means the current directory.
+    Shell redirections (`2>/dev/null`, `> out.txt`, `2>&1`, `< in`) are not path arguments (release 50)."""
+    args = _split_redirects(words[1:])[0]
     if first == "find":
         roots, i = [], 0
         while i < len(args) and _FIND_LEAD.match(args[i]):

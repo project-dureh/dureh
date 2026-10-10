@@ -6,7 +6,7 @@ import unittest
 from helpers import SiteCase, denied, hook
 
 from dureh_core.org import HARNESS_ROOT
-from dureh_core.runtimes.claude_code import scan_roots
+from dureh_core.runtimes.claude_code import _SEPARATORS, _segments, scan_roots
 
 
 class ScanGuard(SiteCase):
@@ -59,6 +59,36 @@ class ScanGuard(SiteCase):
         for c in ("find . -name x | head", "grep -r foo", "du", "ls -R", "rg foo"):  # the cwd is the root
             out = self.bash(c, cwd="/")
             self.assertIn("scans outside the allowed roots", self.reason(out), c)
+
+    def test_redirections_are_not_scan_roots(self):
+        """Release 50: `2>/dev/null` reached scan_roots as `2`, `>`, `/dev/null` and the guard refused
+        `grep ... -l . 2>/dev/null` for scanning /dev/null (three guard.denied records at a company, 2026-10-10)."""
+        def roots(command):
+            seg = [s for s in _segments(command) if s[0] not in _SEPARATORS][0]
+            return scan_roots(seg[0], seg)
+
+        denied_cmd = (r'grep -rn "entry_points\|entry-points" --include="*.py" -l . 2>/dev/null'
+                      r' | grep -v worktrees | grep -v "\.venv" | head -20')
+        self.assertEqual(roots(denied_cmd), ["."])
+        self.assertEqual(roots("find . -name x 2>/dev/null"), ["."])
+        self.assertEqual(roots("find . 2>/dev/null -name x"), ["."])
+        self.assertEqual(roots("rg foo 2>&1"), ["."])
+        self.assertEqual(roots("rg foo &>log src"), ["src"])
+        self.assertEqual(roots("grep -r foo src > out.txt"), ["src"])
+        self.assertEqual(roots("grep -r foo src >> out.txt 2>&1"), ["src"])
+        self.assertEqual(roots("grep -r foo src 2> err.txt"), ["src"])
+        self.assertEqual(roots("tree < in"), ["."])
+        self.assertEqual(roots("ls -R src 3>trace"), ["src"])
+        self.assertEqual(roots("du -sh /work 2>/dev/null"), ["/work"], "a redirect does not hide a real outside root")
+        # through the hook: the company command passes from a worktree, the outside root is still refused
+        out = self.bash(denied_cmd, cwd=self.wt)
+        self.assertFalse(denied(out), out)
+        out = self.bash("grep -r foo src > out.txt", cwd=self.wt)  # the write guard still sees out.txt
+        self.assertNotIn("scans outside", self.reason(out) if denied(out) else "")
+        self.assertFalse(denied(self.bash("find . -name x 2>/dev/null", cwd=self.wt)))
+        out = self.bash("du -sh /work 2>/dev/null")
+        self.assertTrue(denied(out))
+        self.assertIn("`du /work` scans outside the allowed roots", self.reason(out))
 
     def test_scans_inside_the_allowed_roots_pass(self):
         tmp = os.environ["TMPDIR"]
