@@ -81,13 +81,106 @@ def _next_id(dir_: Path, date_str: str) -> str:
     return f"UR-{date_str}-{max(numbers, default=0) + 1:02d}"
 
 
-def draft(site: Site, actor: str, finding: str, type_: str, severity: str) -> dict:
-    """Write notes/upstream/UR-<YYYYMMDD>-<NN>.md from a finding. Status starts 'open'."""
+# ------------------------------------------------------------- severity from facts (D2, release 53)
+FACTS = ("blocks_job", "loses_data", "workaround", "affects_all")
+_FACT_WORDS = {"yes": True, "true": True, "1": True, "no": False, "false": False, "0": False}
+
+
+def derive_severity(facts: dict[str, bool]) -> str:
+    """The severity the four facts imply (proposal table, D2): blocking if the problem blocks a running job or
+    loses data, or affects every WI with no workaround; degrading if there is no workaround or it affects every
+    WI; else minor. All four facts must be present."""
+    missing = [f for f in FACTS if f not in facts]
+    if missing:
+        fail(f"cannot derive severity: missing facts {', '.join(missing)}")
+    if facts["blocks_job"] or facts["loses_data"] or (facts["affects_all"] and not facts["workaround"]):
+        return "blocking"
+    if not facts["workaround"] or facts["affects_all"]:
+        return "degrading"
+    return "minor"
+
+
+def parse_facts(line: str) -> dict[str, bool]:
+    """`blocks_job=no, loses_data=no, workaround=yes, affects_all=no` (the text after `- Facts:`) -> dict of
+    bools. Unknown names and non-yes/no values fail; `?` marks a fact not yet known and is left out."""
+    out: dict[str, bool] = {}
+    for part in filter(None, (p.strip() for p in line.split(","))):
+        name, sep, value = part.partition("=")
+        name, value = name.strip(), value.strip().lower()
+        if not sep or name not in FACTS:
+            fail(f"Facts line: expected one of {', '.join(FACTS)}=yes|no, got {part!r}")
+        if value == "?":
+            continue
+        if value not in _FACT_WORDS:
+            fail(f"Facts line: {name} must be yes or no, got {value!r}")
+        out[name] = _FACT_WORDS[value]
+    return out
+
+
+def facts_line(facts: dict[str, bool]) -> str:
+    return ", ".join(f"{f}={'yes' if facts[f] else 'no'}" if f in facts else f"{f}=?" for f in FACTS)
+
+
+def _severity_word(text: str) -> str:
+    field = _field(text, "Severity")
+    return re.split(r"[\s,(]", field, maxsplit=1)[0].strip() if field else ""
+
+
+def check_facts(text: str, name: str = "upstream request") -> None:
+    """Refuse a UR whose `- Facts:` line is missing or whose derived severity disagrees with its Severity word,
+    unless the Severity line carries `(override: ...)`. Used before a UR leaves the site (send, export)."""
+    line = _field(text, "Facts")
+    if not line:
+        fail(f"{name}: no '- Facts:' line; add `- Facts: {facts_line({})}` under `- Severity:` with yes|no for"
+             " each (release 53)")
+    facts = parse_facts(line)
+    field = _field(text, "Severity")
+    word = _severity_word(text)
+    if word not in SEVERITIES:
+        fail(f"{name}: Severity must start with one of {', '.join(SEVERITIES)}: {field!r}")
+    if "(override:" in field:
+        return
+    missing = [f for f in FACTS if f not in facts]
+    if missing:
+        fail(f"{name}: Facts line leaves {', '.join(missing)} unknown; answer them yes|no, or override the Severity"
+             " with `(override: <why>)`")
+    derived = derive_severity(facts)
+    if derived != word:
+        fail(f"{name}: Severity {word} disagrees with its facts (derived {derived}); change the Severity word or "
+             f"write `- Severity: {word} (override: <why>; derived {derived})`")
+
+
+def draft(site: Site, actor: str, finding: str, type_: str, severity: str | None = None,
+          facts: dict[str, bool] | None = None, why: str | None = None) -> dict:
+    """Write notes/upstream/UR-<YYYYMMDD>-<NN>.md from a finding. Status starts 'open'.
+
+    Severity is derived from the four facts (`derive_severity`); `severity` is an override that needs `why`.
+    Without an override all four facts are required."""
     _require_desk(site, actor)
     if type_ not in TYPES:
         fail(f"--type must be one of {', '.join(TYPES)}: {type_!r}")
-    if severity not in SEVERITIES:
+    facts = dict(facts or {})
+    unknown = [f for f in facts if f not in FACTS]
+    if unknown:
+        fail(f"--fact takes {', '.join(FACTS)}; unknown: {', '.join(unknown)}")
+    missing = [f for f in FACTS if f not in facts]
+    if severity is not None and severity not in SEVERITIES:
         fail(f"--severity must be one of {', '.join(SEVERITIES)}: {severity!r}")
+    if severity is not None and not (why or "").strip():
+        fail("--severity overrides the derived severity and needs --why TEXT")
+    if severity is None and why:
+        fail("--why goes with --severity")
+    derived = derive_severity(facts) if not missing else None
+    if severity is None:
+        if missing:
+            fail("missing facts: " + ", ".join(f"--fact {f}=yes|no" for f in missing)
+                 + " (or override with --severity SEV --why TEXT)")
+        severity = derived
+        severity_field = severity
+    else:
+        why = why.strip()
+        severity_field = (f"{severity} (override: {why}; derived {derived})" if derived
+                          else f"{severity} (override: {why}; facts incomplete)")
     led = Ledger(site)
     rec = led.get("finding", finding)
     payload = rec["payload"]
@@ -106,7 +199,8 @@ def draft(site: Site, actor: str, finding: str, type_: str, severity: str) -> di
     content = (
         f"# {ur_id}: {title}\n\n"
         f"- Type: {type_}\n"
-        f"- Severity: {severity}\n"
+        f"- Severity: {severity_field}\n"
+        f"- Facts: {facts_line(facts)}\n"
         f"- Site: {site_id}, package {package_id}, harness rev {harness_rev}\n"
         f"- Finding: {finding}\n"
         f"- Status: open\n\n"
@@ -121,10 +215,12 @@ def draft(site: Site, actor: str, finding: str, type_: str, severity: str) -> di
     )
     path = dir_ / f"{ur_id}.md"
     write_create_only(path, content.encode("utf-8"), 0o644)
-    led.event("upstream.drafted", actor, None, {"ur": ur_id, "finding": finding, "type": type_,
-                                                 "severity": severity}, [finding])
-    return {"ur": ur_id, "path": str(path), "type": type_, "severity": severity, "status": "open",
-            "finding": finding}
+    payload = {"ur": ur_id, "finding": finding, "type": type_, "severity": severity, "facts": facts}
+    if why:
+        payload["override_why"] = why
+    led.event("upstream.drafted", actor, None, payload, [finding])
+    return {"ur": ur_id, "path": str(path), "type": type_, "severity": severity, "facts": facts, "status": "open",
+            "finding": finding, **({"override_why": why} if why else {})}
 
 
 def list_requests(site: Site) -> list[dict]:
@@ -302,6 +398,7 @@ def export(site: Site, actor: str, ur: str, out: str | None = None) -> dict:
     dir_ = notes_dir(site)
     path = _ur_path(dir_, ur)
     text = path.read_text(encoding="utf-8")
+    check_facts(text, ur)
 
     bundle = Path(out).expanduser() if out else dir_ / "export" / ur
     if bundle.exists():
@@ -402,11 +499,14 @@ def send(site: Site, actor: str, kind: str = "request", body_file: str | None = 
     elif body_file:
         body = Path(body_file).read_text(encoding="utf-8")
     elif kind == "request":
-        unfilled = [r for r in _open_request_files(site)
+        open_files = _open_request_files(site)
+        unfilled = [r for r in open_files
                     if any(ph in r.read_text(encoding="utf-8") for ph in TEMPLATE_PLACEHOLDERS)]
         if unfilled:
             fail("fill the template sections before sending (placeholders left in "
                  + ", ".join(p.name for p in unfilled) + ")")
+        for r in open_files:
+            check_facts(r.read_text(encoding="utf-8"), r.stem)
         body = message(site)
     else:
         fail(f"--kind {kind} needs --body-file")

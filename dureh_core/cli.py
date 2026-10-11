@@ -565,7 +565,10 @@ def cmd_upstream(a):
     site = _site(a)
     actor = _actor(a)
     if a.upstream_command == "draft":
-        _print(upstream.draft(site, actor, a.finding, a.type, a.severity))
+        from .records import parse_fact
+
+        _print(upstream.draft(site, actor, a.finding, a.type, a.severity,
+                              dict(parse_fact(f) for f in a.fact or []), a.why))
     elif a.upstream_command == "list":
         rows = upstream.list_requests(site)
         if a.json:
@@ -1132,7 +1135,13 @@ def parser() -> argparse.ArgumentParser:
     x = add(up, "draft", cmd_upstream, "write notes/upstream/UR-<date>-<n>.md from a finding (desk)")
     x.add_argument("--finding", required=True)
     x.add_argument("--type", required=True, choices=["bug", "change", "decision", "friction"])
-    x.add_argument("--severity", required=True, choices=["blocking", "degrading", "minor"])
+    x.add_argument("--fact", action="append", metavar="NAME=yes|no",
+                   help="one of blocks_job, loses_data, workaround, affects_all (repeatable; all four derive the "
+                        "severity: blocking if blocks_job or loses_data or affects_all without workaround; degrading "
+                        "if no workaround or affects_all; else minor)")
+    x.add_argument("--severity", choices=["blocking", "degrading", "minor"],
+                   help="override the derived severity; needs --why")
+    x.add_argument("--why", help="why the override (written into the Severity line)")
     x.add_argument("--actor")
     x = add(up, "list", cmd_upstream, "list upstream requests with id, type, severity, Status")
     x.add_argument("--json", action="store_true")
