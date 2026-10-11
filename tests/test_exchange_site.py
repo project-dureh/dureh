@@ -15,7 +15,7 @@ from dureh_core.records import Ledger
 from dureh_core.site import Site
 from dureh_core.util import DurehError
 
-UR = "# {id}: {title}\n\n- Type: bug\n- Severity: blocking\n- Site: s\n- Status: {status}\n\n## Request\nfix it\n\n" \
+UR = "# {id}: {title}\n\n- Type: bug\n- Severity: blocking\n- Facts: blocks_job=yes, loses_data=no, workaround=no, affects_all=no\n- Site: s\n- Status: {status}\n\n## Request\nfix it\n\n" \
      "## Impact at this site\n- Blocked WIs: {blocked}\n- Continuing WIs: none\n"
 
 

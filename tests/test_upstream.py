@@ -9,6 +9,12 @@ from dureh_core import upstream as up
 from dureh_core.records import Ledger
 from dureh_core.util import DurehError
 
+FACTS_FOR = {
+    "blocking": {"blocks_job": True, "loses_data": False, "workaround": True, "affects_all": False},
+    "degrading": {"blocks_job": False, "loses_data": False, "workaround": False, "affects_all": False},
+    "minor": {"blocks_job": False, "loses_data": False, "workaround": True, "affects_all": False},
+}
+
 
 class Upstream(SiteCase):
     def setUp(self):
@@ -21,8 +27,12 @@ class Upstream(SiteCase):
             {"summary": "the harness cannot do X", "evidence_level": "measured", "tags": ["upstream"]},
         )["id"]
 
+    def draft(self, type_, severity, actor="desk"):
+        """Draft with the four facts that derive `severity` (release 53)."""
+        return up.draft(self.s, actor, self.finding, type_, facts=FACTS_FOR[severity])
+
     def test_draft_writes_file_from_finding(self):
-        r = up.draft(self.s, "desk", self.finding, "bug", "blocking")
+        r = self.draft("bug", "blocking")
         path = Path(r["path"])
         self.assertTrue(path.is_file())
         text = path.read_text(encoding="utf-8")
@@ -35,22 +45,22 @@ class Upstream(SiteCase):
 
     def test_draft_is_desk_only(self):
         with self.assertRaisesRegex(DurehError, "only the desk"):
-            up.draft(self.s, "py-writer", self.finding, "bug", "blocking")
+            self.draft("bug", "blocking", actor="py-writer")
 
     def test_draft_rejects_bad_type_and_unknown_finding(self):
         with self.assertRaisesRegex(DurehError, "--type"):
-            up.draft(self.s, "desk", self.finding, "nope", "blocking")
+            self.draft("nope", "blocking")
         with self.assertRaises(DurehError):
-            up.draft(self.s, "desk", "fnd-does-not-exist", "bug", "blocking")
+            up.draft(self.s, "desk", "fnd-does-not-exist", "bug", facts=FACTS_FOR["blocking"])
 
     def test_second_draft_same_day_increments_sequence(self):
-        r1 = up.draft(self.s, "desk", self.finding, "bug", "blocking")
-        r2 = up.draft(self.s, "desk", self.finding, "friction", "minor")
+        r1 = self.draft("bug", "blocking")
+        r2 = self.draft("friction", "minor")
         self.assertNotEqual(r1["ur"], r2["ur"])
         self.assertEqual(r1["ur"][:11], r2["ur"][:11])  # same UR-YYYYMMDD- prefix
 
     def test_list_shows_id_type_severity_status(self):
-        r = up.draft(self.s, "desk", self.finding, "change", "degrading")
+        r = self.draft("change", "degrading")
         rows = up.list_requests(self.s)
         self.assertEqual(len(rows), 1)
         row = rows[0]
@@ -60,7 +70,7 @@ class Upstream(SiteCase):
         self.assertEqual(row["status"], "open")
 
     def test_status_transitions_and_refuses_invalid(self):
-        r = up.draft(self.s, "desk", self.finding, "bug", "blocking")
+        r = self.draft("bug", "blocking")
         ur = r["ur"]
         s1 = up.status(self.s, "desk", ur, "sent")
         self.assertEqual(s1["to"], "sent")
@@ -80,7 +90,7 @@ class Upstream(SiteCase):
         self.assertEqual(len(events), 3)
 
     def test_sent_may_land_directly(self):
-        ur = up.draft(self.s, "desk", self.finding, "bug", "blocking")["ur"]
+        ur = self.draft("bug", "blocking")["ur"]
         up.status(self.s, "desk", ur, "sent")
         with self.assertRaisesRegex(DurehError, "--rev"):
             up.status(self.s, "desk", ur, "landed")
@@ -89,7 +99,7 @@ class Upstream(SiteCase):
         self.assertIn("landed def5678", up.list_requests(self.s)[0]["status"])
 
     def test_deferred_goes_back_to_accepted_or_declined(self):
-        ur = up.draft(self.s, "desk", self.finding, "change", "minor")["ur"]
+        ur = self.draft("change", "minor")["ur"]
         up.status(self.s, "desk", ur, "sent")
         up.status(self.s, "desk", ur, "accepted")
         up.status(self.s, "desk", ur, "deferred")
@@ -107,7 +117,7 @@ class Upstream(SiteCase):
 
         from dureh_core import cli
 
-        ur = up.draft(self.s, "desk", self.finding, "change", "minor")["ur"]
+        ur = self.draft("change", "minor")["ur"]
         up.status(self.s, "desk", ur, "sent")
         up.status(self.s, "desk", ur, "accepted")
         with contextlib.redirect_stdout(io.StringIO()):
@@ -120,7 +130,7 @@ class Upstream(SiteCase):
         self.assertIn(f"{ur}\tchange\tminor\tdeferred", out.getvalue())
 
     def test_status_is_desk_only(self):
-        r = up.draft(self.s, "desk", self.finding, "bug", "blocking")
+        r = self.draft("bug", "blocking")
         with self.assertRaisesRegex(DurehError, "only the desk"):
             up.status(self.s, "py-writer", r["ur"], "sent")
 
@@ -135,7 +145,7 @@ class Upstream(SiteCase):
                                               "scope_frozen": False, "academic": False})["id"]
         finding2 = self.led.append("finding", "finding", "desk", wi,
                                     {"summary": "s2", "evidence_level": "reviewed"})["id"]
-        r = up.draft(self.s, "desk", self.finding, "bug", "blocking")
+        r = self.draft("bug", "blocking")
         ur_path = Path(r["path"])
         ur_path.write_text(ur_path.read_text(encoding="utf-8") + f"\nAlso see {finding2} and {wi}.\n",
                             encoding="utf-8")
@@ -154,12 +164,12 @@ class Upstream(SiteCase):
                                             f"{finding2}.json", f"{wi}.json"]))
 
     def test_export_is_desk_only(self):
-        r = up.draft(self.s, "desk", self.finding, "bug", "blocking")
+        r = self.draft("bug", "blocking")
         with self.assertRaisesRegex(DurehError, "only the desk"):
             up.export(self.s, "py-writer", r["ur"])
 
     def test_export_refuses_to_overwrite_existing_bundle(self):
-        r = up.draft(self.s, "desk", self.finding, "bug", "blocking")
+        r = self.draft("bug", "blocking")
         up.export(self.s, "desk", r["ur"])
         with self.assertRaises(DurehError):
             up.export(self.s, "desk", r["ur"])
