@@ -214,7 +214,8 @@ def cmd_dispatch_brief(a):
         how = (f"shares {env.get('shared')}" if env["env"] == "shared"
                else f"built with `{env.get('command')}` in {env.get('seconds')} s")
         print(f"# worktree env: {env.get('venv')} {how}")
-    print(f"# spawn subagent_type={r['subagent_type']} model={r['model']}; pass everything below as the prompt")
+    print(f"# spawn subagent_type={r['subagent_type']} model={r['model']} kind={r['kind']};"
+          " pass everything below as the prompt (pass model= to the Agent tool; the hook refuses another model)")
     print(r["brief"], end="")
 
 

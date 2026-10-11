@@ -918,6 +918,10 @@ def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], e
 
     plan_ev = next((e for e in evs if e["id"] == d["plan"]), None)
     report["jobs"] = day_jobs(site, (plan_ev["ts"], plan_ev["id"]) if plan_ev else None)  # Director 2026-10-06
+    from .ops import spawn_table
+
+    # release 54: the day's spawns per kind per model (since the plan), next to the usage units
+    report["spawns"] = spawn_table(led.events(), (plan_ev["ts"], plan_ev["id"]) if plan_ev else None)
     named = list(overtime) + [r["wi"] for r in report["jobs"]["runs"] if r.get("wi")]
     named += plan_items(plan_ev) if plan_ev else []
     named += [x["wi"] for x in (past or {}).get("items", []) + (past or {}).get("director", [])]
