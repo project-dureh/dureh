@@ -684,11 +684,15 @@ def cmd_worktree(a):
         for line in repair_all_lines(r):
             print(line)
         return
-    if a.dry_run or a.force or a.envs_only or a.no_envs or a.json:
-        fail("--dry-run, --force, --envs-only, --no-envs and --json go with --all")
+    if a.envs_only or a.no_envs:
+        fail("--envs-only and --no-envs go with --all")
     if bool(a.wi) == bool(a.target):
         fail("give exactly one of --wi (a WI worktree), --target (a target's main tree, environment only) or --all")
-    _print(worktree_repair(_site(a), _actor(a), a.wi) if a.wi else env_repair(_site(a), _actor(a), a.target))
+    if a.wi:
+        r = worktree_repair(_site(a), _actor(a), a.wi, dry_run=a.dry_run, force=a.force)
+    else:
+        r = env_repair(_site(a), _actor(a), a.target, force=a.force, dry_run=a.dry_run)
+    _print(r)
 
 
 def repair_all_lines(r: dict) -> list[str]:
@@ -703,6 +707,8 @@ def repair_all_lines(r: dict) -> list[str]:
             note = f"env {would.get(row['env'], row['env'])}" + (f": {row['env_reason']}" if row.get("env_reason") else "")
         if row.get("stale") and row["state"] != "error":
             note = f"{note} (named {row['stale']})" if note else f"named {row['stale']}"
+        if row.get("stale_lock") and row["state"] != "error":
+            note = f"{note} ({row['stale_lock']})" if note else row["stale_lock"]
         out.append(f"{row['kind']:<9} {row['name']:<40} {(row.get('target') or '-'):<18} {state:<14} {note}".rstrip())
     w, v = r["summary"]["worktrees"], r["summary"]["venvs"]
     fmt = lambda c: ", ".join(f"{n} {would.get(k, k)}" for k, n in c.items())
@@ -1191,7 +1197,8 @@ def parser() -> argparse.ArgumentParser:
     wt = sub.add_parser("worktree", help="WI worktrees").add_subparsers(dest="worktree_command", required=True)
     x = add(wt, "repair", cmd_worktree, "desk: re-link a WI worktree after the site moved (or prune it if its directory is"
             " gone) and rebuild a stale .venv (recreated from scratch) or create a missing one with the configured"
-            " env_rebuild; --target rebuilds a main tree's .venv;"
+            " env_rebuild; a .venv is stale when its interpreter is gone or (env_rebuild a `uv sync`) when"
+            " `uv sync --check` says it does not match the lock; --target rebuilds a main tree's .venv;"
             " --all does both for every worktree and environment of the site (after a move or rename);"
             " --prune-stale lists (and with --remove deletes) the .venv.stale-* copies a rebuild left behind")
     x.add_argument("--wi")
@@ -1201,12 +1208,13 @@ def parser() -> argparse.ArgumentParser:
                    " worktrees, exec-tree siblings); stale ones are rebuilt and a worktree's missing one is created,"
                    " each item ends repaired, pruned, rebuilt, unchanged, skipped or error, and one"
                    " worktree.repair-all record holds the counts")
-    x.add_argument("--dry-run", action="store_true", help="with --all: show what would change; nothing is written")
+    x.add_argument("--dry-run", action="store_true", help="show what would change (the lock check still runs; the"
+                   " rebuild does not); nothing is written")
     x.add_argument("--envs-only", action="store_true", help="with --all: only the environments (no git repair)")
     x.add_argument("--no-envs", action="store_true", help="with --all: only the worktrees (no environment check or"
                    " rebuild, for example without network)")
-    x.add_argument("--force", action="store_true", help="with --all: rebuild every environment that has an"
-                   " env_rebuild, stale or not")
+    x.add_argument("--force", action="store_true", help="rebuild the environment(s) of --wi, --target or --all"
+                   " that have an env_rebuild, stale or not")
     x.add_argument("--prune-stale", action="store_true", help="with --all or --target: list the .venv.stale-<time>"
                    " copies (a rebuild moves the old environment aside; the rename step left some) under worktrees/*,"
                    " the main trees and scratch/exec, with their size; nothing is removed without --remove; a plain"
@@ -1214,7 +1222,7 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--remove", action="store_true", help="with --prune-stale: remove the copies (one env.repaired"
                    " record each)")
     x.add_argument("--json", action="store_true", help="with --all or --prune-stale: print the items and summary as"
-                   " JSON")
+                   " JSON (--wi and --target always print JSON)")
     x.add_argument("--actor")
     pr = sub.add_parser("protected", help="the package's protected paths (read-only, no-read)").add_subparsers(
         dest="protected_command", required=True)

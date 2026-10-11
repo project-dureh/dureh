@@ -302,11 +302,12 @@ def _exec_venvs(site: Site) -> list[tuple[Path, Path, str | None]]:
 
 def _env_state(r: dict) -> dict:
     """A repair-all row's state from a _repair_env result."""
+    lock = {"stale_lock": r["stale_lock"]} if r.get("stale_lock") else {}
     if r["env"] == "rebuilt":
-        return {"state": "rebuilt", "command": r.get("command"), "stale": r.get("stale_interpreter"),
+        return {"state": "rebuilt", "command": r.get("command"), "stale": r.get("stale_interpreter"), **lock,
                 **({"detail": "created (no .venv)"} if r.get("missing") else {})}
     if r["env"] == "stale":
-        return {"state": "skipped", "reason": "no env_rebuild", "stale": r.get("stale_interpreter")}
+        return {"state": "skipped", "reason": "no env_rebuild", "stale": r.get("stale_interpreter"), **lock}
     return {"state": "unchanged"}
 
 
@@ -369,6 +370,8 @@ def worktree_repair_all(site: Site, actor: str, dry_run: bool = False, envs: boo
                     row["env_reason"] = "created (no .venv)"
                 if r.get("stale_interpreter"):
                     row["stale"] = r["stale_interpreter"]
+                if r.get("stale_lock"):
+                    row["stale_lock"] = r["stale_lock"]
         if not dry_run:
             for target, root in git_repos:
                 if not _registered_worktrees(root):
@@ -1122,8 +1125,11 @@ def provision_worktree_env(site: Site, wt: Path, target: str) -> dict:
         return {"env": "none"}
     venv = wt / ".venv"
     troot = target_root(site, target)
+    main_env = None
     if troot is not None and (troot / ".venv").is_dir() and not stale_venv(troot) and _same_deps(wt, troot):
-        return share_worktree_env(site, wt, troot)
+        main_env = _main_env_lock_state(site, troot, target)  # release 51: a lock-stale main env is not shared
+        if main_env is None:
+            return share_worktree_env(site, wt, troot)
     timeout = env_rebuild_timeout(site)
     t0 = time.monotonic()
     try:
@@ -1146,7 +1152,7 @@ def provision_worktree_env(site: Site, wt: Path, target: str) -> dict:
             kept = f"; the partial environment was moved to {aside}"
         fail(f"environment build `{cmd}` in {wt} failed ({err}){kept}")
     return {"env": "rebuilt", "env_mode": "rebuild", "venv": str(venv), "command": cmd,
-            "seconds": round(time.monotonic() - t0, 1)}
+            "seconds": round(time.monotonic() - t0, 1), **({"main_env": main_env} if main_env else {})}
 
 
 def _env_rebuild_command(site: Site, target: str) -> str | None:
@@ -1155,6 +1161,51 @@ def _env_rebuild_command(site: Site, target: str) -> str | None:
             if entry.get("path") == target and entry.get("env_rebuild"):
                 return entry["env_rebuild"]
     return (site.config.get("env") or {}).get("rebuild")
+
+
+LOCK_CHECK_TIMEOUT = 120
+_UV_SYNC_RE = re.compile(r"^\s*(?:cd\s+(?:'[^']*'|\"[^\"]*\"|\S+)\s*&&\s*)?(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
+                         r"uv\s+sync\b(?![^\n]*(?:&&|\|\||[;|]))")
+
+
+def lock_check_command(rebuild: str | None) -> str | None:
+    """`<env_rebuild> --check` (`uv sync --check` exits non-zero when the environment does not match the lock)
+    when env_rebuild is one `uv sync ...` invocation, optionally after a `cd X &&` and VAR=value prefixes; None
+    for anything else (another tool, or a chain the flag could not be appended to)."""
+    if not rebuild or not _UV_SYNC_RE.match(rebuild):
+        return None
+    return f"{rebuild.strip()} --check"
+
+
+def run_lock_check(cmd: str, root: Path, env: dict, timeout: int = LOCK_CHECK_TIMEOUT) -> tuple[int, str]:
+    """Run the lock check command in `root` (tests replace this): (exit code, combined output)."""
+    proc = subprocess.run(cmd, shell=True, cwd=root, capture_output=True, text=True, env=env, timeout=timeout)
+    return proc.returncode, (proc.stderr or "") + (proc.stdout or "")
+
+
+def lock_stale(site: Site, root: Path, target: str, venv: Path | None = None) -> str | None:
+    """Release 51 (UR-20261011-01): why the environment of `root` (default <root>/.venv) does not match the
+    target's lock, or None when it does or the check is unavailable (the target's env_rebuild is not a `uv sync`;
+    see lock_check_command). An environment can be valid for venv_stale (its interpreter is where it says) and
+    still lack packages or extras the lock declares; `uv sync --check` is the installed-vs-lock question, run in
+    `root` without the caller's uv environment and without UV_NO_SYNC, bounded by LOCK_CHECK_TIMEOUT. The reason
+    is the exit code and the last lines of output. One call per environment per repair or plan."""
+    cmd = lock_check_command(_env_rebuild_command(site, target))
+    if cmd is None:
+        return None
+    env = _uv_free_env(site)
+    if venv is not None and Path(venv) != Path(root) / ".venv":
+        env.update(VIRTUAL_ENV=str(venv), UV_PROJECT_ENVIRONMENT=str(venv))
+    try:
+        rc, out = run_lock_check(cmd, Path(root), env, LOCK_CHECK_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return f"`{cmd}` timed out after {LOCK_CHECK_TIMEOUT} s"
+    except OSError as exc:
+        return f"`{cmd}` could not run: {exc}"
+    if rc == 0:
+        return None
+    tail = " / ".join(ln.strip() for ln in out.strip().splitlines()[-3:] if ln.strip())
+    return f"`{cmd}` exit {rc}" + (f": {tail}" if tail else "")
 
 
 def _repair_env(site: Site, root: Path, target: str, venv: Path | None = None, force: bool = False,
@@ -1169,18 +1220,38 @@ def _repair_env(site: Site, root: Path, target: str, venv: Path | None = None, f
 
     Release 47: for a WI worktree's `.venv` (with `share`), a missing environment or a shared-form one that is
     stale (or forced) is provisioned again as `dispatch brief` does (provision_worktree_env: the shared form when
-    the dependencies still match, else `env_rebuild`); an own environment is rebuilt as before."""
+    the dependencies still match, else `env_rebuild`); an own environment is rebuilt as before.
+
+    Release 51 (UR-20261011-01): an environment is also stale when it does not match the lock (lock_stale: `uv
+    sync --check`), so one lacking an extra the lock declares is rebuilt alone, without `--force --all`. The
+    result records `stale_interpreter`, `stale_lock` and `lock_check` (ok, stale, unavailable for a non-uv
+    env_rebuild, shared for a shared-form worktree environment)."""
     venv = Path(venv) if venv is not None else Path(root) / ".venv"
     stale = venv_stale(venv)
     missing = not venv.exists()
-    if not stale and not missing and not force:
-        return {"env": "ok"}
     cmd = _env_rebuild_command(site, target)
+    # release 51: the lock-vs-installed check, once per environment, only when it decides anything (the
+    # interpreter check passed, not forced) and the environment is its own (the shared form carries no packages:
+    # its main tree's own row or `--target` answers for it)
+    lock_check: str | None = None
+    lock = None
+    if force or stale or missing:
+        pass
+    elif shared_env_of(venv) is None:
+        lock_check = "unavailable" if lock_check_command(cmd) is None else "ok"
+        if lock_check == "ok":
+            lock = lock_stale(site, root, target, venv=venv)
+            lock_check = "stale" if lock else "ok"
+    else:
+        lock_check = "shared"
+    stale_info = {"stale_interpreter": stale, "stale_lock": lock, **({"lock_check": lock_check} if lock_check else {})}
+    if not stale and not lock and not missing and not force:
+        return {"env": "ok", **({"lock_check": lock_check} if lock_check else {})}
     if (share and cmd and _env_target(target) and venv == Path(root) / ".venv"
             and Path(root).parent == site.worktrees and (missing or shared_env_of(venv) is not None)):
         extra = {"missing": True} if missing else {}
         if dry_run:
-            return {"env": "rebuilt", "command": cmd, "stale_interpreter": stale, "dry_run": True, **extra}
+            return {"env": "rebuilt", "command": cmd, **stale_info, "dry_run": True, **extra}
         aside = None
         if not missing:
             aside = venv.with_name(f"{venv.name}.stale-{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}")
@@ -1196,16 +1267,16 @@ def _repair_env(site: Site, root: Path, target: str, venv: Path | None = None, f
         if aside is not None:
             extra["moved_aside"] = f"{aside} (removed)"
         return {"env": "rebuilt", "command": r.get("command") or f"shared {r.get('shared')}",
-                "stale_interpreter": stale, "env_mode": r["env_mode"], **extra}
+                **stale_info, "env_mode": r["env_mode"], **extra}
     if not cmd:
         if missing:
             return {"env": "ok"}  # a target without env_rebuild may not use a virtualenv
-        return {"env": "stale", "stale_interpreter": stale,
+        return {"env": "stale", **stale_info,
                 "hint": f"set `env_rebuild` on the {target} entry in config.json (or `env.rebuild`), for example"
                         " \"uv sync --frozen --all-groups\", then run the repair again; the Director owns config.json"}
     extra = {"missing": True} if missing else {}
     if dry_run:
-        return {"env": "rebuilt", "command": cmd, "stale_interpreter": stale, "dry_run": True, **extra}
+        return {"env": "rebuilt", "command": cmd, **stale_info, "dry_run": True, **extra}
     aside = None
     if venv.exists():  # stale, or forced: the rebuild starts from nothing either way
         aside = venv.with_name(f"{venv.name}.stale-{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}")
@@ -1232,18 +1303,19 @@ def _repair_env(site: Site, root: Path, target: str, venv: Path | None = None, f
         shutil.rmtree(leftover, ignore_errors=True)
     if aside:
         extra["moved_aside"] = f"{aside} (removed)"
-    return {"env": "rebuilt", "command": cmd, "stale_interpreter": stale, **extra}
+    return {"env": "rebuilt", "command": cmd, **stale_info, **extra}
 
 
-def env_repair(site: Site, actor: str, target: str) -> dict:
-    """Rebuild the virtualenv of a target's main tree (for example after the site moved)."""
+def env_repair(site: Site, actor: str, target: str, force: bool = False, dry_run: bool = False) -> dict:
+    """Rebuild the virtualenv of a target's main tree (for example after the site moved, or when it no longer
+    matches the lock); `force` rebuilds it stale or not, `dry_run` only reports (release 51)."""
     if site.org.role(actor).kind != "desk":
         fail("only the desk repairs environments")
     root = target_root(site, target)
     if root is None or not root.is_dir():
         fail(f"unknown target {target!r}")
-    r = {"target": target, **_repair_env(site, root, target)}
-    if r["env"] == "rebuilt":
+    r = {"target": target, **_repair_env(site, root, target, force=force, dry_run=dry_run)}
+    if r["env"] == "rebuilt" and not dry_run:
         Ledger(site).event("env.repaired", actor, None, {k: v for k, v in r.items() if k != "hint"})
     return r
 
@@ -1312,6 +1384,16 @@ def _same_deps(cwd: Path, troot: Path) -> bool:
     return not lock.exists() and not live.exists() and a.is_file() and b.is_file() and a.read_bytes() == b.read_bytes()
 
 
+def _main_env_lock_state(site: Site, troot: Path, target: str | None) -> str | None:
+    """`lock-stale: <reason>` when the target main tree's `.venv` does not match its lock (release 51,
+    UR-20261011-01: a byte-identical lock proved nothing about what was installed, so `verify` shared an
+    environment missing an extra), else None (it matches, or no `uv sync` env_rebuild to ask)."""
+    if not _env_target(target):
+        return None
+    reason = lock_stale(site, troot, target)
+    return f"lock-stale: {reason}" if reason else None
+
+
 def _env_target(target: str | None) -> bool:
     """A target whose code runs in its own Python environment: a module or a project tree."""
     return bool(target) and target.startswith(("modules/", "projects/"))
@@ -1328,7 +1410,9 @@ def checks_env_plan(site: Site, wi: str, cwd: Path, troot: Path) -> dict:
     - `shared-venv`: the worktree has no own environment (none, or the shared form `dispatch brief` gives it since
       release 47, see share_worktree_env), the target's main tree has a usable (not stale) `.venv`, and the
       worktree's `uv.lock` is byte-identical to the main tree's (or neither has one and `pyproject.toml` is
-      identical): the checks run with that environment activated (VIRTUAL_ENV, PATH, UV_PROJECT_ENVIRONMENT,
+      identical), and (release 51) that `.venv` matches the lock (lock_stale: `uv sync --check`; a main env
+      lacking an extra falls through to `rebuild`, with `main_env: "lock-stale: ..."` in the plan): the checks run
+      with that environment activated (VIRTUAL_ENV, PATH, UV_PROJECT_ENVIRONMENT,
       UV_NO_SYNC=1 so nothing syncs or changes it) and the worktree's package directory first on PYTHONPATH, so the
       code under test is the worktree's. The same rule as `slurm submit --module` (exectree env mode `shared-venv`).
     - `rebuild`: the dependencies differ (or the main tree has no usable env) and the target has `env_rebuild`:
@@ -1353,16 +1437,19 @@ def checks_env_plan(site: Site, wi: str, cwd: Path, troot: Path) -> dict:
     if own.exists() and not shared_form:
         return _own_plan(own)
     main = troot / ".venv"
+    main_env = None
     if main.is_dir() and not stale_venv(troot) and _same_deps(cwd, troot):
-        return {"mode": "shared-venv", "venv": str(main),
-                **({"worktree_env": "shared"} if shared_form else {}),
-                "exports": {"VIRTUAL_ENV": str(main), "UV_PROJECT_ENVIRONMENT": str(main), "UV_NO_SYNC": "1",
-                            "PATH_PREPEND": str(main / "bin"), "PYTHONPATH_PREPEND": str(package_dir(cwd))}}
+        main_env = _main_env_lock_state(site, troot, target)  # release 51: a lock-stale main env is not shared
+        if main_env is None:
+            return {"mode": "shared-venv", "venv": str(main),
+                    **({"worktree_env": "shared"} if shared_form else {}),
+                    "exports": {"VIRTUAL_ENV": str(main), "UV_PROJECT_ENVIRONMENT": str(main), "UV_NO_SYNC": "1",
+                                "PATH_PREPEND": str(main / "bin"), "PYTHONPATH_PREPEND": str(package_dir(cwd))}}
     if cmd is None and target:
         cmd = _env_rebuild_command(site, target)  # release 46 behaviour for other targets
     if cmd:
         return {"mode": "rebuild", "venv": str(own), "command": cmd, "target": target,
-                **({"replace": True} if shared_form else {}),
+                **({"replace": True} if shared_form else {}), **({"main_env": main_env} if main_env else {}),
                 "exports": {"VIRTUAL_ENV": str(own), "PATH_PREPEND": str(own / "bin")}}
     if shared_form:  # env_rebuild was removed from config after the dispatch: the shared form as it stands
         return _own_plan(own)
@@ -1379,13 +1466,15 @@ def _own_plan(venv: Path) -> dict:
                         "PATH_PREPEND": str(venv / "bin")}}
 
 
-def _check_env_present(site: Site, wi: str, cwd: Path, troot: Path) -> None:
-    """Release 47 (UR-20261009-01): refuse checks that would run a bare python for a target with env_rebuild."""
+def _check_env_present(site: Site, wi: str, cwd: Path, troot: Path) -> dict:
+    """Release 47 (UR-20261009-01): refuse checks that would run a bare python for a target with env_rebuild.
+    Returns the plan, so a verify computes (and lock-checks) it once."""
     plan = checks_env_plan(site, wi, cwd, troot)
     if plan["mode"] == "missing":
         fail(f"{wi}: worktree env missing: run worktree repair (`dureh worktree repair --wi {wi}`, or `--target"
              f" {plan['target']}` for the main tree {troot}); {plan['target']} has env_rebuild but {cwd} has no .venv"
              " and no shared environment applies, so the checks would run a bare python. Nothing was recorded.")
+    return plan
 
 
 def _apply_exports(env: dict, exports: dict) -> dict:
@@ -1462,7 +1551,8 @@ def _checks_script(wi: str, cwd: Path, troot: Path, site_root: Path, prefix: Pat
     return "\n".join(lines) + "\n"
 
 
-def _submit_checks_job(site: Site, wi: str, cwd: Path, troot: Path, checks: list[str]) -> dict:
+def _submit_checks_job(site: Site, wi: str, cwd: Path, troot: Path, checks: list[str],
+                       plan: dict | None = None) -> dict:
     """Submit the declared checks as one Slurm job (cwd = the work root, the site's environment). Returns the job
     description: {job_id, script, prefix, log_out, log_err, command, time}. Nothing is recorded here."""
     from . import ops
@@ -1474,7 +1564,7 @@ def _submit_checks_job(site: Site, wi: str, cwd: Path, troot: Path, checks: list
     logs.mkdir(parents=True, exist_ok=True)
     prefix = logs / f"verify-{utc_compact()}"
     script = Path(f"{prefix}.sh")
-    plan = checks_env_plan(site, wi, cwd, troot)
+    plan = plan if plan is not None else checks_env_plan(site, wi, cwd, troot)
     script.write_text(_checks_script(wi, cwd, troot, site.root, prefix, checks, plan), encoding="utf-8")
     script.chmod(0o755)
     wall = str(cfg.get("time") or slurm.get("time") or CHECKS_TIME_DEFAULT)
@@ -1516,13 +1606,14 @@ def _read_check_results(prefix: str, checks: list[str], job_id: str, state: str)
     return results
 
 
-def _run_checks_slurm(site: Site, wi: str, cwd: Path, troot: Path, checks: list[str]) -> tuple[list[dict], dict]:
+def _run_checks_slurm(site: Site, wi: str, cwd: Path, troot: Path, checks: list[str],
+                      plan: dict | None = None) -> tuple[list[dict], dict]:
     """Submit the declared checks as one Slurm job, wait for it like `slurm wait`, and read the per-check results
     back. Returns (results, job)."""
     from . import cluster, ops
 
     cfg = site.config.get("checks") or {}
-    job = _submit_checks_job(site, wi, cwd, troot, checks)
+    job = _submit_checks_job(site, wi, cwd, troot, checks, plan)
     job_id = job["job_id"]
     limit = cluster.parse_time(job["time"])
     wait = int(cfg.get("wait") or ((limit.total_seconds() if limit else 3600) + 900))
@@ -1571,8 +1662,7 @@ def verify_wi(site: Site, actor: str, wi: str, timeout: int = 1800, local: bool 
         return _verify_bundle(site, actor, wi, start)
     cwd, troot, checks = ctx["cwd"], ctx["troot"], ctx["checks"]
     _check_venv(wi, cwd)
-    if checks:
-        _check_env_present(site, wi, cwd, troot)
+    plan = _check_env_present(site, wi, cwd, troot) if checks else None  # one plan (and lock check) per verify
     paths, head = changed_paths(site, wi)
     # release 27: checks are a scheduler job, not session work; release 45: unless the WI chose the local runner
     runner, source = ("local", "override") if local else wi_checks_runner(site, ctx["p"])
@@ -1580,9 +1670,8 @@ def verify_wi(site: Site, actor: str, wi: str, timeout: int = 1800, local: bool 
         timeout = int((site.config.get("checks") or {}).get("local_timeout") or LOCAL_TIMEOUT_DEFAULT)
     results, job = [], None
     if checks and runner == "slurm":
-        results, job = _run_checks_slurm(site, wi, cwd, troot, checks)
+        results, job = _run_checks_slurm(site, wi, cwd, troot, checks, plan)
     elif checks:
-        plan = checks_env_plan(site, wi, cwd, troot)
         results = _run_checks_local(site, wi, cwd, troot, checks, timeout, plan)
     extra = {"runner_source": source}
     if checks:
@@ -1670,9 +1759,9 @@ def verify_submit(site: Site, actor: str, wi: str, timeout: int = 1800) -> dict:
              f" run `dureh verify --wi {wi} --collect` {ops.job_end_phrase(site)}")
     cwd, troot = ctx["cwd"], ctx["troot"]
     _check_venv(wi, cwd)
-    _check_env_present(site, wi, cwd, troot)
+    plan = _check_env_present(site, wi, cwd, troot)
     _, head = changed_paths(site, wi)
-    job = _submit_checks_job(site, wi, cwd, troot, ctx["checks"])
+    job = _submit_checks_job(site, wi, cwd, troot, ctx["checks"], plan)
     run = led.append("run", "verify", actor, wi, {
         "run_type": "verify", "status": "submitted", "runner": "slurm", "job_id": job["job_id"], "head": head,
         "checks": ctx["checks"], "script": job["script"], "prefix": job["prefix"], "log_out": job["log_out"],
