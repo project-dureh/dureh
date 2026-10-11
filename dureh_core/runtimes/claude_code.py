@@ -518,7 +518,9 @@ def _claude_md(site: Site) -> str:
               f" Several work items at once: `{dureh} wi show --wi A --wi B --summary`. Never wait for a scheduler job in a polling loop:"
               + _no_poll_rule(site, dureh) +
               f" A NEW module starts with `{dureh} site new-module --id <id> --package <pkg> [--depends <site module>] [--source <dir>]`"
-              " (standard skeleton, registered with env_rebuild, a WI target at once; site modules it imports are pinned by git revision).",
+              " (standard skeleton, registered with env_rebuild, a WI target at once; site modules it imports are pinned by git revision);"
+              f" a module nobody works on any more is retired with `{dureh} site retire-module --id <id> [--dry-run] [--force]` (release 55:"
+              " refused while a WI, lane or worktree is open on it or its checkout is dirty or unpushed; records the re-link command).",
               f"10. A harness problem (not a site problem) is a finding tagged `upstream`; turn it into a request with `{dureh} upstream draft --finding <id> --type bug|change|decision|friction --fact blocks_job=yes|no --fact loses_data=yes|no --fact workaround=yes|no --fact affects_all=yes|no` (severity is derived; `--severity SEV --why TEXT` overrides it)."
               f" Track it with `{dureh} upstream list|status|export`. The Director forwards it; never work around the harness or send anything yourself."
               f" Whenever you report to upstream (new requests, replies received, or a status change), finish by running `{dureh} upstream message`"
