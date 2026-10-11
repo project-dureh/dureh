@@ -291,6 +291,11 @@ dureh verify --wi <WI> --collect [RUN]   # checker, re-dispatched: record the ve
   target has `env_rebuild`, the worktree's own `.venv` built first (`rebuild`: inside the checks job for the slurm
   runner, exit 95 when it fails; in the verify process for the local runner); else nothing (`none`, as before). No
   desk repair is needed for a new worktree; a stale `.venv` is still refused with the `worktree repair` hint.
+  Release 51 (UR-20261011-01): a byte-identical lock proves nothing about what is installed, so a main tree's
+  `.venv` is shared only when it also matches the lock: for a target whose `env_rebuild` is one `uv sync ...`
+  command, the plan runs it plus `--check` in the main tree (`workflow.lock_stale`, once per verify, without
+  `UV_NO_SYNC`); a non-zero exit (an extra not installed, for example) falls through to `rebuild`, with the reason
+  as `main_env: "lock-stale: ..."` in the plan. A non-uv `env_rebuild` cannot be asked: the rule stays as above.
   Since release 48 (company finding d381ae6b) `own` activates that `.venv` the same way (`VIRTUAL_ENV`, `PATH`,
   `UV_PROJECT_ENVIRONMENT`, `UV_NO_SYNC=1`; no `PYTHONPATH` change), for the local runner and in the checks job
   script, so a check calling a bare `python` runs the work root's environment, not the system python. This holds
@@ -301,7 +306,8 @@ dureh verify --wi <WI> --collect [RUN]   # checker, re-dispatched: record the ve
   has `env_rebuild` its `.venv` before the brief returns (`workflow.provision_worktree_env`); a target without
   `env_rebuild` gets nothing, as before.
   - **Shared form** when the worktree's `uv.lock` is byte-identical to the main tree's (the `shared-venv` rule
-    above) and the main tree's `.venv` exists and is not stale: `<worktree>/.venv` is a small virtualenv of the same
+    above) and the main tree's `.venv` exists and is not stale (release 51: nor lock-stale, same `uv sync --check`
+    as the checks plan; the dispatch result then says `main_env`): `<worktree>/.venv` is a small virtualenv of the same
     base interpreter (`python -m venv --without-pip`, no network, about a second) whose site-packages holds one
     `_dureh_shared.pth`: the worktree's package directory first, then the main tree's site-packages (its own
     `.pth` files included, so editable installs of other modules resolve). `.venv/bin/python`, `source
@@ -327,7 +333,10 @@ dureh verify --wi <WI> --collect [RUN]   # checker, re-dispatched: record the ve
     replaces the shared form with the worktree's own `.venv` (`rm -rf` of it in the checks job, before
     `env_rebuild`). The shared form is stale when its main env is stale or gone or the worktree moved; `verify`
     refuses it with the `worktree repair` hint, and `worktree repair --wi`/`--all` provisions it again (shared
-    when the locks match and the main env is usable, else `env_rebuild`), recorded with `env_mode`.
+    when the locks match and the main env is usable, else `env_rebuild`), recorded with `env_mode`. A main
+    tree's `.venv` that no longer matches its lock is rebuilt alone by `worktree repair --target <target>`
+    (release 51: `stale_lock` in the result; `--force` and `--dry-run` go with `--target` and `--wi`), see
+    docs/workday.md "worktree repair".
   - **No environment (release 47).** A module or project target with `env_rebuild` whose checks would run in
     its main tree without a `.venv` (no worktree) is refused: `worktree env missing: run worktree repair`,
     nothing recorded, instead of running a bare python.
