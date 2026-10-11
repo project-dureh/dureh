@@ -421,6 +421,11 @@ def cmd_site(a):
     elif a.site_command == "new-module":
         _print(sitelinks.new_module(site, _actor(a), a.id, a.package, a.source, a.python, a.depends or [],
                                     a.env_rebuild))
+    elif a.site_command == "retire-module":
+        out = sitelinks.retire_module(site, _actor(a), a.id, a.dry_run, a.force)
+        _print(out)
+        if out.get("summary"):
+            print(out["summary"])
     else:
         _print(sitelinks.link_project(site, _actor(a), a.name, a.source))
 
@@ -1038,6 +1043,13 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--python", help="python pin (default: an existing module's .python-version, else 3.11)")
     x.add_argument("--depends", action="append", help="site module it imports; pinned by git revision (repeat)")
     x.add_argument("--env-rebuild", default="uv sync --frozen --all-groups --all-extras")
+    x.add_argument("--actor")
+    x = add(st, "retire-module", cmd_site, "retire a site module (release 55): refuse live work, a dirty or unpushed "
+            "checkout and structural references (--force), record site.module-retired with the re-link command, then "
+            "remove the config entry, final WIs' worktrees and branches and modules/<id>, and regenerate the adapter files")
+    x.add_argument("--id", required=True)
+    x.add_argument("--dry-run", action="store_true", help="list every step with its paths and the refusal it would hit; change nothing")
+    x.add_argument("--force", action="store_true", help="retire despite structural references (never a dirty or unpushed checkout)")
     x.add_argument("--actor")
     x = add(st, "link-project", cmd_site, "DataLad-clone a project into projects/<name> without fetching data")
     x.add_argument("--name", required=True)

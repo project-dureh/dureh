@@ -2076,6 +2076,23 @@ def _wi_job_logs(site: Site, led: Ledger, wi: str, rec: dict) -> tuple[list[Path
     return found, unique
 
 
+def remove_wi_worktree(site: Site, led: Ledger, wi: str, wt: Path, root: Path | None,
+                       drop_branch: bool = True) -> str | None:
+    """Remove a WI's worktree at `wt` (registered in the target repository `root` when it is one) and, with
+    `drop_branch`, the site's own WI branch; shared by `purge` and `site retire-module` (release 55).
+    Returns the branch deleted, or None."""
+    dropped = None
+    if root is not None and (root / ".git").exists():
+        branch = git(["rev-parse", "--abbrev-ref", "HEAD"], wt, check=False) if wt.exists() else ""
+        git(["worktree", "remove", "--force", str(wt)], root, check=wt.exists())
+        if drop_branch and branch and _own_branch(site, led, wi, root, branch):
+            git(["branch", "-D", branch], root, check=False)
+            dropped = branch
+    if wt.exists() or wt.is_symlink():
+        shutil.rmtree(wt) if wt.is_dir() and not wt.is_symlink() else wt.unlink()
+    return dropped
+
+
 def purge(site: Site, actor: str, wi: str, dry_run: bool = False) -> dict:
     """Remove a WI's worktree, scratch checkpoints and leftover module exec trees (scratch/exec/<WI>-*), and the
     scheduler logs of its own jobs.
@@ -2119,14 +2136,7 @@ def purge(site: Site, actor: str, wi: str, dry_run: bool = False) -> dict:
             elif it.is_symlink() or it.is_file():
                 it.unlink()
             elif it == wt:
-                root = target_root(site, tgt)
-                if root is not None and (root / ".git").exists():
-                    branch = git(["rev-parse", "--abbrev-ref", "HEAD"], wt, check=False)
-                    git(["worktree", "remove", "--force", str(wt)], root)
-                    if status != "promoted" and branch and _own_branch(site, led, wi, root, branch):
-                        git(["branch", "-D", branch], root, check=False)
-                if wt.exists():
-                    shutil.rmtree(wt)
+                remove_wi_worktree(site, led, wi, wt, target_root(site, tgt), drop_branch=status != "promoted")
             else:
                 shutil.rmtree(it)
             removed.append(str(it))
