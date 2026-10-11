@@ -46,6 +46,9 @@ Tests prove the mechanism with the neutral example package `tests/fixtures/examp
 | `env.rebuild_timeout` | `900` | seconds the `env_rebuild` that `dispatch brief` (and `worktree repair` re-provisioning a worktree) runs for a new WI worktree may take; on timeout the brief is refused with the `worktree repair` hint (release 47; docs/slurm.md "Worktree environment at dispatch") |
 | `modules[].root_env`, `modules[].rev_env` | unset | names a `--module` job exports the pinned tree and revision under |
 | `modules[].cli` | the id | the command word that selects this entry for `slurm submit --via` |
+| `models.<tier>` | written by `install` (bootstrap waivers) | per tier (`org/tiers.yaml`: desk, pm, writer-academic, worker, recount): `{model: provider:id, qualification: run-... | waived-bootstrap, waiver_expires, note}`; `dispatch brief` refuses a tier whose waiver expired or that has no qualification; the agent file carries the role's tier model |
+| `models.routing` | absent (no routing) | release 54 (D3): kind -> tier name or `null`, kinds `check`, `doc`, `triage`, `build` (docs/work-items.md "Kind and model of a brief"). `null` or a missing kind keeps the role's own tier; an unknown kind or a tier not defined under `models` is refused (`adapter sync` fails, `verify --self` lists it, `status` warns, `dispatch brief` refuses). The academic and rework escalations keep precedence |
+| `models.routing_doc_roles` | `["doc-writer"]` | release 54: the roles whose dispatch is kind `doc` |
 | `modules[].submit` | `{}` | `{record_arg, log_arg, after_arg, items_arg}`: the options of the module's own submit command the harness may add (docs/slurm.md "via") |
 
 ## The startup package: `startup.yaml` schema 2 (release 46)

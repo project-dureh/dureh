@@ -243,6 +243,11 @@ usage against the daily share, by default 1/7 of the weekly allowance (`workday.
   end report shows the usage.
 - `dureh day status` shows the account total and this site's part (sessions whose working directory is
   inside the site), so one site cannot silently use up the day for the others.
+- `dureh usage` prints `spawns_today`, today's spawns (the `wi.dispatched` / `checker.dispatched` events) counted
+  per kind per model (`{kinds: {kind: {model: n}}, total}`; a spawn recorded before release 54 counts under
+  `unknown`), and the end report carries the same table since the day plan as `spawns` (release 54; the kinds are
+  in docs/work-items.md "Kind and model of a brief"). With `models.routing` set, compare it with
+  `today_by_model` over the week.
 
 ## Director commands
 

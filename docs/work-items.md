@@ -45,3 +45,25 @@ Director, 2026-10-08: whenever a WI is named to the Director, a short title goes
   `day plan` and `day end` record a `titles` map ({WI: short title}) for the WIs they name (plan items,
   proposed overtime, the day's job runs, items finished past the end time).
 - **Desk.** The generated CLAUDE.md says: "When you name a WI to the Director, add its short title".
+
+## Kind and model of a brief (release 54, D3)
+
+Every brief is a work unit of one kind, derived in `dispatch brief` in this order: `check` (a checker dispatch,
+`--role checker`), `doc` (the role is in `models.routing_doc_roles`, default `doc-writer`), `triage` (the work
+item's lane is `desk`), else `build` (writers, runners, managers). The command prints both on its first line:
+
+```
+# spawn subagent_type=doc-writer model=anthropic:claude-haiku-4-5-20251001 kind=doc; pass everything below as the prompt ...
+```
+
+The model is the routed tier's model when `models.routing` maps the kind to a tier (docs/config.md), otherwise
+the role's own tier, as before release 54. The academic escalation (`academic: true` -> tier `writer-academic`) and
+the rework escalation (a worker at the tier's `rework_limit` -> tier `pm`) apply after routing and win. Without
+`models.routing` no model choice changes; the brief body never changes with routing (the kind is on the spawn line,
+not in the digest). `dispatch.prepared`, `wi.dispatched` and `checker.dispatched` record `kind` next to `model`.
+
+The desk passes the printed model as the Agent tool's `model` (which takes precedence over the agent file). The
+spawn hook refuses a spawn whose `model` names another model than the brief's (the `provider:id`, the id or the
+family alias `opus`/`sonnet`/`haiku` match), and a spawn without `model` when the brief's model is not the role's
+own tier model: that spawn would run the agent file's model. A spawn without `model` for an unrouted, unescalated
+brief is allowed as before.
