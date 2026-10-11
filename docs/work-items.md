@@ -64,6 +64,7 @@ not in the digest). `dispatch.prepared`, `wi.dispatched` and `checker.dispatched
 
 The desk passes the printed model as the Agent tool's `model` (which takes precedence over the agent file). The
 spawn hook refuses a spawn whose `model` names another model than the brief's (the `provider:id`, the id or the
-family alias `opus`/`sonnet`/`haiku` match), and a spawn without `model` when the brief's model is not the role's
-own tier model: that spawn would run the agent file's model. A spawn without `model` for an unrouted, unescalated
-brief is allowed as before.
+family alias `opus`/`sonnet`/`haiku` match). A spawn without `model` is always allowed, as before; when the
+brief's model is not the role's own tier model (routing, academic or rework escalation) that spawn runs the agent
+file's model, so the hook warns (`brief model <id> not passed; pass model=<id>`, on its stderr and as the hook's
+system message) and the spawn event records `model_unstated: true`.

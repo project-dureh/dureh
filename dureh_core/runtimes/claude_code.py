@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shlex
+import sys
 from fnmatch import fnmatchcase
 from pathlib import Path
 
@@ -1369,6 +1370,7 @@ def _record_spawn(led: Ledger, role: str, target: str, wi: str, digest: str, ti:
     why = _model_mismatch(led.site, target, prepared[-1]["payload"], ti)
     if why:
         return _deny(why)
+    unstated = _model_unstated(led.site, target, prepared[-1]["payload"], ti)
     if prepared[-1]["payload"].get("worktree"):
         from ..workflow import worktree_problem
 
@@ -1381,9 +1383,13 @@ def _record_spawn(led: Ledger, role: str, target: str, wi: str, digest: str, ti:
         led.event(etype, role, wi, {"role": target, "brief": digest, "by": role,
                                     "model": prepared[-1]["payload"].get("model"),
                                     "kind": prepared[-1]["payload"].get("kind"),
-                                    "background": bool(ti.get("run_in_background"))}, [prepared[-1]["id"]])
+                                    "background": bool(ti.get("run_in_background")),
+                                    **({"model_unstated": True} if unstated else {})}, [prepared[-1]["id"]])
     except DurehError as exc:
         return _deny(str(exc))
+    if unstated:  # release 54: allowed, warned (stderr and the hook's system message)
+        print(f"dureh: warning: {unstated}", file=sys.stderr)
+        return {"systemMessage": unstated}
     return None
 
 
@@ -1396,25 +1402,27 @@ def model_matches(spawn: str, model: str) -> bool:
 
 
 def _model_mismatch(site: Site, target: str, prepared: dict, ti: dict) -> str | None:
-    """Release 54 (D3): the brief states a model; a spawn that passes another `model` is refused. A spawn without
-    `model` runs the agent file's model (the role's own tier), so it is allowed only when that is the brief's
-    model, else the desk must pass `model=` (routing, academic or rework escalation)."""
+    """Release 54 (D3): the brief states a model; a spawn that passes another `model` is refused."""
+    model, spawn = prepared.get("model"), ti.get("model")
+    if model and spawn and not model_matches(str(spawn), model):
+        return (f"the brief is for model {model}, not {spawn}; spawn with model={_model_id({'model': model})}"
+                " or prepare a new brief")
+    return None
+
+
+def _model_unstated(site: Site, target: str, prepared: dict, ti: dict) -> str | None:
+    """Release 54: a spawn without `model` is allowed; it runs the agent file's model (the role's own tier). When
+    that is not the brief's model (routing, academic or rework escalation) the hook warns and the spawn event
+    records `model_unstated: true`."""
     model = prepared.get("model")
-    if not model:
-        return None
-    spawn = ti.get("model")
-    if spawn:
-        if not model_matches(str(spawn), model):
-            return (f"the brief is for model {model}, not {spawn}; spawn with model={_model_id({'model': model})}"
-                    " or prepare a new brief")
+    if not model or ti.get("model"):
         return None
     try:
         default = site.model_for_tier(site.org.role(target).tier)["model"]
     except DurehError:
         return None
     if default != model:
-        return (f"the brief is for model {model}, but a spawn without `model` runs {target}'s own {default};"
-                f" pass model={_model_id({'model': model})} to the Agent tool")
+        return f"brief model {model} not passed; pass model={_model_id({'model': model})} (this spawn runs {default})"
     return None
 
 

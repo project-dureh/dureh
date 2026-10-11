@@ -165,16 +165,22 @@ class Routing(SiteCase):
         self.assertIsNone(self.spawn("desk", "researcher", b["brief"], model="sonnet"), "the family alias matches")
         b = wf.dispatch_brief(self.s, self.item("researcher"), "desk")
         self.assertIsNone(self.spawn("desk", "researcher", b["brief"], model="claude-sonnet-5"), "the id matches")
-        # routed away from the role's own tier: a spawn without `model` would run the agent file's model
+        # routed away from the role's own tier: a spawn without `model` runs the agent file's model; allowed, warned
         self.configure(routing={"build": "recount"})
         wi = self.item("researcher")
         b = wf.dispatch_brief(self.s, wi, "desk")
         self.assertEqual(b["model"], HAIKU)
-        out = self.spawn("desk", "researcher", b["brief"])
-        self.assertTrue(denied(out))
-        self.assertIn("pass model=claude-haiku-4-5-20251001", out["hookSpecificOutput"]["permissionDecisionReason"])
-        self.assertIsNone(self.spawn("desk", "researcher", b["brief"], model="haiku"))
-        self.assertEqual([e for e in self.led.events(wi) if e["type"] == "wi.dispatched"][-1]["payload"]["kind"], "build")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            out = self.spawn("desk", "researcher", b["brief"])
+        self.assertFalse(denied(out))
+        self.assertEqual(out, {"systemMessage": f"brief model {HAIKU} not passed; pass model=claude-haiku-4-5-20251001"
+                                                f" (this spawn runs {SONNET})"})
+        self.assertIn("dureh: warning: brief model", err.getvalue())
+        ev = [e for e in self.led.events(wi) if e["type"] == "wi.dispatched"][-1]["payload"]
+        self.assertEqual((ev["kind"], ev["model"], ev["model_unstated"]), ("build", HAIKU, True))
+        b = wf.dispatch_brief(self.s, self.item("researcher"), "desk")
+        self.assertIsNone(self.spawn("desk", "researcher", b["brief"], model="haiku"), "stated: no warning")
 
     def test_model_matches(self):
         self.assertTrue(model_matches("opus", OPUS))
