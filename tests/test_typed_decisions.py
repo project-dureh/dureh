@@ -1,4 +1,4 @@
-"""Release 53, proposals/typed-decisions-and-model-routing.md A1-A2: the optional typed block on decision records
+"""Release 52, proposals/typed-decisions-and-model-routing.md A1-A2: the optional typed block on decision records
 (question, options, chosen, confidence, action, facts), its flags on `ledger add decision` and `day decide`, and
 the shape of records written before it (no block) staying valid."""
 import contextlib

@@ -34,7 +34,7 @@ developers in one uniform, traceable form, so the harness improves from real use
    Do the same after recording a reply, so the next message reflects it.
 4. **Decision**: record the upstream answer or Director judgment with `dureh ledger add decision
    --ref <finding id> --disposition approve|revise|defer|reject|record`. A triage choice (is this request a
-   duplicate, which severity, which release) is written typed (release 53): `--type triage --question "..."
+   duplicate, which severity, which release) is written typed (release 52): `--type triage --question "..."
    --option A --option B [--option C] --chosen A --confidence high|medium|low --action acted|escalated|provisional
    [--fact name=yes|no ...]`. One question, two or more fixed options, one choice; `confidence low` needs
    `--action escalated` (then `--by` names the Director) or `provisional`; facts are yes/no only, prose goes in

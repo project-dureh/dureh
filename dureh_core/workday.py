@@ -42,7 +42,7 @@ DEFAULT_HOURS = 8.0
 DEFAULT_OVERTIME_HOURS = 16.0  # the session job's wall time covers the day plus this, capped at 24 h
 OVERTIME_PLAN = "day.overtime-plan"  # the overtime portion's own plan (Director, 2026-10-06)
 OVERTIME_BEGAN = "day.overtime-started"  # written by the gate at the first work unit it admits in overtime
-DAY_CHOICE = "day-choice"  # decision record type written by `day decide --option ...` (release 53)
+DAY_CHOICE = "day-choice"  # decision record type written by `day decide --option ...` (release 52)
 DAY_TYPES = ("day.planned", "day.approved", "day.decision", "day.ended", "day.overtime", OVERTIME_PLAN, OVERTIME_BEGAN,
              "day.closed")
 UNIT_TYPES = ("wi.dispatched", "checker.dispatched")  # a work unit: an agent spawn the gate admitted
@@ -281,7 +281,7 @@ def day(site: Site, events: list[dict] | None = None) -> dict:
     overtime = [e for e in cur if e["type"] == "day.overtime"]
     decisions = [{"id": e["id"], "title": e["payload"]["title"], "commit": e["payload"].get("commit")}
                  for e in cur if e["type"] == "day.decision"]
-    if decisions:  # typed blocks live on `day-choice` decision records that reference the event (release 53)
+    if decisions:  # typed blocks live on `day-choice` decision records that reference the event (release 52)
         typed = {ref: r for r in Ledger(site).load("decision") if r["type"] == DAY_CHOICE and r["payload"].get("typed")
                  for ref in r["refs"]}
         for dec in decisions:
@@ -858,7 +858,7 @@ def _state_head(site: Site) -> str | None:
 def decide(site: Site, actor: str, title: str, choice: str, why: str, revs: list[str],
            typed: dict | None = None, by: str | None = None) -> dict:
     """Record a decision point (following the desk's own proposal) and commit state as a rollback point.
-    With a typed block (release 53) a `day-choice` decision record is appended too, referencing the event; the
+    With a typed block (release 52) a `day-choice` decision record is appended too, referencing the event; the
     event keeps its shape and stays the rollback point."""
     from .state import save_state
 

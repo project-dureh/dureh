@@ -1089,7 +1089,7 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--choice", required=True)
     x.add_argument("--why", required=True)
     x.add_argument("--rev", action="append", help="commit(s) made for this decision (repeatable)")
-    x.add_argument("--option", action="append", help="typed decision (release 53): the fixed options --choice was "
+    x.add_argument("--option", action="append", help="typed decision (release 52): the fixed options --choice was "
                                                       "picked from (repeat, two or more); also writes a `day-choice` "
                                                       "decision record referencing the event")
     x.add_argument("--question", help="typed decision: the question answered (default: --title)")

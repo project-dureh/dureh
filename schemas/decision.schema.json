@@ -81,7 +81,7 @@
           "type": "object"
         },
         "typed": {
-          "description": "release 53 (typed decisions, item A1): one question, a fixed list of options, the choice, its confidence and what was done with it; facts are the booleans the choice rests on. Optional.",
+          "description": "release 52 (typed decisions, item A1): one question, a fixed list of options, the choice, its confidence and what was done with it; facts are the booleans the choice rests on. Optional.",
           "type": "object",
           "required": [
             "question",

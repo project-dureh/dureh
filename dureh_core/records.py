@@ -73,7 +73,7 @@ def titled_text(text: str, labels: dict[str, str]) -> str:
     return "`".join(parts)
 
 
-# Typed decision block (release 53, proposals/typed-decisions-and-model-routing.md A1): one question, a fixed
+# Typed decision block (release 52, proposals/typed-decisions-and-model-routing.md A1): one question, a fixed
 # list of options, the choice, its confidence and what was done with it. Facts are booleans only; prose stays
 # in `memo`. The block is optional on every dec-* record; records without it keep their shape.
 CONFIDENCE = ("high", "medium", "low")
