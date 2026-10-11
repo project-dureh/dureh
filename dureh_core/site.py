@@ -258,10 +258,60 @@ class Site:
 
     def model_for_tier(self, tier: str) -> dict:
         models = self.config.get("models") or {}
-        entry = models.get(tier)
+        entry = models.get(tier) if tier not in MODELS_META_KEYS else None
         if not isinstance(entry, dict) or not entry.get("model"):
             fail(f"site config has no model mapping for tier {tier!r}")
         return entry
+
+    def model_tiers(self) -> list[str]:
+        """The tiers `models` maps (release 54: `routing` and `routing_doc_roles` are not tiers)."""
+        return [k for k in (self.config.get("models") or {}) if k not in MODELS_META_KEYS]
+
+    def routing(self) -> dict:
+        """`models.routing` (release 54): kind -> tier, every kind present, null where the role's own tier applies.
+        Absent key = no routing. Fails on the errors `routing_errors` lists."""
+        errs = routing_errors(self.config)
+        if errs:
+            fail("; ".join(errs))
+        table = (self.config.get("models") or {}).get("routing") or {}
+        return {k: table.get(k) for k in ROUTING_KINDS}
+
+    def routing_doc_roles(self) -> list[str]:
+        """`models.routing_doc_roles` (release 54): the roles whose dispatch is kind `doc`; default ["doc-writer"]."""
+        roles = (self.config.get("models") or {}).get("routing_doc_roles")
+        return list(DEFAULT_ROUTING_DOC_ROLES) if roles is None else list(roles)
+
+
+ROUTING_KINDS = ("check", "doc", "triage", "build")  # release 54: the kinds of a work unit (an agent spawn)
+MODELS_META_KEYS = ("routing", "routing_doc_roles")  # keys under `models` that are not tiers
+DEFAULT_ROUTING_DOC_ROLES = ("doc-writer",)
+
+
+def routing_errors(config: dict) -> list[str]:
+    """What is wrong with `models.routing` / `models.routing_doc_roles` (release 54): an unknown kind, a tier not
+    defined under `models`, or the wrong shape. `adapter sync` fails on them, `verify --self` lists them, `status`
+    warns, and `dispatch brief` refuses."""
+    models = config.get("models") or {}
+    tiers = [k for k in models if k not in MODELS_META_KEYS]
+    out = []
+    table = models.get("routing")
+    if table is not None:
+        if not isinstance(table, dict):
+            out.append("config models.routing must be an object mapping kind -> tier name or null (release 54)")
+        else:
+            unknown = [k for k in table if k not in ROUTING_KINDS]
+            if unknown:
+                out.append(f"config models.routing: unknown kind(s) {', '.join(sorted(unknown))} (release 54; the kinds"
+                           f" are {', '.join(ROUTING_KINDS)})")
+            bad = [f"{k} -> {v!r}" for k, v in table.items() if k in ROUTING_KINDS and v is not None
+                   and (not isinstance(v, str) or v not in tiers)]
+            if bad:
+                out.append(f"config models.routing: {', '.join(bad)} names no tier defined under models (release 54;"
+                           f" the tiers are {', '.join(tiers) or 'none'}; null keeps the role's own tier)")
+    roles = models.get("routing_doc_roles")
+    if roles is not None and (not isinstance(roles, list) or not all(isinstance(r, str) and r for r in roles)):
+        out.append("config models.routing_doc_roles must be a list of role names (release 54; default [\"doc-writer\"])")
+    return out
 
 
 def find_site(explicit: str | None) -> Site:

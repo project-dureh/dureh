@@ -364,6 +364,9 @@ def config_errors(site: Site) -> list[str]:
         out.append("config slurm.external_ignore is refused since release 49 (ignored with a warning in 46-48): remove"
                    " it; external jobs are listed only when their name matches slurm.external_match (an include list"
                    " of name patterns; empty or absent lists none)")
+    from .site import routing_errors
+
+    out += routing_errors(site.config)
     return out
 
 
@@ -2080,4 +2083,32 @@ def usage(site: Site) -> dict:
     return {"per_wi": per_wi, "attempted_wis": len(attempted), "promoted_wis": len(promoted),
             "tokens_total": total, "agent_runs_without_usage": uncovered,
             "tokens_per_promoted_wi": (round(total / len(promoted)) if promoted else "undefined (0 promoted)"),
+            "spawns_today": spawn_table(led.events()),
             "note": "Token counts come from runtime transcripts; cost requires dated pricing in site config and is not computed."}
+
+
+SPAWN_TYPES = ("wi.dispatched", "checker.dispatched")
+
+
+def spawn_table(events: list[dict], since: tuple[str, str] | None = None, day: str | None = None) -> dict:
+    """Release 54: today's spawns (the `wi.dispatched` / `checker.dispatched` events) counted per kind per model:
+    {kinds: {kind: {model: n}}, total: n}. `since` (ts, id) counts the events after that record instead of the UTC
+    day `day` (default today); a spawn recorded before release 54 has no kind and counts under `unknown`."""
+    from datetime import date
+
+    day = day or date.today().isoformat()
+    table: dict[str, dict[str, int]] = {}
+    total = 0
+    for e in events:
+        if e["type"] not in SPAWN_TYPES:
+            continue
+        if since is not None and (e["ts"], e["id"]) <= since:
+            continue
+        if since is None and not e["ts"].startswith(day):
+            continue
+        kind = e["payload"].get("kind") or "unknown"
+        model = e["payload"].get("model") or "unknown"
+        row = table.setdefault(kind, {})
+        row[model] = row.get(model, 0) + 1
+        total += 1
+    return {"kinds": {k: dict(sorted(v.items())) for k, v in sorted(table.items())}, "total": total}
