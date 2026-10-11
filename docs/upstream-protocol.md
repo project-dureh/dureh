@@ -26,7 +26,10 @@ developers in one uniform, traceable form, so the harness improves from real use
    --evidence-level measured|reviewed --wi <WI> --summary "..."`. Use `measured` only for output you
    directly observed (command, output, path, harness rev); otherwise `reviewed` or `inferred`.
 2. **UR (upstream request)**: the desk writes `notes/upstream/UR-<YYYYMMDD>-<NN>.md`, one issue per
-   file, from the template below.
+   file, from the template below: `dureh upstream draft --finding <id> --type bug|change|decision|friction
+   --fact blocks_job=yes|no --fact loses_data=yes|no --fact workaround=yes|no --fact affects_all=yes|no`.
+   Severity is derived from the four facts (table below, release 53); `--severity SEV --why TEXT` overrides
+   it and writes the reason into the Severity line. Without an override all four facts are required.
 3. **Forward**: the desk runs `dureh upstream message` and gives the Director its output verbatim in
    one fenced code block (and saves it as `notes/upstream/FORWARD-<YYYYMMDD>.md`). The message lists
    new requests (`Status: open`), those awaiting a reply or a landing, and deferred ones in their own
@@ -150,6 +153,7 @@ on its own side. Message format: `DUREH-Exchange/README.md`.
 
 - Type: bug | change | decision | friction
 - Severity: blocking | degrading | minor
+- Facts: blocks_job=yes|no, loses_data=yes|no, workaround=yes|no, affects_all=yes|no
 - Site: <site>, package <name>, harness rev <sha>
 - Finding: <finding id(s)>
 - Status: open
@@ -169,6 +173,27 @@ on its own side. Message format: `DUREH-Exchange/README.md`.
 
 Keep each file short enough to read in one minute. Do not include secrets, personal data, or
 project data.
+
+### Severity from facts (release 53)
+
+The Severity word follows from the four facts on the `- Facts:` line; `dureh upstream draft` derives it:
+
+| blocks a running job | loses or corrupts data | workaround exists | affects every WI | severity |
+|---|---|---|---|---|
+| yes | any | any | any | blocking |
+| any | yes | any | any | blocking |
+| no | no | no | yes | blocking |
+| no | no | no | no | degrading |
+| no | no | yes | yes | degrading |
+| no | no | yes | no | minor |
+
+As code: `blocking if blocks_job or loses_data or (affects_all and not workaround); degrading if not
+workaround or affects_all; else minor`. To set a different severity, state why: `--severity blocking --why
+"..."` writes `- Severity: blocking (override: ...; derived minor)`. `dureh upstream send --kind request` and
+`dureh upstream export` refuse a UR whose `- Facts:` line is missing, leaves a fact as `?`, or disagrees with
+the Severity word, unless the Severity line carries `(override: ...)`; the same place that refuses unfilled
+template placeholders. Open URs drafted before release 53 have no Facts line: add it once by hand (four
+`name=yes|no` pairs under `- Severity:`) before the next send.
 
 ## Adopting a landed revision
 
