@@ -908,7 +908,8 @@ def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], e
         led.get("work-item", w)
     u = usage(site, evs)
     report = {"done": done, "problems": problems, "overtime_proposed": overtime,
-              "decisions": d["decisions"], "start": d.get("start"), "end": d.get("end"), "ended_at": _ts(_now()),
+              "decisions": d["decisions"], "provisional": provisional(d["decisions"]),
+              "start": d.get("start"), "end": d.get("end"), "ended_at": _ts(_now()),
               "session": d.get("session"), "working_day": d.get("working_day", True),
               "early": early or None, "usage": u, "heads": heads(site)}
     past = past_end_section(site, d, stop, early)
@@ -929,6 +930,15 @@ def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], e
     rec = led.event("day.ended", actor, None, report, [d["plan"]])
     return {**rec, "next": "give the Director this report; record accepted overtime with "
                            "`dureh day overtime --items ... --memo \"<Director's words>\"`, else `dureh day close`"}
+
+
+def provisional(decisions: list[dict]) -> list[dict]:
+    """The end report's `provisional` line (release 56, Director 2026-10-12: the desk never stalls on the Director):
+    the day's typed decisions recorded with `--action provisional` (title, choice, question, decision record), the
+    choices the Director may still overturn."""
+    return [{"id": dec["id"], "decision": dec.get("decision"), "title": dec["title"], "choice": dec["typed"]["chosen"],
+             "question": dec["typed"].get("question")}
+            for dec in decisions if (dec.get("typed") or {}).get("action") == "provisional"]
 
 
 def past_end_section(site: Site, d: dict, stop: dict | None, early: str = "") -> dict | None:
