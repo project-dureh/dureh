@@ -196,3 +196,49 @@ class DayDecide(SiteCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NeverStall(SiteCase):
+    """Release 56 (Director, 2026-10-12): the desk never stalls on the Director; provisional choices are listed at the end."""
+
+    RULE = ("Never stall on the Director (Director, 2026-10-12: 제가 바뻐서 못볼때 진행못하고 멈춰있는것을 근무시간으로 보는것은 어려울것같아요."
+            " 가능하면 계속 업무가 수행되야하는거라): a question to the Director holds only the item that needs the Director's own action")
+
+    def setUp(self):
+        super().setUp()
+        self.install()
+        self.projects = self.tmp / "transcripts"
+        (self.projects / "p").mkdir(parents=True)
+        os.environ["DUREH_USAGE_CACHE"] = str(self.tmp / "usage-cache.json")
+        os.environ.pop("CLAUDECODE", None)
+        cfg = json.loads((self.site_root / "config.json").read_text())
+        cfg["workday"] = {"transcripts": [str(self.projects)], "phase": "production", "weekdays": ALL_WEEK}
+        (self.site_root / "config.json").write_text(json.dumps(cfg, indent=2))
+        os.environ["DUREH_FAKE_NOW"] = T0.isoformat()
+        self.s = self.site()
+
+    def test_generated_claude_md_carries_the_rule(self):
+        from dureh_core.runtimes.claude_code import _claude_md
+
+        text = _claude_md(self.s)
+        self.assertIn(self.RULE, text)
+        self.assertIn("day decide ... --action provisional`, and a question with no answer after 30 minutes proceeds the same way", text)
+        self.assertIn("The day plan names, for every choice it offers the Director, the fallback the desk takes after 30 minutes", text)
+        self.assertIn(self.RULE, (self.site_root / "CLAUDE.md").read_text())  # the installed desk file carries it too
+
+    def test_end_report_lists_provisional_decisions(self):
+        workday.switch(self.s, True, "trial")
+        workday.plan(self.s, "desk", "finish W", "1. W", None)
+        workday.approve(self.s, "desk", "ok")
+        workday.decide(self.s, "desk", "lock strategy", "regenerate", "pyproject changed", [])  # untyped: not provisional
+        acted = typed_block("which runner", ["local", "slurm"], "local", "high", "acted")
+        workday.decide(self.s, "desk", "which runner", "local", "fast", [], typed=acted)
+        prov = typed_block("main task while the Director is away", ["WI-1", "WI-2"], "WI-1", "low", "provisional")
+        r = workday.decide(self.s, "desk", "main task today", "WI-1", "no answer after 30 minutes", [], typed=prov)
+        os.environ["DUREH_FAKE_NOW"] = (T0 + timedelta(hours=9)).isoformat()
+        rec = workday.end(self.s, "desk", "plan done", "", [])
+        self.assertEqual(len(rec["payload"]["decisions"]), 3)
+        self.assertEqual(rec["payload"]["provisional"],
+                         [{"id": r["record"], "decision": r["decision"], "title": "main task today", "choice": "WI-1",
+                           "question": "main task while the Director is away"}])
+        self.assertEqual(workday.provisional([]), [])
