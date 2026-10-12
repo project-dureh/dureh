@@ -287,6 +287,7 @@ def day(site: Site, events: list[dict] | None = None) -> dict:
         for dec in decisions:
             if dec["id"] in typed:
                 dec["decision"], dec["typed"] = typed[dec["id"]]["id"], typed[dec["id"]]["payload"]["typed"]
+                dec["why"] = typed[dec["id"]]["payload"].get("memo")  # release 56: the wait's prevention proposal
     out = {"plan": plan["id"], "date": plan["payload"].get("date"), "goal": plan["payload"].get("goal"),
            "decisions": decisions, **_session_clock(site, session)}
     if closed:
@@ -908,7 +909,7 @@ def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], e
         led.get("work-item", w)
     u = usage(site, evs)
     report = {"done": done, "problems": problems, "overtime_proposed": overtime,
-              "decisions": d["decisions"], "provisional": provisional(d["decisions"]),
+              "decisions": d["decisions"], "provisional": provisional(d["decisions"]), "waiting": waiting(d["decisions"]),
               "start": d.get("start"), "end": d.get("end"), "ended_at": _ts(_now()),
               "session": d.get("session"), "working_day": d.get("working_day", True),
               "early": early or None, "usage": u, "heads": heads(site)}
@@ -939,6 +940,15 @@ def provisional(decisions: list[dict]) -> list[dict]:
     return [{"id": dec["id"], "decision": dec.get("decision"), "title": dec["title"], "choice": dec["typed"]["chosen"],
              "question": dec["typed"].get("question")}
             for dec in decisions if (dec.get("typed") or {}).get("action") == "provisional"]
+
+
+def waiting(decisions: list[dict]) -> list[dict]:
+    """The end report's `waiting` line (release 56, Director 2026-10-12: "꼭 필요할때는 기다릴수 있지만, 이를 예방하기 위한 제안을
+    제게 하고 제가 선택적으로 해결해주기로 합니다"): the day's decisions recorded with `--action escalated`, each the wait for
+    an action only the Director can take, with the desk's prevention proposal (`--why`) for the Director to choose from."""
+    return [{"id": dec["id"], "decision": dec.get("decision"), "title": dec["title"], "choice": dec["typed"]["chosen"],
+             "question": dec["typed"].get("question"), "proposal": dec.get("why")}
+            for dec in decisions if (dec.get("typed") or {}).get("action") == "escalated"]
 
 
 def past_end_section(site: Site, d: dict, stop: dict | None, early: str = "") -> dict | None:

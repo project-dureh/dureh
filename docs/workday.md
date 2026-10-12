@@ -64,7 +64,12 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    --action provisional`. A question with no answer after 30 minutes proceeds the same way on the option that
    needs no Director action, recorded with `--action provisional` too; the end report lists these choices under
    `provisional` (title, choice). The day plan names, for every choice it offers the Director, the fallback the
-   desk takes after 30 minutes.
+   desk takes after 30 minutes. A wait is allowed only when the Director alone can act (a push, a dataset link,
+   an approval-exec item). Director, 2026-10-12: "꼭 필요할때는 기다릴수 있지만, 이를 예방하기 위한 제안을 제게 하고 제가
+   선택적으로 해결해주기로 합니다": the desk records such a wait with `dureh day decide ... --action escalated --by
+   Director`, putting a prevention proposal in `--why` (a standing authorization, bundling the Director's actions
+   into the morning plan ask, a harness change), and the end report lists every wait with its proposal under
+   `waiting` for the Director to choose from.
 4. **End time: finish the plan.** The day's plan is finished the same day. Director, 2026-10-06: "버그는 수정되고,
    업무는 하루 계획량까지 해야하는게 하네스의 기본 골자입니다", and to the desk: "문제가 발생시, 초과근무로 문제를 모두
    해결하고 당일 업무를 마무리 짓는다." When a problem appears, the desk fixes it and finishes; a plan item is never moved
@@ -130,7 +135,9 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    end-report summary (`dureh report --kind end-report`: the first paragraph) carries that line. **Provisional
    (release 56).** The report's `provisional` list names every decision of the day recorded with `--action
    provisional` (its event id, the `day-choice` record, title, choice and question) next to `decisions`, so the
-   Director sees at the end which choices were taken without waiting (step 3) and may overturn them.
+   Director sees at the end which choices were taken without waiting (step 3) and may overturn them. Its `waiting`
+   list names every decision recorded with `--action escalated` the same way, plus the desk's prevention
+   proposal (`proposal`, the record's `--why`), so the Director chooses which waits to prevent.
 7. **Close.** In this order: the desk stops every Monitor and background task, writes the handoff
    (`state/memory/handoff.md`), runs `dureh day close`, and then does nothing more. `day close` checks that no
    agent runs and the handoff is fresh, records `day.closed`, and releases the session job as described in

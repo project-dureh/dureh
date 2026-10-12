@@ -224,6 +224,8 @@ class NeverStall(SiteCase):
         self.assertIn(self.RULE, text)
         self.assertIn("day decide ... --action provisional`, and a question with no answer after 30 minutes proceeds the same way", text)
         self.assertIn("The day plan names, for every choice it offers the Director, the fallback the desk takes after 30 minutes", text)
+        self.assertIn("the end report lists every such wait under `waiting` for the Director to choose from (Director, 2026-10-12:"
+                      " 꼭 필요할때는 기다릴수 있지만, 이를 예방하기 위한 제안을 제게 하고 제가 선택적으로 해결해주기로 합니다)", text)
         self.assertIn(self.RULE, (self.site_root / "CLAUDE.md").read_text())  # the installed desk file carries it too
 
     def test_end_report_lists_provisional_decisions(self):
@@ -235,9 +237,18 @@ class NeverStall(SiteCase):
         workday.decide(self.s, "desk", "which runner", "local", "fast", [], typed=acted)
         prov = typed_block("main task while the Director is away", ["WI-1", "WI-2"], "WI-1", "low", "provisional")
         r = workday.decide(self.s, "desk", "main task today", "WI-1", "no answer after 30 minutes", [], typed=prov)
+        wait = typed_block("push modules/demo", ["push now", "wait for the Director"], "wait for the Director", "medium",
+                           "escalated", by="Director")
+        w = workday.decide(self.s, "desk", "push of demo", "wait for the Director", "proposal: a standing push authorization "
+                           "for verified plan items", [], typed=wait, by="Director")
         os.environ["DUREH_FAKE_NOW"] = (T0 + timedelta(hours=9)).isoformat()
         rec = workday.end(self.s, "desk", "plan done", "", [])
-        self.assertEqual(len(rec["payload"]["decisions"]), 3)
+        self.assertEqual(len(rec["payload"]["decisions"]), 4)
+        self.assertEqual(rec["payload"]["waiting"],
+                         [{"id": w["record"], "decision": w["decision"], "title": "push of demo", "choice": "wait for the Director",
+                           "question": "push modules/demo",
+                           "proposal": "proposal: a standing push authorization for verified plan items"}])
+        self.assertEqual(workday.waiting([]), [])
         self.assertEqual(rec["payload"]["provisional"],
                          [{"id": r["record"], "decision": r["decision"], "title": "main task today", "choice": "WI-1",
                            "question": "main task while the Director is away"}])
