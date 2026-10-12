@@ -335,7 +335,10 @@ def retire_module(site: Site, actor: str, module_id: str, dry_run: bool = False,
         elif reach_err:
             refuse = f"the recorded source is unreachable, so unpushed work cannot be ruled out: {reach_err}"
         elif unpushed:
-            refuse = f"{root} HEAD {head[:12]} is not reachable from {source} at {branch} ({tip[:12]}); push it first"
+            refuse = f"{root} HEAD {head[:12]} is not reachable from {source} at {branch} ({tip[:12]}); push it first" + (
+                f" (standing fast-forward push: `dureh push --repo {root} --remote origin --ref {branch}`)"
+                if (site.config.get("push") or {}).get("standing_ff") else
+                " (ask the Director: `dureh push --approve ...` then `dureh push --approval <decision>`)")  # release 58
         step("checkout", {"path": str(root), "head": head, "dirty": bool(dirty), "source": source, "branch": branch,
                           "source_tip": tip, "unpushed": unpushed}, refuse)
 

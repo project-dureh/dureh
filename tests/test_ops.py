@@ -199,6 +199,118 @@ class Ops(SiteCase):
         remote_head = subprocess.run(["git", "rev-parse", "main"], cwd=bare, capture_output=True, text=True).stdout.strip()
         self.assertEqual(remote_head, ev["payload"]["revision"])
 
+    def _push_fixture(self, **push_cfg):
+        """A module checkout with an allowlisted bare `origin` holding its `main`; config push = allowed + push_cfg."""
+        repo = self.make_module()
+        bare = self.tmp / "remote.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+        subprocess.run(["git", "remote", "add", "origin", str(bare)], cwd=repo, check=True)
+        subprocess.run(["git", "push", "-q", "origin", "main"], cwd=repo, check=True)
+        cfg = json.loads(self.s.config_path.read_text())
+        cfg["push"] = {"allowed_remotes": [str(bare)], **push_cfg}
+        self.s.config_path.write_text(json.dumps(cfg))
+        from dureh_core.site import Site
+        return Site(self.site_root), repo, bare
+
+    @staticmethod
+    def _commit(repo, text):
+        (repo / "src" / "demo.py").write_text(text)
+        subprocess.run(["git", "commit", "-qam", "later change"], cwd=repo, check=True)
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True, text=True).stdout.strip()
+
+    @staticmethod
+    def _remote_tip(bare, branch="main"):
+        return subprocess.run(["git", "rev-parse", branch], cwd=bare, capture_output=True, text=True).stdout.strip()
+
+    def test_standing_ff_push_fast_forwards_an_existing_branch(self):
+        """Release 58: with push.standing_ff a fast-forward to an existing branch needs no --approval."""
+        s, repo, bare = self._push_fixture(standing_ff=True)
+        rev = self._commit(repo, "def f():\n    return 2\n")
+        ev = ops.push(s, "desk", str(repo), "origin", "main", None)
+        self.assertEqual(ev["type"], "push.completed")
+        self.assertEqual(self._remote_tip(bare), rev)
+        self.assertEqual(ev["payload"]["approval"], "standing-ff")
+        self.assertTrue(ev["payload"]["fast_forward"])
+        self.assertFalse(ev["payload"]["new_branch"])
+        self.assertEqual(ev["payload"]["ref"], "refs/heads/main")
+        self.assertNotIn("decision", ev["payload"])
+        self.assertEqual(ev["refs"], [])
+        self.assertEqual(ops.config_errors(s), [])
+        # the CLI accepts the omission
+        from dureh_core.cli import main
+        import io
+        from contextlib import redirect_stdout
+        rev2 = self._commit(repo, "def f():\n    return 3\n")
+        with redirect_stdout(io.StringIO()):
+            code = main(["--site", str(self.site_root), "push", "--repo", str(repo), "--remote", "origin", "--ref", "main"])
+        self.assertEqual(code, 0)
+        self.assertEqual(self._remote_tip(bare), rev2)
+
+    def test_standing_ff_push_refuses_a_non_fast_forward(self):
+        s, repo, bare = self._push_fixture(standing_ff=True)
+        remote_tip = self._remote_tip(bare)
+        # diverge: amend the pushed commit so the remote tip is no ancestor of HEAD
+        subprocess.run(["git", "commit", "-q", "--amend", "-m", "rewritten"], cwd=repo, check=True)
+        with self.assertRaisesRegex(DurehError, "not a fast-forward.*push --approve"):
+            ops.push(s, "desk", str(repo), "origin", "main", None)
+        self.assertEqual(self._remote_tip(bare), remote_tip, "nothing pushed, nothing forced")
+        self.assertEqual([e for e in Ledger(s).events() if e["type"].startswith("push.")], [])
+        # a dry run reports the same refusal
+        with self.assertRaisesRegex(DurehError, "not a fast-forward"):
+            ops.push(s, "desk", str(repo), "origin", "main", None, dry_run=True)
+
+    def test_standing_ff_off_still_needs_an_approval(self):
+        """Without push.standing_ff (absent or false) a push without --approval is refused, naming the approval path."""
+        from dureh_core.site import Site
+        s, repo, bare = self._push_fixture()
+        self._commit(repo, "def f():\n    return 2\n")
+        before = self._remote_tip(bare)
+        with self.assertRaisesRegex(DurehError, "--approval DECISION is required .*push.standing_ff is off.*push --approve"):
+            ops.push(s, "desk", str(repo), "origin", "main", None)
+        cfg = json.loads(s.config_path.read_text())
+        cfg["push"]["standing_ff"] = False
+        s.config_path.write_text(json.dumps(cfg))
+        with self.assertRaisesRegex(DurehError, "push.standing_ff is off"):
+            ops.push(Site(self.site_root), "desk", str(repo), "origin", "main", None)
+        self.assertEqual(self._remote_tip(bare), before)
+        self.assertEqual([e for e in Ledger(s).events() if e["type"].startswith("push.")], [])
+
+    def test_standing_ff_new_branch_needs_its_own_switch(self):
+        from dureh_core.site import Site
+        s, repo, bare = self._push_fixture(standing_ff=True)
+        subprocess.run(["git", "branch", "-q", "feature"], cwd=repo, check=True)
+        with self.assertRaisesRegex(DurehError, "new branch.*standing_ff_new_branches is off"):
+            ops.push(s, "desk", str(repo), "origin", "feature", None)
+        proc = subprocess.run(["git", "rev-parse", "--verify", "-q", "refs/heads/feature"], cwd=bare, capture_output=True)
+        self.assertNotEqual(proc.returncode, 0, "feature must not exist on the remote")
+        cfg = json.loads(s.config_path.read_text())
+        cfg["push"]["standing_ff_new_branches"] = True
+        s.config_path.write_text(json.dumps(cfg))
+        ev = ops.push(Site(self.site_root), "desk", str(repo), "origin", "feature", None)
+        self.assertTrue(ev["payload"]["new_branch"])
+        self.assertEqual(ev["payload"]["approval"], "standing-ff")
+        self.assertEqual(self._remote_tip(bare, "feature"), ev["payload"]["revision"])
+
+    def test_approval_path_unchanged_with_standing_ff(self):
+        """A bound decision still works and still refuses a stale binding, standing_ff or not; non-ff with approval pushes."""
+        s, repo, bare = self._push_fixture(standing_ff=True)
+        dec = ops.push_approve(s, "desk", str(repo), "origin", "main", "approved")
+        self._commit(repo, "def f():\n    return 2\n")
+        with self.assertRaisesRegex(DurehError, "does not approve"):
+            ops.push(s, "desk", str(repo), "origin", "main", dec["id"])
+        dec2 = ops.push_approve(s, "desk", str(repo), "origin", "main", "approved again")
+        ev = ops.push(s, "desk", str(repo), "origin", "main", dec2["id"])
+        self.assertEqual(ev["payload"]["decision"], dec2["id"])
+        self.assertNotIn("fast_forward", ev["payload"])
+        self.assertEqual(ev["refs"], [dec2["id"]])
+        self.assertEqual(self._remote_tip(bare), ev["payload"]["revision"])
+
+    def test_push_config_shape_is_checked(self):
+        s, _repo, _bare = self._push_fixture(standing_ff="yes", standing_ff_new_branches=1)
+        errs = ops.config_errors(s)
+        self.assertTrue(any("push.standing_ff must be true or false (release 58" in e for e in errs), errs)
+        self.assertTrue(any("push.standing_ff_new_branches must be true or false" in e for e in errs), errs)
+
     def test_slurm_submit_records_run_with_fake_scheduler(self):
         fake = self.tmp / "fakebin"
         fake.mkdir()

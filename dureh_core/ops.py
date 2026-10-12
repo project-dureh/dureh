@@ -364,6 +364,14 @@ def config_errors(site: Site) -> list[str]:
         out.append("config slurm.external_ignore is refused since release 49 (ignored with a warning in 46-48): remove"
                    " it; external jobs are listed only when their name matches slurm.external_match (an include list"
                    " of name patterns; empty or absent lists none)")
+    push_cfg = site.config.get("push")
+    if push_cfg is not None and not isinstance(push_cfg, dict):
+        out.append("config push must be an object (allowed_remotes, standing_ff, standing_ff_new_branches)")
+    else:
+        for key in ("standing_ff", "standing_ff_new_branches"):
+            v = (push_cfg or {}).get(key)
+            if v is not None and not isinstance(v, bool):
+                out.append(f"config push.{key} must be true or false (release 58; default false)")
     from .site import routing_errors
 
     out += routing_errors(site.config)
@@ -1949,29 +1957,70 @@ def slurm_cancel(site: Site, actor: str, run_id: str) -> dict:
 
 
 # ------------------------------------------------------------------- push
-def push(site: Site, actor: str, repo: str, remote: str, ref: str, approval: str, dry_run: bool = False) -> dict:
-    """Push only to an allowlisted remote, with a Director decision bound to this exact revision."""
+PUSH_APPROVAL_HINT = ("ask the Director: `dureh push --approve --repo <path> --remote <remote> --ref <branch> --memo \"...\"`"
+                      " then `dureh push --repo <path> --remote <remote> --ref <branch> --approval <decision>`")
+STANDING_FF = "standing-ff"
+
+
+def _dest_ref(ref: str) -> str:
+    return ref if ref.startswith("refs/") else f"refs/heads/{ref}"
+
+
+def fast_forward(repo_path: Path, remote: str, dest: str, rev: str, env: dict | None = None) -> dict:
+    """Is pushing `rev` to `dest` on `remote` a fast-forward? {"fast_forward": bool, "remote_tip": sha or None,
+    "new_branch": bool}. The remote tip is read with `git ls-remote` and fetched into FETCH_HEAD when the checkout
+    does not have it; a missing destination is a new branch (`fast_forward` false: the caller decides)."""
+    line = git(["ls-remote", remote, dest], repo_path, env=env)
+    tip = line.split()[0] if line.strip() else None
+    if tip is None:
+        return {"fast_forward": False, "remote_tip": None, "new_branch": True}
+    have = subprocess.run(["git", "cat-file", "-e", f"{tip}^{{commit}}"], cwd=repo_path, capture_output=True, env=env)
+    if have.returncode != 0:
+        git(["fetch", "--quiet", remote, dest], repo_path, env=env)  # into FETCH_HEAD only
+    ff = subprocess.run(["git", "merge-base", "--is-ancestor", tip, rev], cwd=repo_path, capture_output=True, env=env)
+    return {"fast_forward": ff.returncode == 0, "remote_tip": tip, "new_branch": False}
+
+
+def push(site: Site, actor: str, repo: str, remote: str, ref: str, approval: str | None, dry_run: bool = False) -> dict:
+    """Push only to an allowlisted remote, with a Director decision bound to this exact revision, or (release 58)
+    without one when config `push.standing_ff` is true and the push is a fast-forward of the destination branch
+    (a new branch counts only with `push.standing_ff_new_branches`); never forced."""
     if site.org.role(actor).kind != "desk":
         fail("only the desk pushes")
     led = Ledger(site)
-    allowed = (site.config.get("push") or {}).get("allowed_remotes") or []
+    pcfg = site.config.get("push") or {}
+    allowed = pcfg.get("allowed_remotes") or []
     repo_path = Path(repo).resolve()
     url = git(["remote", "get-url", remote], repo_path, check=False) or remote
     if url not in allowed and remote not in allowed:
         fail(f"remote {url!r} is not in push.allowed_remotes")
     rev = git(["rev-parse", ref], repo_path)
-    dec = led.get("decision", approval)
-    b = dec["payload"].get("binding") or {}
-    if dec["payload"]["disposition"] != "approve" or b.get("revision") != rev or b.get("remote") not in (url, remote):
-        fail(f"decision {approval} does not approve pushing {rev[:12]} to {url}")
-    dest = b.get("ref") or ref
-    if not dest.startswith("refs/"):
-        dest = f"refs/heads/{dest}"
+    if approval:
+        dec = led.get("decision", approval)
+        b = dec["payload"].get("binding") or {}
+        if dec["payload"]["disposition"] != "approve" or b.get("revision") != rev or b.get("remote") not in (url, remote):
+            fail(f"decision {approval} does not approve pushing {rev[:12]} to {url}")
+        dest = _dest_ref(b.get("ref") or ref)
+        wi, refs, extra = dec.get("wi"), [approval], {"decision": approval}
+    else:
+        if not pcfg.get("standing_ff"):
+            fail(f"--approval DECISION is required (config push.standing_ff is off); {PUSH_APPROVAL_HINT}")
+        dest = _dest_ref(ref)
+        ff = fast_forward(repo_path, remote, dest, rev, site.env())
+        if ff["new_branch"] and not pcfg.get("standing_ff_new_branches"):
+            fail(f"{dest} does not exist on {url}: a new branch is not covered by the standing fast-forward push"
+                 f" (config push.standing_ff_new_branches is off); {PUSH_APPROVAL_HINT}")
+        if not ff["new_branch"] and not ff["fast_forward"]:
+            fail(f"pushing {rev[:12]} to {dest} on {url} is not a fast-forward (the remote tip {ff['remote_tip'][:12]}"
+                 f" is not an ancestor); the standing authorization covers fast-forwards only, and nothing is ever"
+                 f" forced; {PUSH_APPROVAL_HINT}")
+        wi, refs = None, []
+        extra = {"approval": STANDING_FF, "fast_forward": True, "remote_tip": ff["remote_tip"], "new_branch": ff["new_branch"]}
     if not dry_run:
         git(["push", remote, f"{rev}:{dest}"], repo_path, env=site.env())
-    return led.event("push.completed" if not dry_run else "push.planned", actor, dec.get("wi"),
-                     {"repo": str(repo_path), "remote": url, "revision": rev, "ref": dest, "decision": approval,
-                      "action_class": "compensatable"}, [approval])
+    return led.event("push.completed" if not dry_run else "push.planned", actor, wi,
+                     {"repo": str(repo_path), "remote": url, "revision": rev, "ref": dest, **extra,
+                      "action_class": "compensatable"}, refs)
 
 
 def push_approve(site: Site, actor: str, repo: str, remote: str, ref: str, memo: str, by: str = "Director") -> dict:

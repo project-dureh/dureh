@@ -89,6 +89,21 @@ class RetireModule(SiteCase):
         self.assertTrue(self.mod.is_dir())
         self.assertIn("demo", [e["id"] for e in self.config()["modules"]])
 
+    def test_unpushed_refusal_names_the_push_path(self):
+        """Release 58: the clean-and-pushed guard says how to push: the standing fast-forward push when config
+        push.standing_ff is on, else the Director's approval."""
+        (self.mod / "demo.py").write_text("x = 2\n")
+        git(self.mod, "commit", "-q", "-am", "local only")
+        with self.assertRaisesRegex(DurehError, "push it first \\(ask the Director: `dureh push --approve ...` then "
+                                                "`dureh push --approval <decision>`\\)"):
+            sitelinks.retire_module(self.s, "desk", "demo")
+        cfg = self.config()
+        cfg["push"] = {"allowed_remotes": [str(self.src)], "standing_ff": True}
+        (self.site_root / "config.json").write_text(json.dumps(cfg))
+        with self.assertRaisesRegex(DurehError, f"push it first \\(standing fast-forward push: `dureh push --repo {self.mod}"
+                                                " --remote origin --ref main`\\)"):
+            sitelinks.retire_module(self.site(), "desk", "demo")
+
     def test_refuses_unreachable_source(self):
         cfg = self.config()
         next(e for e in cfg["modules"] if e["id"] == "demo")["source"] = str(self.tmp / "gone")
