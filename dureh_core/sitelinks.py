@@ -257,8 +257,10 @@ def retire_module(site: Site, actor: str, module_id: str, dry_run: bool = False,
     In this order: the id must be registered; no non-final WI, open worktree or lane on `modules/<id>`; the
     checkout is clean and its HEAD is reachable from `source` at `branch` (never overridden by --force); no
     structural reference (path-refs; other modules' configuration, project manifests, config.json) unless
-    --force; then one `site.module-retired` event with the compensation command, and the config entry, the
-    final WIs' worktrees and branches and the directory are removed; finally the adapter files are regenerated.
+    --force; then the final WIs' worktrees and branches, the config entry and the directory are removed, in that
+    order, and one `site.module-retired` event records what was removed with the compensation command (release 57:
+    the event follows the removal; a failure mid-way records `site.module-retire-failed` with the failing step and
+    what was removed so far, and leaves the module registered); finally the adapter files are regenerated.
     With dry_run every step is listed with its paths and the first refusal it would hit; nothing changes."""
     from .workflow import _own_branch, _registered_worktrees, remove_wi_worktree, wi_branches
 
@@ -347,7 +349,8 @@ def retire_module(site: Site, actor: str, module_id: str, dry_run: bool = False,
          f"{len(structural)} structural reference(s) to {target} (other modules' configuration, project manifests or "
          f"config.json); edit them first or pass --force: " + "; ".join(structural[:5]))
 
-    # 5. the event, with the compensation command
+    # 5. removal (worktrees and branches, then the config entry and the directory last); 6. the event, recorded
+    # only after every removal step succeeded (release 57); 7. adapter files
     branches = []
     if (root / ".git").exists():
         for w in final:
@@ -360,34 +363,63 @@ def retire_module(site: Site, actor: str, module_id: str, dry_run: bool = False,
                "removed": {"config_entry": True, "worktrees": [str(p) for p in final_wts.values()],
                            "branches": branches, "directory": True},
                "compensation": compensation}
-    step("record", {"event": "site.module-retired", "payload": payload})
-    # 6. removal; 7. adapter files
     step("remove", {"config_entry": str(site.config_path), "worktrees": [str(p) for p in final_wts.values()],
                     "branches": branches, "directory": str(root)})
+    step("record", {"event": "site.module-retired", "payload": payload})
     step("regenerate", {"adapter": "claude-code", "site": str(site.root)})
     out = {"id": module_id, "dry_run": dry_run, "steps": steps, "refusal": refusal, "compensation": compensation}
     if dry_run or refusal:
         return out
-    Ledger(site).event("site.module-retired", actor, None, payload)
-    for w in final:
-        wt = final_wts.get(w["id"])
-        if wt is not None:
-            remove_wi_worktree(site, led, w["id"], wt, root, drop_branch=True)
-    _config_remove(site, "modules", module_id)
-    if root.is_symlink():
-        root.unlink()
-    elif root.exists():
-        from .exectree import _rmtree
+    removed = {"config_entry": False, "worktrees": [], "branches": [], "directory": False}
+    current = "remove"
 
-        _rmtree(root)
+    def _failed(exc: BaseException) -> None:
+        err = str(exc).strip() or exc.__class__.__name__
+        Ledger(site).event("site.module-retire-failed", actor, None,
+                           {"id": module_id, "path": entry.get("path", target), "step": current, "error": err,
+                            "removed": removed, "compensation": compensation})
+        done = (f"config entry {'removed' if removed['config_entry'] else 'kept'}, "
+                f"{len(removed['worktrees'])} of {len(final_wts)} worktree(s) and {len(removed['branches'])} branch(es) removed, "
+                f"directory {'removed' if removed['directory'] else 'kept'}")
+        fail(f"retire-module {module_id} failed at step '{current}': {err}. Removed so far: {done}; "
+             f"recorded as site.module-retire-failed. Fix the cause and run the command again")
+
+    try:
+        for w in final:
+            wt = final_wts.get(w["id"])
+            if wt is None:
+                continue
+            current = f"worktree {w['id']}"
+            dropped = remove_wi_worktree(site, led, w["id"], wt, root, drop_branch=True)
+            removed["worktrees"].append(str(wt))
+            if dropped:
+                removed["branches"].append(dropped)
+        current = "config-entry"
+        _config_remove(site, "modules", module_id)
+        removed["config_entry"] = True
+        current = "directory"
+        if root.is_symlink():
+            root.unlink()
+        elif root.exists():
+            from .exectree import _rmtree
+
+            _rmtree(root)
+            if root.exists():
+                fail(f"{root} is still there after removal; check what is left and remove it by hand")
+        removed["directory"] = True
+    except Exception as exc:  # DurehError, git/subprocess and OS errors alike: record what happened, then fail
+        _failed(exc)
+    payload["removed"] = removed
+    Ledger(site).event("site.module-retired", actor, None, payload)
     from .runtimes import claude_code
 
     fresh = Site(site.root)
     generated = claude_code.generate(fresh)
-    out["removed"] = payload["removed"]
+    out["removed"] = removed
     out["generated"] = len(generated["files"])
-    out["summary"] = (f"retired {target}: config entry, {len(final_wts)} worktree(s), {len(branches)} branch(es) and "
-                      f"{root} removed; {len(generated['files'])} adapter files regenerated. Restore with: {compensation}")
+    out["summary"] = (f"retired {target}: config entry, {len(removed['worktrees'])} worktree(s), "
+                      f"{len(removed['branches'])} branch(es) and {root} removed; {len(generated['files'])} adapter files "
+                      f"regenerated. Restore with: {compensation}")
     return out
 
 

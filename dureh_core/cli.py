@@ -1045,8 +1045,9 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--env-rebuild", default="uv sync --frozen --all-groups --all-extras")
     x.add_argument("--actor")
     x = add(st, "retire-module", cmd_site, "retire a site module (release 55): refuse live work, a dirty or unpushed "
-            "checkout and structural references (--force), record site.module-retired with the re-link command, then "
-            "remove the config entry, final WIs' worktrees and branches and modules/<id>, and regenerate the adapter files")
+            "checkout and structural references (--force), remove final WIs' worktrees and branches, the config entry "
+            "and modules/<id>, then record site.module-retired with the re-link command (release 57: after the removal; "
+            "a failure mid-way records site.module-retire-failed) and regenerate the adapter files")
     x.add_argument("--id", required=True)
     x.add_argument("--dry-run", action="store_true", help="list every step with its paths and the refusal it would hit; change nothing")
     x.add_argument("--force", action="store_true", help="retire despite structural references (never a dirty or unpushed checkout)")
