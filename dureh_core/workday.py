@@ -290,6 +290,8 @@ def day(site: Site, events: list[dict] | None = None) -> dict:
                 dec["why"] = typed[dec["id"]]["payload"].get("memo")  # release 56: the wait's prevention proposal
     out = {"plan": plan["id"], "date": plan["payload"].get("date"), "goal": plan["payload"].get("goal"),
            "decisions": decisions, **_session_clock(site, session)}
+    if plan["payload"].get("director_actions"):
+        out["director_actions"] = list(plan["payload"]["director_actions"])  # release 58
     if closed:
         return {**out, "phase": "off-duty", "reason": f"day closed {closed[-1]['ts']}"}
     mode = hours_mode(site)
@@ -611,9 +613,19 @@ def render(st: dict, with_banner: bool = True) -> str | None:
         line += "; urgent " + ", ".join(st["urgent"])
     if st.get("devices_off"):
         line += "; devices off: " + ", ".join(st["devices_off"])
+    if st.get("director_actions"):
+        line += "\n" + director_actions_text(st["director_actions"])
     if st.get("warning"):
         line += f"\n⚠ {st['warning']}"
     return f"{head}\n{line}" if head else line
+
+
+DIRECTOR_ACTIONS_LABEL = "대표님 조치 필요:"
+
+
+def director_actions_text(actions: list[str]) -> str:
+    """The plan's Director-only actions (release 58) as the label and one line per action."""
+    return "\n".join([DIRECTOR_ACTIONS_LABEL, *(f"- {a}" for a in actions)])
 
 
 def _wi_family(led: Ledger, wi: str) -> set[str]:
@@ -786,9 +798,12 @@ def calibrate(site: Site, weekly_percent: float) -> dict:
     return {**cal, "record": rec["id"]}
 
 
-def plan(site: Site, actor: str, goal: str, text: str, items: list[str] | None = None) -> dict:
+def plan(site: Site, actor: str, goal: str, text: str, items: list[str] | None = None,
+         director_actions: list[str] | None = None) -> dict:
     """Record the day plan. Its work items are `items` (`day plan --wi`, each an existing WI) or, without them,
-    every WI id the text names: the finish-plan rule reads them (`plan_items`)."""
+    every WI id the text names: the finish-plan rule reads them (`plan_items`). `director_actions` (release 58,
+    `--director-action`, repeatable) lists every action only the Director can take today (a dataset link, a push
+    approval, a config change); `slack ask --kind day-plan` posts them so the Director handles them in one go."""
     _require_on(site)
     if not goal.strip() or not text.strip():
         fail("a day plan needs --goal and the plan text")
@@ -802,6 +817,9 @@ def plan(site: Site, actor: str, goal: str, text: str, items: list[str] | None =
     payload = {"date": _now().date().isoformat(), "goal": goal, "plan": text, "usage_at_plan": u, "heads": heads(site)}
     if items:
         payload["items"] = sorted(set(items))
+    actions = [a.strip() for a in director_actions or [] if a and a.strip()]
+    if actions:
+        payload["director_actions"] = actions
     payload["titles"] = _titles(led, plan_items({"payload": payload}))  # UR-20261008-02
     return led.event("day.planned", actor, None, payload)
 

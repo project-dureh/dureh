@@ -270,6 +270,30 @@ class SlackApproval(ApprovalBase):
         self.assertEqual(code, 2)
         self.assertIn("already open", err)
 
+    def test_ask_lists_the_director_actions(self):
+        """Release 58: the plan's `--director-action` items are posted under 대표님 조치 필요 so the Director handles
+        them in one go at approval; a plan without them posts no such list; the record never carries the text."""
+        workday.plan(self.site(), "desk", "finish W", "1. WI-0001 정리", None,
+                     ["link dataset ds-0042 into projects/p (site link-project)", "approve the push of modules/m main"])
+        code, out, err = self.run_cli("ask", "--kind", "day-plan")
+        self.assertEqual(code, 0, err)
+        text = self.calls[-1]["data"]["text"]
+        self.assertIn("1. WI-0001 (A bootstrap proposal) 정리\n\n대표님 조치 필요:\n- link dataset ds-0042 into projects/p "
+                      "(site link-project)\n- approve the push of modules/m main\n\n" + slack.ASK_LINE, text)
+        self.assertNotIn("ds-0042", json.dumps(self.events("slack.approval.requested")))
+        self.assertEqual(len(self.events("slack.approval.requested")), 1)
+        self.assertNotIn("대표님 조치 필요", self.events("slack.approval.requested")[0]["payload"].get("kind"))
+        # the list is appended to a --file text too
+        self.react("white_check_mark", DIRECTOR)
+        self.assertEqual(self.run_cli("check")[0], 0)
+        workday.end(self.site(), "desk", "done", "", [], "Director: 오늘은 여기까지")
+        workday.plan(self.site(), "desk", "next", "2. WI-0001 again", None, ["approve the push of modules/m main"])
+        f = self.tmp / "plan.md"
+        f.write_text("짧은 계획")
+        self.assertEqual(self.run_cli("ask", "--kind", "day-plan", "--file", str(f))[0], 0)
+        self.assertEqual(self.calls[-1]["data"]["text"],
+                         "짧은 계획\n\n대표님 조치 필요:\n- approve the push of modules/m main\n\n" + slack.ASK_LINE)
+
     def test_ask_uses_the_file(self):
         self.plan()
         f = self.tmp / "plan.md"

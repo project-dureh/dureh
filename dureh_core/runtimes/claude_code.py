@@ -581,6 +581,8 @@ def _claude_md(site: Site) -> str:
               f" recorded with `{dureh} day decide ... --action provisional`, and a question with no answer after 30 minutes proceeds the same way"
               " on the option that needs no Director action (the end report lists these under `provisional`)."
               " The day plan names, for every choice it offers the Director, the fallback the desk takes after 30 minutes (release 56)."
+              f" The plan lists every action only the Director can take (a dataset link, a push approval, a config change) with `{dureh} day plan --director-action \"<text>\"` (repeatable),"
+              " so the Director handles them in one go at approval: `slack ask --kind day-plan` posts them under 대표님 조치 필요 (release 58)."
               " A wait is allowed only when the Director alone can act (a push, a dataset link, an approval-exec item): record it with"
               f" `{dureh} day decide ... --action escalated --by Director`, putting a prevention proposal in `--why` (a standing authorization,"
               " bundling the Director's actions into the morning plan ask, a harness change), and the end report lists every such wait under `waiting`"

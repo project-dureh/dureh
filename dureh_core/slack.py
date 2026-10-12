@@ -383,7 +383,8 @@ def ask(site: Site, actor: str, kind: str, text: str | None = None, no_consult: 
     With `slack.consult_agent` set, the agent is consulted first (up to `wait` seconds, default ASK_CONSULT_WAIT) and
     "<label> 의견: ..." is added to the request; `no_consult` (urgent) skips it and is recorded.
     A day-plan request carries `until` (default one hour after the ask; `until` wins): no Director reaction by then
-    counts as approval (Director, 2026-10-06), recorded by `check`/`watch`."""
+    counts as approval (Director, 2026-10-06), recorded by `check`/`watch`. The plan's `director_actions`
+    (`day plan --director-action`, release 58) are appended as a "대표님 조치 필요:" list."""
     from . import workday
 
     _require_desk(site, actor)
@@ -399,9 +400,11 @@ def ask(site: Site, actor: str, kind: str, text: str | None = None, no_consult: 
         if d["plan"] in (e.get("refs") or []):
             fail(f"an approval request for this plan is already open (ts {e['payload']['ts']}); "
                  "run `dureh slack check` or `dureh slack watch`")
+    plan = next(e for e in Ledger(site).events() if e["id"] == d["plan"])["payload"]
     if text is None or not text.strip():
-        plan = next(e for e in Ledger(site).events() if e["id"] == d["plan"])["payload"]
         text = f"*오늘 계획* ({plan.get('date')})\n목표: {plan.get('goal')}\n\n{plan.get('plan', '').strip()}"
+    if plan.get("director_actions"):  # release 58: the Director handles them in one go at approval
+        text = text.rstrip() + "\n\n" + workday.director_actions_text(plan["director_actions"])
     _token(cfg)
     text, consult = _consult_gate(site, actor, cfg, text, no_consult, ASK_CONSULT_WAIT if wait is None else wait)
     body = _titled(site, text.strip()) + "\n\n" + ASK_LINE

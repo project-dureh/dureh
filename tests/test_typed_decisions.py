@@ -228,6 +228,46 @@ class NeverStall(SiteCase):
                       " 꼭 필요할때는 기다릴수 있지만, 이를 예방하기 위한 제안을 제게 하고 제가 선택적으로 해결해주기로 합니다)", text)
         self.assertIn(self.RULE, (self.site_root / "CLAUDE.md").read_text())  # the installed desk file carries it too
 
+    def test_generated_claude_md_names_the_director_actions(self):
+        from dureh_core.runtimes.claude_code import _claude_md
+
+        text = _claude_md(self.s)
+        self.assertIn("The plan lists every action only the Director can take (a dataset link, a push approval, a config change)"
+                      " with `", text)
+        self.assertIn(" day plan --director-action \"<text>\"` (repeatable), so the Director handles them in one go at"
+                      " approval: `slack ask --kind day-plan` posts them under 대표님 조치 필요 (release 58).", text)
+
+    def test_director_actions_are_recorded_and_shown(self):
+        """Release 58: `day plan --director-action` (repeatable) rides on day.planned and `day status` shows the list."""
+        workday.switch(self.s, True, "trial")
+        f = self.tmp / "plan.md"
+        f.write_text("1. W\n")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = main(["--site", str(self.site_root), "day", "plan", "--goal", "finish W", "--file", str(f),
+                         "--director-action", "link dataset ds-0042 (site link-project)",
+                         "--director-action", "  approve the push of modules/m main  "])
+        self.assertEqual(code, 0)
+        ev = json.loads(out.getvalue())
+        self.assertEqual(ev["type"], "day.planned")
+        self.assertEqual(ev["payload"]["director_actions"],
+                         ["link dataset ds-0042 (site link-project)", "approve the push of modules/m main"])
+        st = workday.status(self.s)
+        self.assertEqual(st["director_actions"], ev["payload"]["director_actions"])
+        text = workday.render(st)
+        self.assertIn("\n대표님 조치 필요:\n- link dataset ds-0042 (site link-project)\n- approve the push of modules/m main", text)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(main(["--site", str(self.site_root), "day", "status"]), 0)
+        self.assertIn("대표님 조치 필요:", out.getvalue())
+        # without the flag: no key, no line
+        workday.approve(self.s, "desk", "ok")
+        workday.end(self.s, "desk", "done", "", [], "Director: 오늘은 여기까지")
+        workday.plan(self.s, "desk", "next", "1. W", None)
+        st = workday.status(self.s)
+        self.assertNotIn("director_actions", st)
+        self.assertNotIn("대표님 조치 필요", workday.render(st))
+
     def test_end_report_lists_provisional_decisions(self):
         workday.switch(self.s, True, "trial")
         workday.plan(self.s, "desk", "finish W", "1. W", None)
