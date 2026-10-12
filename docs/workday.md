@@ -57,6 +57,14 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    point; the typed block goes on a `day-choice` decision record that references the event, and `day status
    --json` and the end report show it next to the decision. `confidence low` needs `--action escalated` (with
    `--by` naming the Director) or `provisional`; a provisional choice is the "easy to change" one below.
+   **Never stall on the Director (release 56).** Director, 2026-10-12: "제가 바뻐서 못볼때 진행못하고 멈춰있는것을
+   근무시간으로 보는것은 어려울것같아요. 가능하면 계속 업무가 수행되야하는거라." A question to the Director holds only the
+   item that needs the Director's own action (a push, a link-project, a config change, an approval-exec item);
+   every other item continues on an easy-to-change provisional choice recorded with `dureh day decide ...
+   --action provisional`. A question with no answer after 30 minutes proceeds the same way on the option that
+   needs no Director action, recorded with `--action provisional` too; the end report lists these choices under
+   `provisional` (title, choice). The day plan names, for every choice it offers the Director, the fallback the
+   desk takes after 30 minutes.
 4. **End time: finish the plan.** The day's plan is finished the same day. Director, 2026-10-06: "버그는 수정되고,
    업무는 하루 계획량까지 해야하는게 하네스의 기본 골자입니다", and to the desk: "문제가 발생시, 초과근무로 문제를 모두
    해결하고 당일 업무를 마무리 짓는다." When a problem appears, the desk fixes it and finishes; a plan item is never moved
@@ -119,7 +127,10 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    tasks and of jobs, every job id (an array as `<id>_[0-N]` plus each task id), the exact command recorded at
    submit time, the state summary from the recorded states (`slurm watch|status|wait`; the scheduler is not asked
    at day end) and the log dir, plus the totals and the line `jobs today: N runs, M tasks, K failed`. The Slack
-   end-report summary (`dureh report --kind end-report`: the first paragraph) carries that line.
+   end-report summary (`dureh report --kind end-report`: the first paragraph) carries that line. **Provisional
+   (release 56).** The report's `provisional` list names every decision of the day recorded with `--action
+   provisional` (its event id, the `day-choice` record, title, choice and question) next to `decisions`, so the
+   Director sees at the end which choices were taken without waiting (step 3) and may overturn them.
 7. **Close.** In this order: the desk stops every Monitor and background task, writes the handoff
    (`state/memory/handoff.md`), runs `dureh day close`, and then does nothing more. `day close` checks that no
    agent runs and the handoff is fresh, records `day.closed`, and releases the session job as described in
