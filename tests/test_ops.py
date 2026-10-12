@@ -49,6 +49,38 @@ class Ops(SiteCase):
         with self.assertRaisesRegex(DurehError, "only the desk"):
             wf.purge(self.s, "py-writer", w)
 
+    def test_purge_removes_a_worktree_git_cannot_delete(self):
+        """Release 57 (UR-20261012-01): `git worktree remove --force` deregisters the worktree even when it
+        fails to delete the directory; purge then removes the directory itself and prunes."""
+        self.make_module()
+        b = wf.wi_new(self.s, "desk", "b", "g", "pm-modules", "modules/demo", ["a"])["id"]
+        w = wf.wi_new(self.s, "desk", "t", "g", "py-writer", "modules/demo", ["a"], parent=b)["id"]
+        wf.wi_approve(self.s, "desk", w, "ok")
+        wf._create_worktree(self.s, w, "modules/demo")
+        wf.dispatch_stop(self.s, "desk", w, "test")
+        wt = self.site_root / "worktrees" / w
+        branch = subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=wt, capture_output=True,
+                                text=True).stdout.strip()
+        outside = self.tmp / "main-env"
+        outside.mkdir()
+        (outside / "python").write_text("#!/bin/sh\n")
+        venv = wt / ".venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python").symlink_to(outside / "python")
+        (venv / "lib" / "pkg").mkdir(parents=True)
+        (venv / "lib" / "pkg" / "f.py").write_text("x\n")
+        (venv / "lib64").symlink_to("lib")
+        (venv / "lib" / "pkg").chmod(stat.S_IRUSR | stat.S_IXUSR)  # git cannot unlink f.py
+        mod = self.site_root / "modules" / "demo"
+        out = wf.purge(self.s, "desk", w)
+        self.assertFalse(wt.exists())
+        self.assertTrue((outside / "python").is_file(), "symlink target untouched")
+        self.assertIn(str(wt), out["removed"])
+        self.assertNotIn(str(wt), subprocess.run(["git", "worktree", "list"], cwd=mod, capture_output=True, text=True).stdout)
+        self.assertEqual(subprocess.run(["git", "branch", "--list", branch], cwd=mod, capture_output=True,
+                                        text=True).stdout.strip(), "", "the stopped WI's own branch dropped")
+        self.assertEqual([e["type"] for e in Ledger(self.s).events(w) if e["type"] == "purged"], ["purged"])
+
     def _stopped_project_wi(self, s=None):
         s = s or self.s
         (self.site_root / "projects" / "lna").mkdir(parents=True, exist_ok=True)

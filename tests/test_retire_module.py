@@ -1,9 +1,12 @@
-"""Release 55 (UR-20261011-02, option A): `dureh site retire-module` is the mirror of link-module."""
+"""Release 55 (UR-20261011-02, option A): `dureh site retire-module` is the mirror of link-module.
+Release 57 (UR-20261012-01): the event follows the removal; a failure mid-way records site.module-retire-failed."""
 import io
 import json
 import os
+import stat
 import subprocess
 import unittest
+from unittest import mock
 from contextlib import redirect_stdout
 
 from helpers import SiteCase, hook
@@ -138,9 +141,10 @@ class RetireModule(SiteCase):
         out = json.loads(buf.getvalue())
         self.assertTrue(out["dry_run"])
         self.assertEqual([s["step"] for s in out["steps"]],
-                         ["registered", "no-live-work", "checkout", "references", "record", "remove", "regenerate"])
-        self.assertEqual(out["steps"][5]["directory"], str(self.mod))
-        self.assertEqual(out["steps"][5]["worktrees"], [str(self.s.worktrees / wi)])
+                         ["registered", "no-live-work", "checkout", "references", "remove", "record", "regenerate"])
+        self.assertEqual(out["steps"][4]["directory"], str(self.mod))
+        self.assertEqual(out["steps"][4]["worktrees"], [str(self.s.worktrees / wi)])
+        self.assertEqual(out["steps"][5]["event"], "site.module-retired")
         self.assertIn(f"link-module --id demo --source {self.src} --rev {git(self.mod, 'rev-parse', 'HEAD')}", out["compensation"])
         self.assertEqual((self.site_root / "config.json").read_text(), before)
         self.assertTrue(self.mod.is_dir())
@@ -181,6 +185,112 @@ class RetireModule(SiteCase):
         self.assertEqual(restored["rev"], head)
         self.assertEqual(git(self.site_root / "modules" / "demo", "rev-parse", "HEAD"), head)
         self.assertIn("demo", [e["id"] for e in self.config()["modules"]])
+
+    # ---- release 57 (UR-20261012-01): removal before the event, fallback removal, partial failure
+    def venv_git_cannot_delete(self, wt):
+        """An untracked `.venv` like a shared uv env: `lib64 -> lib`, `bin/python` to an interpreter outside the
+        site, a dangling link, and a read-only directory so that `git worktree remove --force` fails after
+        deregistering the worktree (the measured case: on NFS, a file held open by a process is silly-renamed)."""
+        outside = self.tmp / "main-env" / "bin"
+        outside.mkdir(parents=True)
+        (outside / "python").write_text("#!/bin/sh\n")
+        venv = wt / ".venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "lib" / "python3.11" / "site-packages" / "pkg").mkdir(parents=True)
+        (venv / "lib" / "python3.11" / "site-packages" / "pkg" / "mod.py").write_text("x\n")
+        (venv / "lib64").symlink_to("lib")
+        (venv / "bin" / "python").symlink_to(outside / "python")
+        (venv / "bin" / "dangling").symlink_to(self.tmp / "nowhere" / "python")
+        (venv / "pyvenv.cfg").write_text(f"home = {outside}\n")
+        ro = venv / "lib" / "python3.11" / "site-packages" / "pkg"
+        ro.chmod(stat.S_IRUSR | stat.S_IXUSR)
+        return outside
+
+    def test_retire_removes_a_worktree_git_cannot_delete_and_records_after_removal(self):
+        wi = self.stopped_wi_with_worktree()
+        wt = self.s.worktrees / wi
+        branch = git(wt, "rev-parse", "--abbrev-ref", "HEAD")
+        outside = self.venv_git_cannot_delete(wt)
+        seen = {}
+        real = Ledger.event
+
+        def spy(led, type_, actor, wi_=None, payload=None, refs=None):
+            if type_ == "site.module-retired":
+                seen["worktree_exists"] = wt.exists()
+                seen["config_has_demo"] = "demo" in [e["id"] for e in self.config()["modules"]]
+                seen["module_exists"] = self.mod.exists()
+            return real(led, type_, actor, wi_, payload, refs)
+
+        with mock.patch.object(Ledger, "event", spy):
+            out = sitelinks.retire_module(self.s, "desk", "demo")
+        self.assertFalse(wt.exists(), "worktree removed by the fallback after git failed")
+        self.assertTrue((outside / "python").is_file(), "symlink target outside the site untouched")
+        self.assertEqual(seen, {"worktree_exists": False, "config_has_demo": False, "module_exists": False},
+                         "the event is recorded after every removal step")
+        self.assertEqual(self.events("site.module-retire-failed"), [])
+        ev = self.events()
+        self.assertEqual(len(ev), 1)
+        self.assertEqual(ev[0]["payload"]["removed"],
+                         {"config_entry": True, "worktrees": [str(wt)], "branches": [branch], "directory": True})
+        self.assertEqual(out["removed"], ev[0]["payload"]["removed"])
+
+    def test_retire_removes_a_deregistered_leftover_worktree_directory(self):
+        wi = self.stopped_wi_with_worktree()
+        wt = self.s.worktrees / wi
+        branch = git(wt, "rev-parse", "--abbrev-ref", "HEAD")
+        (wt / ".git").unlink()  # what a failed `git worktree remove --force` leaves behind
+        git(self.mod, "worktree", "prune")
+        self.assertNotIn(str(wt), git(self.mod, "worktree", "list"))
+        (wt / ".venv" / "lib").mkdir(parents=True)
+        (wt / ".venv" / "lib64").symlink_to("lib")
+        sitelinks.retire_module(self.s, "desk", "demo")
+        self.assertFalse(wt.exists())
+        self.assertFalse(wt.is_symlink())
+        p = self.events()[0]["payload"]
+        self.assertEqual(p["removed"]["worktrees"], [str(wt)])
+        self.assertEqual(p["removed"]["branches"], [branch], "the site's own WI branch is still dropped")
+
+    def test_failure_mid_way_records_retire_failed_and_keeps_the_module(self):
+        first = self.stopped_wi_with_worktree()
+        second = self.stopped_wi_with_worktree()
+        real = wf.remove_wi_worktree
+        calls = []
+
+        def flaky(site, led, wi, wt, root, drop_branch=True):
+            calls.append(wi)
+            if len(calls) == 2:
+                raise DurehError(f"git worktree remove --force {wt} failed in {root}: Directory not empty")
+            return real(site, led, wi, wt, root, drop_branch)
+
+        with mock.patch.object(wf, "remove_wi_worktree", flaky):
+            with self.assertRaisesRegex(DurehError, f"failed at step 'worktree {calls and calls[-1] or 'WI-'}") as cm:
+                sitelinks.retire_module(self.s, "desk", "demo")
+        self.assertEqual(calls, sorted({first, second}))
+        self.assertIn(f"failed at step 'worktree {calls[1]}': git worktree remove", str(cm.exception))
+        self.assertIn("1 of 2 worktree(s)", str(cm.exception))
+        self.assertIn("config entry kept", str(cm.exception))
+        self.assertEqual(self.events(), [], "no site.module-retired")
+        failed = self.events("site.module-retire-failed")
+        self.assertEqual(len(failed), 1)
+        p = failed[0]["payload"]
+        self.assertEqual(p["id"], "demo")
+        self.assertEqual(p["step"], f"worktree {calls[1]}")
+        self.assertIn("Directory not empty", p["error"])
+        self.assertEqual(p["removed"]["worktrees"], [str(self.s.worktrees / calls[0])])
+        self.assertEqual(len(p["removed"]["branches"]), 1)
+        self.assertFalse(p["removed"]["config_entry"])
+        self.assertFalse(p["removed"]["directory"])
+        self.assertIn("link-module --id demo", p["compensation"])
+        self.assertIn("demo", [e["id"] for e in self.config()["modules"]], "module still registered")
+        self.assertTrue(self.mod.is_dir())
+        self.assertFalse((self.s.worktrees / calls[0]).exists())
+        self.assertTrue((self.s.worktrees / calls[1]).is_dir())
+        # the second run finishes the job
+        out = sitelinks.retire_module(self.site(), "desk", "demo")
+        self.assertEqual(out["removed"]["worktrees"], [str(self.s.worktrees / calls[1])])
+        self.assertEqual(len(self.events()), 1)
+        self.assertNotIn("demo", [e["id"] for e in self.config()["modules"]])
+        self.assertFalse(self.mod.exists())
 
 
 if __name__ == "__main__":
