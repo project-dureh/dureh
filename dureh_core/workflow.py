@@ -2080,16 +2080,37 @@ def remove_wi_worktree(site: Site, led: Ledger, wi: str, wt: Path, root: Path | 
                        drop_branch: bool = True) -> str | None:
     """Remove a WI's worktree at `wt` (registered in the target repository `root` when it is one) and, with
     `drop_branch`, the site's own WI branch; shared by `purge` and `site retire-module` (release 55).
-    Returns the branch deleted, or None."""
+    Release 57 (UR-20261012-01): `git worktree remove --force` deregisters the worktree even when it fails to
+    delete the directory (an untracked `.venv` on NFS: a file held open is silly-renamed, its directory is not
+    empty, git exits non-zero), so a failed or skipped git removal falls back to the harness's own tree removal
+    (symlinks removed as links, targets never followed, read-only trees made writable), followed by
+    `git worktree prune`; a directory git no longer registers (no `.git` file) is removed that way without
+    asking git. Fails when the directory is still there afterwards. Returns the branch deleted, or None."""
+    from .exectree import _rmtree
+
     dropped = None
     if root is not None and (root / ".git").exists():
-        branch = git(["rev-parse", "--abbrev-ref", "HEAD"], wt, check=False) if wt.exists() else ""
-        git(["worktree", "remove", "--force", str(wt)], root, check=wt.exists())
-        if drop_branch and branch and _own_branch(site, led, wi, root, branch):
-            git(["branch", "-D", branch], root, check=False)
-            dropped = branch
+        if (wt / ".git").exists():  # registered worktree: its branch is HEAD
+            candidates = [git(["rev-parse", "--abbrev-ref", "HEAD"], wt, check=False)]
+            proc = subprocess.run(["git", "worktree", "remove", "--force", str(wt)], cwd=root,
+                                  capture_output=True, text=True, timeout=600)
+            if proc.returncode != 0 and (wt.exists() or wt.is_symlink()):
+                _rmtree(wt)
+        else:  # a deregistered leftover (or nothing): the site's own branch names for the WI
+            candidates = list(wi_branches(site, wi))
+            _rmtree(wt)
+        subprocess.run(["git", "worktree", "prune"], cwd=root, capture_output=True, text=True, timeout=600)
+        if drop_branch:
+            for branch in candidates:
+                if branch and branch != "HEAD" and git(["branch", "--list", branch], root, check=False) \
+                        and _own_branch(site, led, wi, root, branch):
+                    git(["branch", "-D", branch], root, check=False)
+                    dropped = dropped or branch
     if wt.exists() or wt.is_symlink():
-        shutil.rmtree(wt) if wt.is_dir() and not wt.is_symlink() else wt.unlink()
+        _rmtree(wt)
+    if wt.exists() or wt.is_symlink():
+        fail(f"could not remove the worktree directory {wt}; check what is left there (a file held open on NFS "
+             f"keeps its directory) and remove it by hand")
     return dropped
 
 
