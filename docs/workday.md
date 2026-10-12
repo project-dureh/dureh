@@ -34,7 +34,13 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    (`"데스크, 추가근무 출근"` without one). Config `session.prompts.<purpose>` (a template with `{name}`, or
    `false`), `start --prompt TEXT` and `--no-prompt` override; the record carries the `prompt` used (or null).
 1. **Start.** The desk reports a plan to the Director (goal, work items, order, expected usage) and
-   records it: `dureh day plan --goal ... --file plan.md`.
+   records it: `dureh day plan --goal ... --file plan.md`. **Director actions (release 58).** The plan also lists
+   every action only the Director can take that day (a dataset link, a push approval, a config change), one
+   `--director-action "<text>"` each (repeatable); they ride on `day.planned` as `director_actions`, `day status`
+   prints them under `대표님 조치 필요:` (one line per action) and `slack ask --kind day-plan` appends the same list
+   to the approval request, so the Director handles them in one go at approval instead of being asked one by one
+   during the day. (Director, 2026-10-12: "꼭 필요할때는 기다릴수 있지만, 이를 예방하기 위한 제안을 제게 하고 제가 선택적으로
+   해결해주기로 합니다"; the Director adopted this and the standing fast-forward push below: "1번과 2번 복수 선택".)
 2. **Approval.** When the Director approves in the session, the desk records the Director's words:
    `dureh day approve --memo "..."`. With Slack configured (`slack.director_user` set), the desk also runs
    `dureh slack ask --kind day-plan` right after `day plan` and `dureh slack watch` as a Monitor; the Director's
@@ -69,7 +75,14 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    선택적으로 해결해주기로 합니다": the desk records such a wait with `dureh day decide ... --action escalated --by
    Director`, putting a prevention proposal in `--why` (a standing authorization, bundling the Director's actions
    into the morning plan ask, a harness change), and the end report lists every wait with its proposal under
-   `waiting` for the Director to choose from.
+   `waiting` for the Director to choose from. Two of those proposals are built in since release 58, the Director
+   having chosen both ("1번과 2번 복수 선택"): the plan's Director actions (step 1) and the **standing fast-forward
+   push**: with config `push.standing_ff` true, `dureh push --repo <path> --remote <remote> --ref <branch>` without
+   `--approval` pushes when the remote is in `push.allowed_remotes`, the branch exists there and its tip is an
+   ancestor of the pushed revision (a new branch only with `push.standing_ff_new_branches`); nothing is ever forced,
+   the event carries `approval: "standing-ff", fast_forward: true`, and a non-fast-forward is refused naming the
+   approval path (`dureh push --approve ...`, then `--approval <decision>`). `site retire-module`'s "push it first"
+   refusal names the same way out (docs/config.md).
 4. **End time: finish the plan.** The day's plan is finished the same day. Director, 2026-10-06: "버그는 수정되고,
    업무는 하루 계획량까지 해야하는게 하네스의 기본 골자입니다", and to the desk: "문제가 발생시, 초과근무로 문제를 모두
    해결하고 당일 업무를 마무리 짓는다." When a problem appears, the desk fixes it and finishes; a plan item is never moved

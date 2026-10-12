@@ -403,7 +403,7 @@ def cmd_push(a):
     if a.approve:
         _print(ops.push_approve(site, _actor(a), a.repo, a.remote, a.ref, a.memo or "", a.by))
     else:
-        _print(ops.push(site, _actor(a), a.repo, a.remote, a.ref, a.approval or fail("--approval DECISION is required"), a.dry_run))
+        _print(ops.push(site, _actor(a), a.repo, a.remote, a.ref, a.approval, a.dry_run))
 
 
 def cmd_usage(a):
@@ -537,7 +537,7 @@ def cmd_day(a):
             _print(text if st.get("enabled") else "\n".join(filter(None, [text, "Workday: off (the Director switches it on)"])))
     elif c == "plan":
         text = Path(a.file).read_text(encoding="utf-8") if a.file else sys.stdin.read()
-        _print(workday.plan(site, actor, a.goal, text, a.wi or []))
+        _print(workday.plan(site, actor, a.goal, text, a.wi or [], a.director_action or []))
     elif c == "approve":
         _print(workday.approve(site, actor, a.memo))
     elif c == "decide":
@@ -1018,11 +1018,13 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--wi", required=True)
     x.add_argument("--dry-run", action="store_true")
     x.add_argument("--actor")
-    x = add(sub, "push", cmd_push, "push an approved revision to an allowlisted remote")
+    x = add(sub, "push", cmd_push, "push an approved revision to an allowlisted remote; without --approval only a "
+                                   "fast-forward of an existing branch under config push.standing_ff (release 58)")
     x.add_argument("--repo", required=True)
     x.add_argument("--remote", required=True)
     x.add_argument("--ref", required=True)
-    x.add_argument("--approval")
+    x.add_argument("--approval", help="the Director's push-approval decision id; omitted, the push needs config "
+                                      "push.standing_ff and must fast-forward the destination branch")
     x.add_argument("--approve", action="store_true", help="record the Director's approval bound to this revision")
     x.add_argument("--memo")
     x.add_argument("--by", default="Director")
@@ -1099,6 +1101,10 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--file")
     x.add_argument("--wi", nargs="*", help="the plan's work items (default: every WI id the plan text names); after "
                                            "the end time they and their fixes go on until finished (finish-plan rule)")
+    x.add_argument("--director-action", action="append", metavar="TEXT",
+                   help="an action only the Director can take today (a dataset link, a push approval, a config "
+                        "change; repeatable, release 58): recorded as director_actions and posted by `slack ask "
+                        "--kind day-plan` under 대표님 조치 필요 so the Director handles them in one go at approval")
     x = add(dy, "approve", cmd_day, "record the Director's approval of the plan; starts the clock")
     x.add_argument("--memo", required=True)
     x = add(dy, "decide", cmd_day, "record a decision point (own proposal followed) and commit state as a rollback point")

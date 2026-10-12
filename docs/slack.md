@@ -121,7 +121,9 @@ bin/dureh slack check                                 # one pass (same decisions
 ```
 
 - `ask` refuses without a day plan recorded today that waits for approval (hint: `dureh day plan`), and while a
-  request for the same plan is open. It posts, in the company thread, the plan text followed by
+  request for the same plan is open. It posts, in the company thread, the plan text (the recorded plan or `--file`),
+  then, when the plan was recorded with `day plan --director-action ...` (release 58), `대표님 조치 필요:` with one
+  `- <action>` line per action (the Director handles them in one go at approval; docs/workday.md step 1), followed by
   `[승인 요청] 오늘 계획을 승인하시겠습니까? ✅ 승인 / ❌ 보류`, and records `slack.approval.requested`
   `{kind, ts, channel, expires, until, asked_at}` (expires = the company's day end; until = one hour after the ask,
   or `--until`, see below) with the plan as ref; never the text.
