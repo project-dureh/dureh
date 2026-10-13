@@ -184,6 +184,37 @@ class Workday(SiteCase):
         workday.close(self.s, "desk", "fixed")
         self.assertEqual(workday.status(self.s)["phase"], "off-duty")
 
+    def test_end_report_spawn_table_counts_build_and_doc_with_their_window(self):
+        """Release 59 (D4 follow-up): a worker-role spawn is `build`, a doc-writer spawn is `doc`, in `usage` and in
+        the end report; both tables name their window; the events carry `kind_reason`."""
+        from dureh_core import ops
+
+        self.start_day()
+        worker = wf.wi_new(self.s, "desk", "R", "g", "researcher", "site", ["ok"])["id"]
+        doc = wf.wi_new(self.s, "desk", "D", "g", "doc-writer", "modules/demo", ["ok"])["id"]
+        for w in (worker, doc):
+            wf.wi_approve(self.s, "desk", w, "ok")
+        for w, role in ((worker, "researcher"), (doc, "doc-writer")):
+            brief = wf.dispatch_brief(self.s, w, "desk")["brief"]
+            self.assertIsNone(hook(self.s, hook_event_name="PreToolUse", tool_name="Agent", cwd=str(self.site_root),
+                                   tool_input={"subagent_type": role, "prompt": brief, "description": "x"}))
+        model = self.s.model_for_tier(self.s.org.role("researcher").tier)["model"]
+        events = [e for e in Ledger(self.s).events() if e["type"] == "wi.dispatched"]
+        self.assertEqual([(e["payload"]["kind"], e["payload"]["kind_reason"]) for e in events],
+                         [("build", "default"), ("doc", "role in routing_doc_roles")])
+        today = datetime.now(timezone.utc).date().isoformat()
+        u = ops.usage(self.s)["spawns_today"]
+        self.assertEqual(u["kinds"]["build"][model], 1)
+        self.assertEqual(sum(u["kinds"]["doc"].values()), 1)
+        self.assertEqual(u["window"], {"since": None, "day": today})
+        self.at(T0 + timedelta(hours=8, minutes=1))
+        rec = workday.end(self.s, "desk", "R and D", "", [])
+        table = rec["payload"]["spawns"]
+        plan = [e for e in Ledger(self.s).events() if e["type"] == "day.planned"][-1]
+        self.assertEqual(table["kinds"]["build"][model], 1)
+        self.assertEqual((sum(table["kinds"]["doc"].values()), table["total"]), (1, 2))
+        self.assertEqual(table["window"], {"since": plan["id"], "day": plan["ts"][:10]})
+
     def test_usage_budget_per_work_unit(self):
         self.start_day()
         self.spend(7)

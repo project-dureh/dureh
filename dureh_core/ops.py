@@ -2141,11 +2141,14 @@ SPAWN_TYPES = ("wi.dispatched", "checker.dispatched")
 
 def spawn_table(events: list[dict], since: tuple[str, str] | None = None, day: str | None = None) -> dict:
     """Release 54: today's spawns (the `wi.dispatched` / `checker.dispatched` events) counted per kind per model:
-    {kinds: {kind: {model: n}}, total: n}. `since` (ts, id) counts the events after that record instead of the UTC
-    day `day` (default today); a spawn recorded before release 54 has no kind and counts under `unknown`."""
-    from datetime import date
+    {kinds: {kind: {model: n}}, total: n, window: {since, day}}. `since` (ts, id) counts the events after that record
+    (its id is `window.since`, its UTC date `window.day`) instead of the UTC day `day` (default today in UTC, as the
+    records' `ts` are written; release 59); a spawn recorded before release 54 has no kind and counts under `unknown`."""
+    from datetime import datetime, timezone
 
-    day = day or date.today().isoformat()
+    if since is not None:
+        day = since[0][:10]
+    day = day or datetime.now(timezone.utc).date().isoformat()
     table: dict[str, dict[str, int]] = {}
     total = 0
     for e in events:
@@ -2160,4 +2163,5 @@ def spawn_table(events: list[dict], since: tuple[str, str] | None = None, day: s
         row = table.setdefault(kind, {})
         row[model] = row.get(model, 0) + 1
         total += 1
-    return {"kinds": {k: dict(sorted(v.items())) for k, v in sorted(table.items())}, "total": total}
+    return {"kinds": {k: dict(sorted(v.items())) for k, v in sorted(table.items())}, "total": total,
+            "window": {"since": since[1] if since is not None else None, "day": day}}

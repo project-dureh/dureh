@@ -667,7 +667,7 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None) -> 
         fail(f"{wi} is {st}; only approved or rework items can be dispatched")
     # release 54 (D3): routing picks a tier by the work unit's kind; the academic and rework escalations below
     # keep precedence; a kind routed to null, or no `models.routing` at all, keeps the role's own tier
-    kind = dispatch_kind(site, p, role, checking)
+    kind, kind_reason = dispatch_kind_reason(site, p, role, checking)
     tier = site.routing().get(kind) or role.tier
     entry = site.model_for_tier("writer-academic" if p.get("academic") and not checking else tier)
     ok, why = _qualified(entry)
@@ -717,7 +717,8 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None) -> 
     digest = hashlib.sha256(full.encode("utf-8")).hexdigest()[:16]
     header = f"{BRIEF_TAG} {wi} role={role.name} brief={digest}"
     led.event("dispatch.prepared", by, wi, {"role": role.name, "brief": digest, "bytes": len(body), "checking": checking,
-                                            "model": entry["model"], "kind": kind, "qualification": why,
+                                            "model": entry["model"], "kind": kind, "kind_reason": kind_reason,
+                                            "qualification": why,
                                             "worktree": wt["worktree"], "base": wt["base"], "by": by,
                                             **({"worktree_env": wt["env"]} if wt.get("env") else {}),
                                             **({"verification_bytes": len(block.encode("utf-8"))} if block else {}),
@@ -730,13 +731,22 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None) -> 
 def dispatch_kind(site: Site, payload: dict, role, checking: bool) -> str:
     """The kind of a work unit (release 54, D3): `check` for a checker dispatch, `doc` when the role is in
     `models.routing_doc_roles` (default doc-writer), `triage` when the WI lane is `desk`, else `build`."""
+    return dispatch_kind_reason(site, payload, role, checking)[0]
+
+
+KIND_REASONS = ("check", "role in routing_doc_roles", "lane desk", "default")  # release 59 (D4): why a kind was chosen
+
+
+def dispatch_kind_reason(site: Site, payload: dict, role, checking: bool) -> tuple[str, str]:
+    """(kind, reason) of a work unit; the reason (release 59, D4 follow-up) rides on `dispatch.prepared` and the
+    spawn events as `kind_reason`: `check`, `role in routing_doc_roles`, `lane desk` or `default`."""
     if checking:
-        return "check"
+        return "check", "check"
     if role.name in site.routing_doc_roles():
-        return "doc"
+        return "doc", "role in routing_doc_roles"
     if payload.get("lane") == "desk":
-        return "triage"
-    return "build"
+        return "triage", "lane desk"
+    return "build", "default"
 
 
 def _dispatch_worktree_env(site: Site, led: Ledger, wi: str, by: str, wt: Path, target: str) -> dict | None:

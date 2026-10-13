@@ -1397,6 +1397,7 @@ def _record_spawn(led: Ledger, role: str, target: str, wi: str, digest: str, ti:
         led.event(etype, role, wi, {"role": target, "brief": digest, "by": role,
                                     "model": prepared[-1]["payload"].get("model"),
                                     "kind": prepared[-1]["payload"].get("kind"),
+                                    "kind_reason": prepared[-1]["payload"].get("kind_reason"),  # release 59
                                     "background": bool(ti.get("run_in_background")),
                                     **({"model_unstated": True} if unstated else {})}, [prepared[-1]["id"]])
     except DurehError as exc:

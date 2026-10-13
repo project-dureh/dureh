@@ -200,10 +200,24 @@ class Routing(SiteCase):
         t = self.item("researcher", lane="desk")
         self.assertIsNone(self.spawn("desk", "researcher", wf.dispatch_brief(self.s, t, "desk")["brief"], model="haiku"))
         u = ops.usage(self.s)["spawns_today"]
-        self.assertEqual(u, {"kinds": {"build": {SONNET: 1}, "check": {HAIKU: 1}, "triage": {HAIKU: 1}}, "total": 3})
+        from datetime import datetime, timezone
+
+        today = datetime.now(timezone.utc).date().isoformat()  # the records' ts are UTC (release 59)
+        self.assertEqual(u, {"kinds": {"build": {SONNET: 1}, "check": {HAIKU: 1}, "triage": {HAIKU: 1}}, "total": 3,
+                             "window": {"since": None, "day": today}})
+        reasons = [(e["type"], e["payload"]["kind"], e["payload"]["kind_reason"]) for e in self.led.events()
+                   if e["type"] in ("wi.dispatched", "checker.dispatched")]
+        self.assertEqual(reasons, [("wi.dispatched", "build", "default"), ("checker.dispatched", "check", "check"),
+                                   ("wi.dispatched", "triage", "lane desk")])
+        prepared = [e["payload"]["kind_reason"] for e in self.led.events() if e["type"] == "dispatch.prepared"]
+        self.assertEqual(prepared, ["default", "check", "lane desk"])
         self.led.event("wi.dispatched", "desk", self.item("researcher"), {"role": "researcher", "model": SONNET})
         self.assertEqual(ops.spawn_table(self.led.events())["kinds"]["unknown"], {SONNET: 1}, "pre-54 event")
-        self.assertEqual(ops.spawn_table(self.led.events(), day="2000-01-01")["total"], 0)
+        old = ops.spawn_table(self.led.events(), day="2000-01-01")
+        self.assertEqual((old["total"], old["window"]), (0, {"since": None, "day": "2000-01-01"}))
+        first = [e for e in self.led.events() if e["type"] == "wi.dispatched"][0]
+        win = ops.spawn_table(self.led.events(), (first["ts"], first["id"]))
+        self.assertEqual((win["total"], win["window"]), (3, {"since": first["id"], "day": first["ts"][:10]}))
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             self.assertEqual(cli.main(["--site", str(self.site_root), "usage"]), 0)

@@ -60,7 +60,9 @@ The model is the routed tier's model when `models.routing` maps the kind to a ti
 the role's own tier, as before release 54. The academic escalation (`academic: true` -> tier `writer-academic`) and
 the rework escalation (a worker at the tier's `rework_limit` -> tier `pm`) apply after routing and win. Without
 `models.routing` no model choice changes; the brief body never changes with routing (the kind is on the spawn line,
-not in the digest). `dispatch.prepared`, `wi.dispatched` and `checker.dispatched` record `kind` next to `model`.
+not in the digest). `dispatch.prepared`, `wi.dispatched` and `checker.dispatched` record `kind` next to `model`,
+and since release 59 (D4 follow-up) `kind_reason` as well, the rule that chose the kind: `check`, `role in
+routing_doc_roles`, `lane desk` or `default`; `kind` itself is unchanged.
 
 The desk passes the printed model as the Agent tool's `model` (which takes precedence over the agent file). The
 spawn hook refuses a spawn whose `model` names another model than the brief's (the `provider:id`, the id or the
