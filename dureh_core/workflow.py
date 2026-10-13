@@ -1931,7 +1931,14 @@ def wi_promote(site: Site, actor: str, wi: str, memo: str) -> dict:
         conflicts = _merge_conflicts(root, target_head, branch)
         if conflicts:
             _promote_failed(led, actor, wi, rec, root, base, head, target_head, conflicts, "pre-check")
-        git(["merge", "--no-ff", "-m", f"Promote {wi}: {rec['payload']['title']}", branch], root)
+        try:
+            git(["merge", "--no-ff", "-m", f"Promote {wi}: {rec['payload']['title']}", branch], root)
+        except DurehError as exc:
+            # the pre-check passed (or gave no verdict) and the merge still failed: abort it so the main tree is
+            # back where it was (nothing to abort when git refused before starting, e.g. a file in the way)
+            unmerged = [l for l in git(["diff", "--name-only", "--diff-filter=U"], root, check=False).splitlines() if l]
+            git(["merge", "--abort"], root, check=False)
+            _promote_failed(led, actor, wi, rec, root, base, head, target_head, sorted(unmerged), "merge", str(exc))
         merge = git(["rev-parse", "HEAD"], root)
     dec = led.append("decision", "gate2", actor, wi, {"subject": f"Gate 2 {wi}", "disposition": "approve",
                                                         "by": "desk", "memo": memo,

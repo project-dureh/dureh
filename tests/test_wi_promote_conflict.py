@@ -105,3 +105,49 @@ class PreCheck(PromoteCase):
         self.assertEqual(wf._merge_conflicts(self.mod, head, branch), ["docs/note.md"])
         self.assertIsNone(wf._merge_conflicts(self.mod, head, "no-such-branch"), "git error: no verdict")
         self.assert_main_untouched(head)
+
+
+class MergeAbort(PromoteCase):
+    """The pre-check passed (or could not tell) and the merge itself failed: it is aborted and recorded the same way."""
+
+    def test_a_file_in_the_way_refuses_and_leaves_nothing_behind(self):
+        # merge-tree accepts (the trees merge), `git merge` refuses: an untracked file would be overwritten
+        wi, wt = self.verified("docs/new.md", "x\n")
+        main_head = git(self.mod, "rev-parse", "HEAD")
+        (self.mod / "docs" / "new.md").write_text("stray\n")  # untracked; the clean-tree gate ignores untracked files
+        self.assertEqual(wf._merge_conflicts(self.mod, main_head, git(wt, "rev-parse", "--abbrev-ref", "HEAD")), [])
+        with self.assertRaises(DurehError) as cm:
+            wf.wi_promote(self.s, "desk", wi, "ok")
+        self.assertIn("the merge failed", str(cm.exception))
+        self.assertIn(f"wi amend --wi {wi} --reopen --rebase {main_head[:12]}", str(cm.exception))
+        self.assertFalse((self.mod / ".git" / "MERGE_HEAD").exists())
+        self.assertEqual(git(self.mod, "rev-parse", "HEAD"), main_head)
+        self.assertEqual(git(self.mod, "status", "--porcelain", "--untracked-files=no"), "")
+        self.assertEqual((self.mod / "docs" / "new.md").read_text(), "stray\n", "the stray file is not touched")
+        ev = self.failed_event(wi)
+        self.assertEqual(ev["payload"]["stage"], "merge")
+        self.assertEqual(ev["payload"]["conflicts"], [])
+        self.assertIn("untracked", ev["payload"]["error"])
+        self.assertEqual(self.led.wi_status(wi)["status"], "verified")
+
+    def test_a_conflicting_merge_is_aborted_when_the_precheck_gave_no_verdict(self):
+        wi, wt = self.verified()
+        main_head = self.main_commits("docs/note.md", "line one, by main\n")
+        real = wf._merge_conflicts
+        wf._merge_conflicts = lambda *a: None  # an older git: no pre-check verdict
+        try:
+            with self.assertRaises(DurehError) as cm:
+                wf.wi_promote(self.s, "desk", wi, "ok")
+        finally:
+            wf._merge_conflicts = real
+        self.assertIn("conflicts in: docs/note.md", str(cm.exception))
+        self.assert_main_untouched(main_head)
+        self.assertEqual((self.mod / "docs" / "note.md").read_text(), "line one, by main\n")
+        ev = self.failed_event(wi)
+        self.assertEqual(ev["payload"]["stage"], "merge")
+        self.assertEqual(ev["payload"]["conflicts"], ["docs/note.md"])
+        self.assertEqual(ev["payload"]["target_head"], main_head)
+        self.assertEqual(self.led.wi_status(wi)["status"], "verified")
+        # recovery as after a pre-check refusal
+        wf.wi_amend(self.s, "desk", wi, "Director: rebase", {}, rebase=main_head, reopen=True)
+        self.assertEqual(self.led.wi_status(wi)["status"], "approved")
