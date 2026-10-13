@@ -275,8 +275,23 @@ dureh verify --wi <WI> --collect [RUN]   # checker, re-dispatched: record the ve
   when an item needs rework or dispatch.
 - **Collect** reads each check's `.exit/.ms/.out` files and records the verification exactly as the synchronous
   path (`verification.recorded`, then `wi.verified` or `rework.requested`; the record adds `collected_from`). It is
-  refused, recording nothing, while the job is pending or running, when the WI head or its declared checks changed
-  since submission, or when the run was already collected.
+  refused, recording nothing, while the job is pending or running, when the declared checks changed since
+  submission, or when the run was already collected.
+- **Stale runs are superseded (release 61, UR-20261013-02).** A pending verify run is *stale* when the head it
+  was submitted on is no longer the item's head (the desk stopped the item, amended it and the worker re-staged,
+  for example). Before release 61 a stale run deadlocked the checker: `--collect` refused ("moved ... Submit
+  again"), `--submit` refused (a run was waiting to be collected) and the checker brief kept asking for
+  `--collect`. Now `verify --wi <WI> --submit` with a stale pending run records `verification.superseded` {`run`,
+  `old_head`, `new_head`, `job_id`, `reason: "head moved"`, `job_state`, `cancelled`} (refs the old run), cancels
+  the old job if it is still pending or running (`scancel`; its result is ignored either way) and submits the new
+  run as usual, returning `superseded` and `superseded_note` with it. `verify --wi <WI> --collect` on a stale run
+  records the same event instead of refusing, writes no verification and returns `superseded` with `next: run
+  verify --wi <WI> --submit` (exit 0). A superseded run is not pending: `pending_verify`, the checker brief, the
+  `wi amend` guard on a staged item's `--checks-runner`/`--requirements` and `slurm watch` (`next=none (verify run
+  ... superseded ...)`) all ignore it. The checker brief for a stale run says to run `--submit`, not `--collect`,
+  with the reason (the item moved; its results do not describe the current head). A pending run whose head still
+  matches is refused by `--submit` and collected by `--collect` as before. The `verify` capability may append
+  `verification.superseded` (`org/roles.yaml`).
 - **Lanes.** A pending verify job is a running scheduler job: it holds its item's lane until its end is recorded.
 - **Rework briefs.** `dispatch brief` for an item with rework > 0 appends a "Last verification" block from the
   latest failed verify run: failed check ids and commands, exit codes, the last 20 output lines of each, per-check

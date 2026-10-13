@@ -99,8 +99,9 @@ lessons | bootstrap | dependencies | state: as before
 
 - **Capabilities** (closed set): `submit_jobs` (`slurm submit/status/wait/resubmit-failed`, `run.status`,
   `run.completed`, `slurm.via-failed`), `verify`
-  (`verify --wi`, `verification.recorded`, `wi.verified`), `network` (WebFetch, WebSearch). A role's tools come from
-  its kind, capabilities and scopes; the events it may record from its kind's list plus its capabilities' lists
+  (`verify --wi`, `verification.recorded`, `verification.superseded`, `wi.verified`), `network` (WebFetch,
+  WebSearch). A role's tools come from its kind, capabilities and scopes; the events it may record from its kind's
+  list plus its capabilities' lists
   (`org/roles.yaml` `event_authority`, `capability_authority`). The desk holds `submit_jobs`, `verify`, `network`.
 - **No `promote` capability** (Director, 2026-10-09): release 46 removed the `dureh promote` data path (run
   promotion, `--metadata`, `--kind report`); landing results in a final area is the company's own tooling. `dureh wi
