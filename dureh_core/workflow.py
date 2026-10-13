@@ -317,7 +317,9 @@ def worktree_repair_all(site: Site, actor: str, dry_run: bool = False, envs: boo
     (proposals/site-rename-independence.md rows 13-14, step 3).
 
     Worktrees: the directories under `worktrees/` and the entries every modules/* and projects/* repository
-    registers (a registered path whose directory is gone is pruned); each is handled as `--wi` handles one. Then a
+    registers (a registered path whose directory is gone is pruned); each is handled as `--wi` handles one. A
+    `worktrees/<WI>` directory its checkout no longer registers is skipped (`not registered: <path>`, release 59),
+    in the env pass too, and never deleted. Then a
     plain `git worktree repair` in each repository with linked worktrees, for worktrees that live elsewhere.
     Environments (`envs`): the main tree of every module and project, the WI worktrees' (through the worktree
     pass; in the env pass with `envs_only`) and the exec-tree siblings `<tree>.venv`; only stale ones are rebuilt
@@ -336,12 +338,21 @@ def worktree_repair_all(site: Site, actor: str, dry_run: bool = False, envs: boo
     repos = _site_repos(site)
     git_repos = [(t, r) for t, r in repos if (r / ".git").exists()]
     rows: list[dict] = []
+    # release 59: the WI worktrees each checkout registers; a `worktrees/<WI>` directory its checkout no longer
+    # lists (a deregistered leftover) is skipped, never repaired, pruned or deleted
+    registered: dict[str, set[str]] = {}
+    for target, root in git_repos:
+        registered[target] = {p.name for p in _registered_worktrees(root)
+                              if p.parent.name == "worktrees" and WI_ID_RE.match(p.name)}
+
+    def unregistered(wi: str) -> bool:
+        return (site.worktrees / wi).is_dir() and targets.get(wi) in registered and wi not in registered[targets[wi]]
+
     if not envs_only:
         found: dict[str, str | None] = {}
-        for target, root in git_repos:
-            for p in _registered_worktrees(root):
-                if p.parent.name == "worktrees" and WI_ID_RE.match(p.name):
-                    found.setdefault(p.name, target)
+        for target, names in registered.items():
+            for name in names:
+                found.setdefault(name, target)
         if site.worktrees.is_dir():
             for d in sorted(site.worktrees.iterdir()):
                 if d.is_dir():
@@ -352,6 +363,9 @@ def worktree_repair_all(site: Site, actor: str, dry_run: bool = False, envs: boo
             rows.append(row)
             if wi not in targets:
                 row.update(state="error", error="no work-item record")
+                continue
+            if unregistered(wi):
+                row.update(state="skipped", reason=f"not registered: {site.worktrees / wi}")
                 continue
             try:
                 if led.wi_status(wi)["status"] == "dispatched" and agent_state(led, wi) == "running":
@@ -401,6 +415,9 @@ def worktree_repair_all(site: Site, actor: str, dry_run: bool = False, envs: boo
             if target is None:
                 row.update(state="skipped", reason="no work-item record" if name.startswith("worktrees/")
                            else "unrecognised exec tree name")
+                continue
+            if name.startswith("worktrees/") and unregistered(name[len("worktrees/"):]):
+                row.update(state="skipped", reason=f"not registered: {cwd}")
                 continue
             if not cwd.is_dir():
                 row.update(state="skipped", reason="its tree is gone")

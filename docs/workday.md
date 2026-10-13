@@ -374,6 +374,9 @@ never touched, and `verify` ignores the copies as it ignores `.venv`. The pass n
 per item (repaired, pruned, rebuilt, unchanged, skipped, error) and a summary line (`--json` for the same as
 data). Records: `worktree.repaired` and `env.repaired` per changed item as the single
 forms write them, plus one `worktree.repair-all` with the counts. A second run reports everything unchanged.
+A `worktrees/<WI>` directory its checkout no longer registers (a deregistered leftover, absent from that
+checkout's `git worktree list`) is skipped by `--all` and `--envs-only` with the line `skipped  not registered:
+<path>` and is never repaired, pruned or deleted (release 59); removing it is the desk's own decision.
 `--all` is one command because `--wi` already repairs a worktree and its `.venv` together and the desk after a
 move should not have to list targets; `--no-envs` and `--envs-only` split it when a rebuild needs network or
 time, or when only the environments changed. A running agent's worktree is skipped: stop it first. `--force`,

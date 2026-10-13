@@ -211,6 +211,43 @@ class RepairAll(SiteCase):
         self.assertEqual(r["summary"]["venvs"]["rebuilt"], 1)
         self.assertEqual(r["summary"]["venvs"]["skipped"], 1)
 
+    def test_deregistered_leftover_directory_is_skipped_not_deleted(self):
+        """Release 59: a `worktrees/<WI>` directory git no longer lists for its checkout is skipped by `--all` and
+        `--envs-only` (one line naming the path), never repaired, pruned or removed."""
+        import io
+        import shutil
+        from contextlib import redirect_stdout
+
+        self.configure()
+        repo = self.site_root / "modules" / "demo"
+        # deregister the worktree but keep its directory (what a failed `worktree remove --force` plus a prune leaves)
+        meta = repo / ".git" / "worktrees" / self.wi
+        self.assertTrue(meta.is_dir())
+        shutil.rmtree(meta)
+        git(repo, "worktree", "prune")
+        self.assertNotIn(self.wi, git(repo, "worktree", "list").stdout)
+        marker = self.wt / "left-behind.txt"
+        marker.write_text("keep me\n")
+        fake_venv(self.wt / ".venv", self.wt / ".venv")
+        r = wf.worktree_repair_all(self.s, "desk")
+        rows = self.rows(r)
+        self.assertEqual((rows[self.wi]["state"], rows[self.wi]["reason"]), ("skipped", f"not registered: {self.wt}"))
+        self.assertNotIn(f"worktrees/{self.wi}", rows)
+        self.assertEqual(r["summary"]["worktrees"]["skipped"], 1)
+        self.assertTrue(marker.is_file() and (self.wt / ".venv").is_dir(), "nothing removed")
+        self.assertEqual(self.runs(), [])
+        r = wf.worktree_repair_all(self.s, "desk", envs_only=True)
+        rows = self.rows(r, "env")
+        self.assertEqual((rows[f"worktrees/{self.wi}"]["state"], rows[f"worktrees/{self.wi}"]["reason"]),
+                         ("skipped", f"not registered: {self.wt}"))
+        self.assertEqual(self.runs(), [])
+        self.assertTrue(marker.is_file())
+        out = io.StringIO()
+        with redirect_stdout(out):
+            self.assertEqual(cli.main(["--site", str(self.site_root), "worktree", "repair", "--all"]), 0)
+        self.assertIn(f"skipped        not registered: {self.wt}", out.getvalue())
+        self.assertEqual([e for e in Ledger(self.s).events() if e["type"] == "worktree.repaired"], [])
+
     def test_failed_rebuild_is_an_error_row_not_a_stop(self):
         cfg = json.loads(self.s.config_path.read_text())
         cfg["modules"] = [{"id": "demo", "path": "modules/demo", "env_rebuild": "echo no network >&2; exit 3"}]
