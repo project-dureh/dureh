@@ -567,7 +567,9 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
     # release 45: the checks runner alone may change on a staged item (it changes where checks run, not the work)
     only_runner = not adds and rebase is None and [k for k, v in fields.items() if v is not None] in (["checks_runner"],
                                                                                                        ["requirements"])
-    if st == "staged" and only_runner and pending_verify(led, wi):
+    pend = pending_verify(led, wi) if st == "staged" and only_runner else None
+    # release 61 (UR-20261013-02): a pending job whose head moved is stale; the next `verify --submit` supersedes it
+    if pend and not _stale_verify(site, wi, pend):
         fail(f"{wi} has a submitted verify job; collect it before changing its checks runner or requirements")
     if st == "staged" and not (only_adds or only_runner):
         fail(f"{wi} is staged; only --add-constraint (which appends) is allowed on a staged item. To change"
@@ -948,6 +950,16 @@ def _checker_lines(site: Site, rec: dict, dureh: Path) -> list[str]:
     if not slurm:
         return [f"Run `{dureh} verify --wi {wi}` in the foreground and return its measured output. {never}"]
     pend = pending_verify(Ledger(site), wi) if wi != "WI-0000" else None
+    try:
+        stale = bool(pend) and _stale_verify(site, wi, pend)
+    except DurehError:
+        stale = False
+    if pend and stale:  # release 61 (UR-20261013-02): the item moved since the job was submitted; --collect would refuse
+        return [f"Verify run {pend['id']} (job {pend['payload']['job_id']}) was submitted at head"
+                f" {str(pend['payload'].get('head'))[:12]}, but {wi} has moved since, so its results do not describe the"
+                f" current head and `--collect` would refuse it. Run `{dureh} verify --wi {wi} --submit` (it supersedes the"
+                f" stale run), report the run id it prints and end your turn; the desk re-dispatches you when the job"
+                f" ends, then run `{dureh} verify --wi {wi} --collect` and return its measured output. {never}"]
     if pend:
         return [f"Verify run {pend['id']} (job {pend['payload']['job_id']}) was submitted: run `{dureh} verify --wi {wi}"
                 f" --collect` and return its measured output. If it says the job is still running, report that and end"
@@ -1778,11 +1790,65 @@ def _collected(led: Ledger, run_id: str) -> dict | None:
                  and r["payload"].get("collected_from") == run_id), None)
 
 
+def _superseded(led: Ledger, run_id: str, events: list[dict] | None = None) -> dict | None:
+    """The `verification.superseded` event that voided this verify run (release 61), or None."""
+    for e in reversed(events if events is not None else led.events()):
+        if e["type"] == "verification.superseded" and e["payload"].get("run") == run_id:
+            return e
+    return None
+
+
 def pending_verify(led: Ledger, wi: str) -> dict | None:
-    """The latest submitted verify job of this WI not yet collected, or None."""
+    """The latest submitted verify job of this WI not yet collected, or None. A superseded run (release 61,
+    UR-20261013-02: its head moved and `verify --submit` or `--collect` voided it) is not pending."""
+    events = led.events(wi)
     for r in reversed(_verify_jobs(led, wi)):
+        if _superseded(led, r["id"], events):
+            continue
         return None if _collected(led, r["id"]) else r
     return None
+
+
+def _stale_verify(site: Site, wi: str, run: dict) -> bool:
+    """A pending verify run is stale when the head it was submitted on is not the item's current head."""
+    _, head = changed_paths(site, wi)
+    return head != run["payload"].get("head")
+
+
+def _supersede_verify(site: Site, actor: str, wi: str, run: dict, new_head: str | None) -> dict:
+    """Record `verification.superseded` for a stale pending verify run (release 61, UR-20261013-02): the item's
+    head moved after submission, so the job's results describe nothing current. A job still pending or running
+    is cancelled (`scancel`); its result is ignored either way. The slot is free for `verify --submit`."""
+    from . import ops
+
+    led = Ledger(site)
+    p = run["payload"]
+    job_id = str(p["job_id"])
+    recorded = ops._recorded_states(led.events(wi)).get(run["id"])
+    if recorded and (recorded[1] or recorded[0] in ops.TERMINAL_STATES):
+        state = recorded[0]
+    else:
+        try:
+            state, _ = ops.job_state(site, job_id)
+        except (OSError, subprocess.SubprocessError):
+            state = "UNKNOWN"
+    first = (state.split() or ["UNKNOWN"])[0]
+    cancelled = False
+    if first not in ops.TERMINAL_STATES:
+        try:
+            cancelled = subprocess.run(["scancel", job_id], capture_output=True, text=True, timeout=60,
+                                       env=site.env()).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            cancelled = False
+    payload = {"run": run["id"], "old_head": p.get("head"), "new_head": new_head, "job_id": job_id,
+               "reason": "head moved", "job_state": first, "cancelled": cancelled}
+    ev = led.event("verification.superseded", actor, wi, payload, [run["id"]])
+    note = (f"verify run {run['id']} (job {job_id}) was submitted on {str(p.get('head'))[:12]}; {wi} is now at"
+            f" {str(new_head)[:12]}, so its results are ignored")
+    if first not in ops.TERMINAL_STATES:
+        note += f"; job {job_id} was {first} and " + ("was cancelled" if cancelled else "may still run; its result is ignored")
+    return {"superseded": run["id"], "event": ev["id"], "job_id": job_id, "old_head": p.get("head"), "new_head": new_head,
+            "job_state": first, "cancelled": cancelled, "note": note}
 
 
 def verify_submit(site: Site, actor: str, wi: str, timeout: int = 1800) -> dict:
@@ -1797,14 +1863,17 @@ def verify_submit(site: Site, actor: str, wi: str, timeout: int = 1800) -> dict:
         return {"submitted": False, "why": "nothing to submit (bundle, no declared checks, or the local runner for"
                                            " this item); verified synchronously", **r}
     led = ctx["led"]
+    _, head = changed_paths(site, wi)
     pend = pending_verify(led, wi)
-    if pend:
+    superseded = None
+    if pend and pend["payload"].get("head") == head:
         fail(f"{wi} already has verify run {pend['id']} (job {pend['payload']['job_id']}) waiting to be collected;"
              f" run `dureh verify --wi {wi} --collect` {ops.job_end_phrase(site)}")
+    if pend:  # release 61 (UR-20261013-02): the head moved since; the stale run is voided and this one replaces it
+        superseded = _supersede_verify(site, actor, wi, pend, head)
     cwd, troot = ctx["cwd"], ctx["troot"]
     _check_venv(wi, cwd)
     plan = _check_env_present(site, wi, cwd, troot)
-    _, head = changed_paths(site, wi)
     job = _submit_checks_job(site, wi, cwd, troot, ctx["checks"], plan)
     run = led.append("run", "verify", actor, wi, {
         "run_type": "verify", "status": "submitted", "runner": "slurm", "job_id": job["job_id"], "head": head,
@@ -1813,12 +1882,15 @@ def verify_submit(site: Site, actor: str, wi: str, timeout: int = 1800) -> dict:
         "note": f"declared checks submitted as scheduler job {job['job_id']}; collect with `verify --wi {wi} --collect`"})
     return {"submitted": True, "run": run["id"], "job_id": job["job_id"], "head": head, "script": job["script"],
             "log_out": job["log_out"], "log_err": job["log_err"],
+            **({"superseded": superseded["superseded"], "superseded_note": superseded["note"]} if superseded else {}),
             "next": f"end your turn; {ops.job_end_phrase(site)}, the checker runs `dureh verify --wi {wi} --collect`"}
 
 
 def verify_collect(site: Site, actor: str, wi: str, run_id: str | None = None) -> dict:
     """Record the verification of a submitted verify job once it ended, exactly as the synchronous path does.
-    Refused while the job is pending or running."""
+    Refused while the job is pending or running. A run whose head moved since submission (release 61,
+    UR-20261013-02) is superseded instead: `verification.superseded` is recorded, a job still running is
+    cancelled, and the result (`superseded`, no `result`) tells the caller to run `verify --wi --submit`."""
     from . import ops
 
     ctx = _verify_context(site, actor, wi)
@@ -1830,11 +1902,21 @@ def verify_collect(site: Site, actor: str, wi: str, run_id: str | None = None) -
         done = _collected(led, run_id)
         if done:
             fail(f"verify run {run_id} was already collected as {done['id']} ({done['payload']['status']})")
+        gone = _superseded(led, run_id, led.events(wi))
+        if gone:
+            fail(f"verify run {run_id} was superseded ({gone['id']}: {wi} moved from {str(gone['payload'].get('old_head'))[:12]}"
+                 f" to {str(gone['payload'].get('new_head'))[:12]}); run `dureh verify --wi {wi} --submit`")
     else:
         run = pending_verify(led, wi) or fail(f"{wi} has no submitted verify job to collect; run `dureh verify --wi {wi}"
                                               " --submit` first")
     p = run["payload"]
     job_id = str(p["job_id"])
+    paths, head = changed_paths(site, wi)
+    if head != p.get("head"):  # release 61: the stale run is voided, whatever its job's state
+        r = _supersede_verify(site, actor, wi, run, head)
+        r["next"] = f"run `dureh verify --wi {wi} --submit` (nothing was verified)"
+        r["note"] += f". Run `dureh verify --wi {wi} --submit`: nothing was verified"
+        return r
     prefix = str(site.relocate(p["prefix"]))  # the job wrote next to its log; the site may have moved since
     recorded = ops._recorded_states(led.events(wi)).get(run["id"])
     if recorded and (recorded[1] or recorded[0] in ops.TERMINAL_STATES):
@@ -1846,10 +1928,6 @@ def verify_collect(site: Site, actor: str, wi: str, run_id: str | None = None) -
     if first not in ops.TERMINAL_STATES and not (first == "UNKNOWN" and have_all):
         fail(f"verify run {run['id']}: job {job_id} is still {first}; nothing was recorded. End your turn: the desk"
              f" re-dispatches the checker {ops.job_end_phrase(site)}, then run `verify --wi {wi} --collect`")
-    paths, head = changed_paths(site, wi)
-    if head != p.get("head"):
-        fail(f"{wi} moved from {str(p.get('head'))[:12]} to {str(head)[:12]} after verify run {run['id']} was submitted;"
-             f" its results do not describe this head. Submit again: `dureh verify --wi {wi} --submit`")
     if p.get("checks") != ctx["checks"]:
         fail(f"the declared checks of {wi} changed after verify run {run['id']} was submitted; submit again")
     if not recorded or not recorded[1]:

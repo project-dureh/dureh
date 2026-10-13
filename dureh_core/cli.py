@@ -256,10 +256,15 @@ def cmd_verify(a):
     if a.submit:
         r = verify_submit(_site(a), _actor(a), a.wi)
         if r["submitted"]:
-            _print({k: r[k] for k in ("submitted", "run", "job_id", "head", "log_out", "next")})
+            _print({k: r[k] for k in ("submitted", "run", "job_id", "head", "log_out", "superseded", "superseded_note",
+                                      "next") if k in r})
             return
     elif a.collect is not None:
         r = verify_collect(_site(a), _actor(a), a.wi, a.collect or None)
+        if r.get("superseded"):  # release 61: the stale run was voided; nothing was verified
+            _print({k: r[k] for k in ("superseded", "event", "job_id", "old_head", "new_head", "job_state", "cancelled",
+                                      "note", "next")})
+            return
     else:
         r = verify_wi(_site(a), _actor(a), a.wi, local=a.local)
     # a bundle recount (UR-20261008-01) has no runner and reports its children instead of changed paths

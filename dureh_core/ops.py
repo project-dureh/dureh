@@ -1518,7 +1518,10 @@ def _watch_line(led: Ledger, events: list[dict], run: dict, seen: dict, nxt: str
         pass
     elif run["payload"].get("run_type") == "verify":  # release 37: the checker collects a submitted verify job
         collect = f"checker collects verify run {run['id']}"
-        if st != "staged":
+        gone = next((e for e in events if e["type"] == "verification.superseded" and e["payload"].get("run") == run["id"]), None)
+        if gone:  # release 61: the run was voided (its head moved); its result is ignored
+            nxt = f"none (verify run {run['id']} superseded; {wi} moved to {str(gone['payload'].get('new_head'))[:12]})"
+        elif st != "staged":
             nxt = f"none (WI {st})"
         elif parent and agent_state(led, parent, events) in LIVE_AGENT:
             nxt = f"the manager of bundle {parent} dispatches the checker for {wi} ({collect})"

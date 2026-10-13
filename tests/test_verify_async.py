@@ -127,17 +127,146 @@ class AsyncVerify(SiteCase):
             self.assertIsNone(wf.pending_verify(self.led, async_wi))
         self.assertEqual(self.led.wi_status(async_wi)["status"], "rework")
 
-    def test_collect_refuses_a_moved_head(self):
+    # ------------------------------------------- stale runs (release 61, UR-20261013-02)
+    def move_head(self, wi):
+        """The item moves on: a new commit on the WI branch (as after `dispatch stop`, amend, rework, re-stage)."""
+        wt = self.site_root / "worktrees" / wi
+        (wt / "src" / "demo.py").write_text("def f():\n    return 1\n\n\ndef g():\n    return 2\n")
+        subprocess.run(["git", "add", "src/demo.py"], cwd=wt, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "g"], cwd=wt, check=True)
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt, capture_output=True, text=True).stdout.strip()
+
+    def superseded_events(self, wi):
+        return [e for e in self.led.events(wi) if e["type"] == "verification.superseded"]
+
+    def test_submit_supersedes_a_stale_pending_run(self):
+        wi = self.item(["true"])
+        self.running()
+        old = self.submit(wi)
+        new_head = self.move_head(wi)
+        r = self.submit(wi)  # not refused: the pending run's head moved
+        self.assertNotEqual(r["run"], old["run"])
+        self.assertEqual((r["superseded"], r["head"]), (old["run"], new_head))
+        self.assertIn("results are ignored", r["superseded_note"])
+        evs = self.superseded_events(wi)
+        self.assertEqual(len(evs), 1)
+        ev = evs[0]
+        self.assertEqual(ev["refs"], [old["run"]])
+        self.assertEqual({k: ev["payload"][k] for k in ("run", "old_head", "new_head", "job_id", "reason")},
+                         {"run": old["run"], "old_head": old["head"], "new_head": new_head, "job_id": "5100",
+                          "reason": "head moved"})
+        self.assertTrue(ev["payload"]["cancelled"], "the job was still RUNNING: scancel")
+        self.assertIn("5100", (self.fake / "scancel.args").read_text())
+        self.assertEqual(wf.pending_verify(self.led, wi)["id"], r["run"], "the new run is the pending one")
+        self.assertIsNone(wf._superseded(self.led, r["run"]))
+        self.assertEqual(self.led.wi_status(wi)["status"], "staged")
+        with self.assertRaisesRegex(DurehError, "waiting to be collected"):  # the new run is not stale
+            wf.verify_submit(self.s, "checker", wi)
+        with self.assertRaisesRegex(DurehError, "was superseded"):  # the old run cannot be collected by id
+            wf.verify_collect(self.s, "checker", wi, old["run"])
+        # the new run collects as usual once its job ends
+        self.finish(r)
+        got = wf.verify_collect(self.s, "checker", wi)
+        self.assertEqual((got["result"], got["collected_from"]), ("pass", r["run"]))
+        self.assertEqual(self.led.wi_status(wi)["status"], "verified")
+
+    def test_submit_with_a_matching_head_is_still_refused(self):
+        wi = self.item(["true"])
+        self.running()
+        old = self.submit(wi)
+        with self.assertRaisesRegex(DurehError, f"already has verify run {old['run']}.*waiting to be collected"):
+            wf.verify_submit(self.s, "checker", wi)
+        self.assertEqual(self.superseded_events(wi), [])
+        self.assertFalse((self.fake / "scancel.args").exists())
+
+    def test_collect_of_a_stale_run_records_superseded_and_says_submit(self):
+        for ended in (True, False):
+            wi = self.item(["true"])
+            self.running()
+            sub = self.submit(wi)
+            if ended:
+                self.finish(sub)
+            new_head = self.move_head(wi)
+            n = len(self.led.load("run"))
+            r = wf.verify_collect(self.s, "checker", wi)
+            self.assertEqual(r["superseded"], sub["run"])
+            self.assertNotIn("result", r, "nothing was verified")
+            self.assertIn(f"verify --wi {wi} --submit", r["next"])
+            self.assertIn(f"verify --wi {wi} --submit", r["note"])
+            self.assertEqual((r["old_head"], r["new_head"]), (sub["head"], new_head))
+            self.assertEqual(r["cancelled"], not ended)
+            if not ended:
+                self.assertIn("5100", (self.fake / "scancel.args").read_text())
+                self.assertIn("was cancelled", r["note"])
+            ev = self.superseded_events(wi)[-1]
+            self.assertEqual((ev["payload"]["run"], ev["payload"]["reason"], ev["refs"]), (sub["run"], "head moved", [sub["run"]]))
+            self.assertIsNone(wf.pending_verify(self.led, wi), "the slot is free")
+            self.assertEqual(len(self.led.load("run")), n, "no run record was written")
+            self.assertEqual(self.led.wi_status(wi)["status"], "staged")
+            self.assertNotIn("verification.recorded", [e["type"] for e in self.led.events(wi)])
+            with self.assertRaisesRegex(DurehError, "has no submitted verify job to collect"):
+                wf.verify_collect(self.s, "checker", wi)
+            self.running()
+            again = self.submit(wi)  # the way out of the loop
+            self.assertNotIn("superseded", again)
+            self.assertEqual(wf.pending_verify(self.led, wi)["id"], again["run"])
+            self.finish(again)
+            self.assertEqual(wf.verify_collect(self.s, "checker", wi)["result"], "pass")
+        # the CLI prints the supersession and exits 0
+        wi = self.item(["true"])
+        self.running()
+        sub = self.submit(wi)
+        self.move_head(wi)
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            main(["--site", str(self.site_root), "verify", "--wi", wi, "--collect", "--actor", "checker"])
+        out = json.loads(buf.getvalue())
+        self.assertEqual(out["superseded"], sub["run"])
+        self.assertIn("--submit", out["next"])
+
+    def test_collect_with_a_matching_head_still_works(self):
         wi = self.item(["true"])
         self.running()
         sub = self.submit(wi)
         self.finish(sub)
-        wt = self.site_root / "worktrees" / wi
-        (wt / "x.txt").write_text("x\n")
-        subprocess.run(["git", "add", "x.txt"], cwd=wt, check=True)
-        subprocess.run(["git", "commit", "-q", "-m", "x"], cwd=wt, check=True)
-        with self.assertRaisesRegex(DurehError, "Submit again"):
-            wf.verify_collect(self.s, "checker", wi)
+        self.assertEqual(wf.verify_collect(self.s, "checker", wi)["collected_from"], sub["run"])
+        self.assertEqual(self.superseded_events(wi), [])
+
+    def test_watch_line_of_a_superseded_run_asks_for_nothing(self):
+        wi = self.item(["true"])
+        self.running()
+        sub = self.submit(wi)
+        self.move_head(wi)
+        self.submit(wi)
+        (self.fake / "sacct.out").write_text("CANCELLED|0:0|00:00:10\n")
+        lines = ops.slurm_watch(self.s, "desk", once=True, out=io.StringIO())
+        line = next(l for l in lines if f"run={sub['run']}" in l)
+        self.assertIn(f"next=none (verify run {sub['run']} superseded", line)
+
+    def test_checker_brief_of_a_stale_run_says_submit(self):
+        wi = self.item(["true"])
+        self.running()
+        sub = self.submit(wi)
+        self.move_head(wi)
+        b = wf.dispatch_brief(self.s, wi, "pm-modules", as_role="checker")["brief"]
+        self.assertIn(f"Verify run {sub['run']} (job 5100) was submitted at head", b)
+        self.assertIn("has moved since", b)
+        self.assertIn(f"verify --wi {wi} --submit` (it supersedes the stale run)", b)
+        self.assertNotIn("If it says the job is still running", b, "the --collect-first wording is not used")
+        self.assertIn("Never run verify in the background", b)
+
+    def test_amend_guard_lets_a_stale_run_through(self):
+        (self.site_root / "notes").mkdir(exist_ok=True)
+        (self.site_root / "notes" / "req.md").write_text("R1\n")
+        wi = self.item(["true"], requirements="notes/req.md")
+        self.running()
+        self.submit(wi)
+        with self.assertRaisesRegex(DurehError, "has a submitted verify job; collect it before"):
+            wf.wi_amend(self.s, "desk", wi, "ok", {"requirements": "notes/req.md"})
+        self.move_head(wi)
+        wf.wi_amend(self.s, "desk", wi, "ok", {"requirements": "notes/req.md"})  # stale: allowed, submit supersedes
+        self.assertEqual(self.superseded_events(wi), [], "amend itself records nothing about the run")
+        self.assertTrue(wf.pending_verify(self.led, wi), "the stale run stays until the next submit")
 
     def test_nothing_to_submit_verifies_synchronously(self):
         wi = self.item([])

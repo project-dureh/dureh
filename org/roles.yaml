@@ -7,7 +7,7 @@
 #
 # Roles are known to the harness only by kind (desk, manager, worker) and by capability, a closed set:
 #   submit_jobs  `slurm submit/status/wait/resubmit-failed` and the run events
-#   verify       `verify --wi`, verification.recorded, wi.verified
+#   verify       `verify --wi`, verification.recorded, verification.superseded (release 61), wi.verified
 #   network      WebFetch / WebSearch
 #
 # Write scopes are globs over *logical paths*. A logical path is
@@ -69,5 +69,5 @@ event_authority:
   worker: [guard.denied, finding.created, wi.staged, agent.started, agent.finished, agent.cleaned]
 capability_authority:
   submit_jobs: [run.completed, run.status, slurm.via-failed]
-  verify: [verification.recorded, wi.verified, rework.requested, run.completed]
+  verify: [verification.recorded, verification.superseded, wi.verified, rework.requested, run.completed]
   network: []
