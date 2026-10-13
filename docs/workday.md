@@ -126,7 +126,11 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    `dureh day overtime-plan --file <plan>` (Director, 2026-10-06), then continue." Status shows
    `overtime: N items (...), plan recorded HH:MM` or `plan missing` with that warning; the end report's `past_end`
    section carries the overtime plan (`overtime_plan`), the plan-rule items with outcomes (`items`) and the
-   Director's items with outcomes and memos (`director`, `director_memos`).
+   Director's items with outcomes and memos (`director`, `director_memos`). In the development phase the clock
+   never blocks, so no record opens the overtime by itself (release 59): there `day overtime-plan` is allowed as
+   soon as the end time passed and the day is still open (`hours_exceeded`); the record carries `opened_by:
+   hours.exceeded` and `items` (the plan's open items when no overtime record names any), it counts as the start
+   of the overtime, and `day status` and the end report's `past_end` show it as above.
 5. **Stops.** Three stops end a day being finished past its end time, enforced as during the day: today's Claude
    usage at the daily share (no new agent), data at risk (`day urgent`: tell the Director at once), and the session
    job's wall time (status warns and the stop applies under 1 h left; the gate does not refuse on it, there is no

@@ -343,6 +343,8 @@ def day(site: Site, events: list[dict] | None = None) -> dict:
             _finishing_reason(out) if out.get("finishing") else "write the end report")
         if out.get("finishing"):
             out["reason"] = _finishing_reason(out)
+        if out["overtime_plan"]:
+            out["overtime_started"] = True  # release 59: the plan itself opens the overtime portion in development
     if not out["working_day"]:
         return {**out, "phase": "overtime"}
     return {**out, "phase": "on-duty"}
@@ -1028,18 +1030,24 @@ def overtime_plan(site: Site, actor: str, text: str, goal: str | None = None, us
     """Record (or update) the overtime portion's plan (Director, 2026-10-06): the overtime items, their order, the
     expected agent spawns and rough usage. Allowed once overtime started today: a Director record (`day overtime`,
     pre-approved or after the report), the end report, or the finish-plan rule's own record at the first work unit
-    after the end time. The Director's overtime approval covers the plan; there is no second approval."""
+    after the end time. The Director's overtime approval covers the plan; there is no second approval. Release 59:
+    in the development phase the clock never blocks, so no record opens the overtime by itself; there the plan is
+    allowed as soon as the day's end time has passed and the day is still open (`hours_exceeded`), and it then
+    counts as the start of the overtime (status and the end report show it)."""
     _require_on(site)
     if not text.strip():
         fail("the overtime plan text is required (--file <plan>)")
     d = day(site)
     if not d.get("approval"):
         fail(f"no open day for an overtime plan (phase {d['phase']}: {d.get('reason')})")
-    if not (d.get("overtime_started") or d.get("report")):
+    if not (d.get("overtime_started") or d.get("report") or d.get("hours_exceeded")):
         fail("no overtime started today: it starts with the Director's record (`dureh day overtime --items ... --memo`), "
-             "the end report, or the finish-plan rule's own record at the first work unit after the end time")
-    payload = {"plan": text, "goal": goal, "items": overtime_items(d), "at": _ts(_now()), "end": d.get("end"),
-               "updates": (d.get("overtime_plan") or {}).get("record")}
+             "the end report, the finish-plan rule's own record at the first work unit after the end time, or (development "
+             "phase) the end time passing")
+    payload = {"plan": text, "goal": goal, "items": overtime_items(d) or list(d.get("open") or []), "at": _ts(_now()),
+               "end": d.get("end"), "updates": (d.get("overtime_plan") or {}).get("record")}
+    if d.get("hours_exceeded") and not (d.get("overtime_started") or d.get("report")):
+        payload["opened_by"] = HOURS_EXCEEDED  # release 59: development phase, past the end time, nothing recorded yet
     if usage:
         payload["expected_usage"] = usage
     return Ledger(site).event(OVERTIME_PLAN, actor, None, payload, [d.get("report") or d["plan"]])

@@ -1180,6 +1180,35 @@ class Workday(SiteCase):
         rec = workday.end(self.s, "desk", "W stopped", "", [])
         self.assertEqual(rec["payload"]["past_end"]["items"][0]["outcome"], "stopped")
 
+    def test_overtime_plan_in_the_development_phase_once_the_end_time_passed(self):
+        """Release 59: the clock never blocks in development, so nothing records the overtime by itself; the plan
+        is allowed once the end time passed and the day is still open, and it opens the overtime portion."""
+        self.workday_config()  # development
+        self.start_day(f"1. {self.wi}")
+        with self.assertRaisesRegex(DurehError, "no overtime started"):
+            workday.overtime_plan(self.s, "desk", "too early")  # before the end time, as in production
+        self.at(T0 + timedelta(hours=8, minutes=5))
+        st = workday.status(self.s)
+        self.assertEqual((st["phase"], st["hours_exceeded"], st["overtime_started"]), ("on-duty", True, False))
+        self.assertNotIn("overtime:", render_status(status(self.s)))
+        f = self.tmp / "ot-dev.md"
+        f.write_text(f"1. {self.wi} 1 spawn\n")
+        rc, out = self.cli("day", "overtime-plan", "--file", str(f), "--goal", "finish W")
+        self.assertEqual(rc, 0, out)
+        rec = [e for e in Ledger(self.s).events() if e["type"] == "day.overtime-plan"][-1]["payload"]
+        self.assertEqual((rec["plan"], rec["goal"], rec["items"], rec["opened_by"]),
+                         (f.read_text(), "finish W", [self.wi], "hours.exceeded"))
+        st = workday.status(self.s)
+        self.assertEqual((st["phase"], st["overtime_started"], st["overtime_plan"]["goal"]), ("on-duty", True, "finish W"))
+        self.assertNotIn("overtime_plan_missing", st)
+        rc, out = self.cli("day", "status")
+        self.assertIn("overtime: 0 items, plan recorded 17:05", out)
+        self.assertIsNone(self.spawn(), "still only a warning in development")
+        self.assertIn(f"overtime: 1 item ({self.wi} (W)), plan recorded 17:05", render_status(status(self.s)))
+        wf.dispatch_stop(self.s, "desk", self.wi, "enough")
+        rec = workday.end(self.s, "desk", "W stopped", "", [])
+        self.assertEqual(rec["payload"]["past_end"]["overtime_plan"]["plan"], f.read_text())
+
     def test_finish_plan_does_not_replace_the_weekend_memo(self):
         self.workday_config(phase="production")  # Mon-Fri; T0 is a Saturday
         self.start_day(f"1. {self.wi}")
