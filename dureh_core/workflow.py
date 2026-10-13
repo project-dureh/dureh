@@ -16,7 +16,7 @@ from pathlib import Path
 from .paths import target_root
 from .records import Ledger
 from .site import Site
-from .util import fail, git, is_within, sha256_file, times_word
+from .util import DurehError, fail, git, is_within, sha256_file, times_word
 
 BRIEF_TAG = "DUREH-BRIEF"
 # interpreter caches, the virtualenv and the `.venv.stale-<time>` copies a rebuild (or the rename step) moved aside
@@ -1925,6 +1925,12 @@ def wi_promote(site: Site, actor: str, wi: str, memo: str) -> dict:
         if git(["status", "--porcelain", "--untracked-files=no"], root):
             fail(f"target {root} has uncommitted changes; promotion needs a clean main tree")
         branch = git(["rev-parse", "--abbrev-ref", "HEAD"], wt)
+        target_head = git(["rev-parse", "HEAD"], root)
+        base = git(["merge-base", target_head, head], root, check=False) or None
+        # release 60 (UR-20261013-01): a conflict is found before the merge touches the main tree
+        conflicts = _merge_conflicts(root, target_head, branch)
+        if conflicts:
+            _promote_failed(led, actor, wi, rec, root, base, head, target_head, conflicts, "pre-check")
         git(["merge", "--no-ff", "-m", f"Promote {wi}: {rec['payload']['title']}", branch], root)
         merge = git(["rev-parse", "HEAD"], root)
     dec = led.append("decision", "gate2", actor, wi, {"subject": f"Gate 2 {wi}", "disposition": "approve",
@@ -1935,6 +1941,46 @@ def wi_promote(site: Site, actor: str, wi: str, memo: str) -> dict:
                                               "compensation": f"git revert -m 1 {merge}" if merge else "append wi.reverted"},
                    [dec["id"]])
     return ev
+
+
+def _merge_conflicts(root: Path, target_head: str, branch: str) -> list[str] | None:
+    """The paths `git merge <branch>` would leave conflicted in `root`, without touching its index, HEAD or files.
+
+    Uses `git merge-tree --write-tree --name-only` (git >= 2.38; the merged tree goes to the object store only):
+    exit 0 is a clean merge ([]), exit 1 with a tree id lists the conflicted paths after it up to a blank line. Any other
+    outcome (an older git, a timeout) is None: the pre-check is skipped and the merge itself decides (wi_promote
+    aborts a failed merge)."""
+    try:
+        proc = subprocess.run(["git", "merge-tree", "--write-tree", "--name-only", target_head, branch], cwd=root,
+                              capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode == 0:
+        return []
+    first, _, rest = proc.stdout.partition("\n")
+    if proc.returncode != 1 or not re.fullmatch(r"[0-9a-f]{40,64}", first):
+        return None  # exit 1 without a tree id is an error ("not something we can merge"), not a verdict
+    paths = []
+    for line in rest.split("\n"):
+        if not line:
+            break
+        paths.append(line)
+    return sorted(set(paths))
+
+
+def _promote_failed(led: Ledger, actor: str, wi: str, rec: dict, root: Path, base: str | None, head: str,
+                    target_head: str, conflicts: list[str], stage: str, error: str | None = None) -> None:
+    """Record `wi.promote-failed` (the item stays verified; no status change) and fail with the recovery path."""
+    target = rec["payload"]["target"]
+    led.event("wi.promote-failed", actor, wi, {"target": target, "base": base, "head": head, "target_head": target_head,
+                                               "conflicts": conflicts, "stage": stage,
+                                               **({"error": error} if error else {})})
+    what = (f"conflicts in: {', '.join(conflicts)}" if conflicts
+            else f"the merge failed: {error or 'unknown error'}")
+    fail(f"{wi} cannot be promoted: merging its branch into {target} ({target_head[:12]}) {what}. Nothing changed in"
+         f" {root} ({wi} stays verified; recorded as wi.promote-failed, stage {stage}). Next: `dureh wi amend --wi {wi}"
+         f" --reopen --rebase {target_head[:12]} --memo \"<Director's words>\"`, then dispatch {wi} again so the worker"
+         " rebases onto the current main and resolves the conflict; verify and promote after that")
 
 
 def _contribute(site: Site, led: Ledger, actor: str, wi: str, rec: dict, root: Path, head: str, memo: str) -> dict:
