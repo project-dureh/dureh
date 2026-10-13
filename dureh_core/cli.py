@@ -886,7 +886,7 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--wi", required=True)
     x.add_argument("--summary", required=True)
     x.add_argument("--actor")
-    x = add(wi, "promote", cmd_wi_promote, "Gate 2: merge a verified work item (desk)")
+    x = add(wi, "promote", cmd_wi_promote, "Gate 2: merge a verified work item (desk); a merge conflict refuses before the merge")
     x.add_argument("--wi", required=True)
     x.add_argument("--memo", required=True)
     x.add_argument("--actor")

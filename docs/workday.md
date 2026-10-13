@@ -212,7 +212,8 @@ What the plan approval covers (agreed with a company desk, 2026-10-03):
   `approved` and is dispatched again as usual; no `dispatch stop`. Only `wi.reopened` moves an item from verified
   to approved (`wi approve` cannot); a promoted item never changes, and an item of a verified or promoted bundle
   is refused (re-open the bundle first). Without `--reopen`, amending a verified item is refused with this
-  command in the message.
+  command in the message. A Gate 2 refused on a merge conflict (`wi.promote-failed`, release 60; docs/work-items.md)
+  is recovered the same way, with `--rebase <target HEAD>` so the next dispatch rebases the work.
 - Gate 2 for checker-verified module and project WIs in the plan. Harness/package
   contributions wait for the end report.
 - After the end time, one checker run for an item staged during the day. A re-dispatch after a failed

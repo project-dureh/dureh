@@ -30,6 +30,31 @@ dureh wi amend --wi <WI> --memo "<Director's words>" --requirements notes/<file>
 See docs/workday.md ("What the plan approval covers"): a verified item that is not promoted goes back to
 `approved` with a `wi.reopened` event; promoted items never change.
 
+## Gate 2 and a merge conflict: `wi.promote-failed` (release 60, UR-20261013-01)
+
+Before release 60 a `wi promote` whose merge conflicted left the target's main tree mid-merge (unmerged files,
+`MERGE_HEAD`) and recorded nothing; the desk had to `git merge --abort` by hand. Now, for a module or project WI
+with a worktree:
+
+- **Pre-check.** After the Gate 2 checks (verified, head unchanged, clean main tree) and before the merge,
+  `wi promote` runs `git merge-tree --write-tree --name-only <target HEAD> <WI branch>` (git >= 2.38; the merged
+  tree goes to the object store only, nothing in the index, HEAD or files changes). A conflict refuses the
+  promotion: the item stays verified, one `wi.promote-failed` event records `{target, base (merge base of the
+  target HEAD and the WI head), head (WI head), target_head, conflicts: [paths], stage: "pre-check"}`, no Gate 2
+  decision is written, and the message lists the paths and the next step. If this git gives no verdict (older
+  git, a ref it cannot merge), the pre-check is skipped and the merge decides.
+- **Abort fallback.** If the merge itself still fails (a conflict the pre-check could not see, or git refusing to
+  start, for example an untracked file in the main tree that the merge would overwrite), `wi promote` runs
+  `git merge --abort` in the target root (its own failure is ignored when there is no merge to abort), records the
+  same event with `stage: "merge"`, the unmerged paths (`git diff --name-only --diff-filter=U`, taken before the
+  abort; empty when git refused before starting) and `error` (git's message), and fails with the same guidance.
+  The main tree is back at its HEAD with a clean status either way.
+- **Recovery.** `dureh wi amend --wi <WI> --reopen --rebase <target HEAD> --memo "<Director's words>"` (the
+  verification is void, the item goes back to approved with its base moved to the current main), then dispatch
+  the WI again: the worker rebases onto that base and resolves the conflict, the checker verifies, and the desk
+  promotes. `wi.promote-failed` changes no status (it is not in the lifecycle projection); the item is verified
+  until it is re-opened.
+
 ## WI titles for the Director (UR-20261008-02)
 
 Director, 2026-10-08: whenever a WI is named to the Director, a short title goes with it, for example
