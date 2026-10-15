@@ -29,25 +29,177 @@ def _config_add(site: Site, key: str, entry: dict) -> None:
     site.config_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def link_module(site: Site, actor: str, module_id: str, source: str, rev: str) -> dict:
+BRANCH = re.compile(r"^(?!-)(?!.*\.\.)(?!.*//)[A-Za-z0-9._/-]{1,200}(?<![./])$")
+
+
+def _origin_branch(dest: Path, branch: str) -> str | None:
+    """The sha of `origin/<branch>` in the checkout, or None."""
+    proc = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{branch}^{{commit}}"],
+                          cwd=dest, capture_output=True, text=True)
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def _checkout_branch(dest: Path, branch: str, sha: str, track: bool) -> bool:
+    """`git checkout -B <branch> <sha>` (never forced: git refuses to overwrite local changes), tracking
+    origin/<branch> when asked and it exists. Returns whether the branch tracks origin/<branch>."""
+    git(["checkout", "--quiet", "-B", branch, sha], dest)
+    if track and _origin_branch(dest, branch):
+        git(["branch", "--quiet", f"--set-upstream-to=origin/{branch}", branch], dest)
+        return True
+    return False
+
+
+def _resolve(dest: Path, rev: str) -> str:
+    """The commit `rev` names in the checkout; a branch name of the source resolves through origin/<rev>."""
+    for cand in (rev, f"refs/remotes/origin/{rev}"):
+        proc = subprocess.run(["git", "rev-parse", "--verify", "--quiet", f"{cand}^{{commit}}"], cwd=dest,
+                              capture_output=True, text=True)
+        if proc.returncode == 0:
+            return proc.stdout.strip()
+    fail(f"{rev} names no commit in {dest} (after fetching the source)")
+
+
+def _on_branch(dest: Path, sha: str, branch: str) -> bool | None:
+    tip = _origin_branch(dest, branch)
+    if tip is None:
+        return None
+    return subprocess.run(["git", "merge-base", "--is-ancestor", sha, tip], cwd=dest, capture_output=True).returncode == 0
+
+
+def link_module(site: Site, actor: str, module_id: str, source: str | None, rev: str, branch: str | None = None,
+                relink: bool = False, force: bool = False) -> dict:
+    """`site link-module --id X --source S --rev R [--branch B]`: clone S into modules/X and check out R on the local
+    branch `main`, or (release 65, UR-20261015-04) on `--branch B`, created at R and tracking origin/B (B must exist
+    at the source); the entry records the branch. `--relink` changes a linked module's rev (and branch) in place."""
     if site.org.role(actor).kind != "desk":
         fail("only the desk links modules")
     if not NAME.match(module_id):
         fail(f"invalid module id: {module_id!r}")
+    if branch is not None and not BRANCH.match(branch):
+        fail(f"invalid branch name: {branch!r}")
+    if relink:
+        return relink_module(site, actor, module_id, rev, branch, source, force)
+    if force:
+        fail("--force is only for --relink")
+    if not source:
+        fail("--source is required (the module repository to clone)")
     dest = site.root / "modules" / module_id
     if dest.exists():
-        fail(f"module already linked: {dest}")
+        fail(f"module already linked: {dest}; to change its revision or branch in place: `dureh site link-module --id"
+             f" {module_id} --rev <rev> [--branch <branch>] --relink`")
     git(["clone", "--quiet", source, str(dest)], site.root, env=site.env())
     try:
-        sha = git(["rev-parse", "--verify", f"{rev}^{{commit}}"], dest)
-        git(["checkout", "--quiet", "-B", "main", sha], dest)
+        sha = _resolve(dest, rev)
+        if branch is not None and _origin_branch(dest, branch) is None:
+            fail(f"{source} has no branch {branch}")
+        on_branch = _on_branch(dest, sha, branch) if branch else None
+        tracking = _checkout_branch(dest, branch or "main", sha, track=branch is not None)
     except Exception:
         subprocess.run(["rm", "-rf", str(dest)])
         raise
-    entry = {"id": module_id, "path": f"modules/{module_id}", "source": source, "rev": sha, "branch": "main"}
+    entry = {"id": module_id, "path": f"modules/{module_id}", "source": source, "rev": sha, "branch": branch or "main"}
     _config_add(site, "modules", entry)
-    Ledger(site).event("site.module-linked", actor, None, entry)
+    Ledger(site).event("site.module-linked", actor, None, {**entry, **({"tracking": f"origin/{branch}" if tracking
+                                                                          else None, "rev_on_branch": on_branch}
+                                                                         if branch else {})})
+    if branch and on_branch is False:
+        return {**entry, "note": f"{sha[:12]} is not on origin/{branch}; the local branch {branch} starts there anyway"}
     return entry
+
+
+def _push_off(site: Site, entry: dict, root: Path) -> bool:
+    """A module is push-off when its entry says `push: false`, or when neither its source nor its checkout's origin
+    is in config `push.allowed_remotes` (the harness cannot push it)."""
+    if entry.get("push") is False:
+        return True
+    allowed = (site.config.get("push") or {}).get("allowed_remotes") or []
+    origin = git(["remote", "get-url", "origin"], root, check=False) if (root / ".git").exists() else ""
+    return not any(x and x in allowed for x in (str(entry.get("source") or ""), origin, "origin"))
+
+
+def relink_module(site: Site, actor: str, module_id: str, rev: str, branch: str | None = None,
+                  source: str | None = None, force: bool = False) -> dict:
+    """`site link-module --id X --rev R [--branch B] --relink` (release 65, UR-20261015-04): move a linked module's
+    checkout to R (on its recorded branch, or B) in place, without retire + link.
+
+    Refused while the checkout has uncommitted changes, or while its HEAD is on no branch of the source (unpushed
+    local commits; an unreachable source counts, since unpushed work cannot be ruled out), unless the module is
+    push-off (entry `push: false`, or its source not in `push.allowed_remotes`) AND --force is given. The local branch
+    is created or reset at R (`git checkout -B`, never forced: git still refuses to overwrite local changes) and
+    tracks origin/B when it exists; a previous local branch of another name is kept as it is. Records
+    `site.module-relinked` {id, path, source, from, to, forced, push_off, ...}, updates the entry (other keys kept)
+    and regenerates the adapter files."""
+    from .workflow import CACHE_RE
+
+    entry = next((e for e in site.config.get("modules") or [] if isinstance(e, dict) and e.get("id") == module_id), None)
+    if entry is None:
+        fail(f"{module_id} is not a registered module (config.json modules[].id); link it without --relink")
+    root = site.root / entry.get("path", f"modules/{module_id}")
+    if not (root / ".git").exists():
+        fail(f"{root} is not a git checkout")
+    src = str(entry.get("source") or "")
+    if source and source != src:
+        fail(f"--relink keeps the source ({src}); a different source is retire-module then link-module")
+    old_branch = str(entry.get("branch") or "main")
+    new_branch = branch or old_branch
+    head = git(["rev-parse", "HEAD"], root)
+    current = git(["symbolic-ref", "--quiet", "--short", "HEAD"], root, check=False) or None
+    dirty = [ln for ln in git(["status", "--porcelain", "--untracked-files=all"], root, check=False).splitlines()
+             if ln.strip() and not CACHE_RE.search(ln[3:])]
+    fetch_err = None
+    if not src:
+        fetch_err = "the config entry records no source"
+    else:
+        proc = subprocess.run(["git", "fetch", "--quiet", src, "+refs/heads/*:refs/remotes/origin/*"], cwd=root,
+                              capture_output=True, text=True, env=site.env(), timeout=600)
+        if proc.returncode != 0:
+            fetch_err = f"fetch from {src} failed: {proc.stderr.strip()[-300:]}"
+    pushed_on = [] if fetch_err else [r for r in git(["for-each-ref", "--contains", head, "--format=%(refname:short)",
+                                                      "refs/remotes/origin/"], root, check=False).splitlines() if r]
+    push_off = _push_off(site, entry, root)
+    problems = []
+    if dirty:
+        problems.append(f"{root} has uncommitted changes ({len(dirty)} path(s))")
+    if fetch_err:
+        problems.append(f"the source is unreachable, so unpushed commits cannot be ruled out ({fetch_err})")
+    elif not pushed_on:
+        problems.append(f"{root} HEAD {head[:12]} is on no branch of {src} (unpushed local commits)")
+    if problems and not (force and push_off):
+        how = ("pass --force to relink anyway (the module is push-off)" if push_off else
+               "--force applies only to a push-off module (entry push: false, or its source not in push.allowed_remotes)")
+        fail("; ".join(problems) + f"; nothing was changed. Commit, push or discard first, or {how}")
+    sha = _resolve(root, rev)
+    if branch is not None and _origin_branch(root, branch) is None:
+        fail(f"{src} has no branch {branch}; nothing was changed")
+    on_branch = _on_branch(root, sha, new_branch)
+    old_tip = git(["rev-parse", "--verify", "--quiet", f"refs/heads/{old_branch}"], root, check=False) or None
+    tracking = _checkout_branch(root, new_branch, sha, track=True)
+    led = Ledger(site)
+    live = [w["id"] for w in led.work_items() if w["target"] == f"modules/{module_id}"
+            and w["status"] not in FINAL_STATES]
+    _config_add(site, "modules", {**entry, "rev": sha, "branch": new_branch})
+    payload = {"id": module_id, "path": entry.get("path", f"modules/{module_id}"), "source": src,
+               "from": {"rev": entry.get("rev"), "branch": old_branch, "head": head, "checked_out": current},
+               "to": {"rev": sha, "branch": new_branch, "tracking": f"origin/{new_branch}" if tracking else None,
+                      "rev_on_branch": on_branch},
+               "forced": bool(problems), "problems": problems, "push_off": push_off, "live_work_items": live}
+    if new_branch != old_branch and old_tip:
+        payload["previous_branch_kept"] = {"branch": old_branch, "head": old_tip}
+    ev = led.event("site.module-relinked", actor, None, payload)
+    from .runtimes import claude_code
+
+    generated = claude_code.generate(Site(site.root))
+    out = {**payload, "event": ev["id"], "generated": len(generated["files"])}
+    notes = []
+    if on_branch is False:
+        notes.append(f"{sha[:12]} is not on origin/{new_branch}")
+    if payload.get("previous_branch_kept"):
+        notes.append(f"the local branch {old_branch} is kept at {old_tip[:12]} (not moved)")
+    if live:
+        notes.append(f"live work items on modules/{module_id}: {', '.join(live)} (their worktrees keep their base)")
+    if notes:
+        out["note"] = "; ".join(notes)
+    return out
 
 
 def link_project(site: Site, actor: str, name: str, source: str) -> dict:
@@ -361,6 +513,8 @@ def retire_module(site: Site, actor: str, module_id: str, dry_run: bool = False,
                 if git(["branch", "--list", b], root, check=False) and _own_branch(site, led, w["id"], root, b):
                     branches.append(b)
     compensation = f"dureh site link-module --id {module_id} --source {entry.get('source')} --rev {head or entry.get('rev')}"
+    if entry.get("branch") and entry.get("branch") != "main":
+        compensation += f" --branch {entry['branch']}"
     payload = {"id": module_id, "path": entry.get("path", target), "source": entry.get("source"), "branch": entry.get("branch"),
                "head": head, "rev": entry.get("rev"),
                "removed": {"config_entry": True, "worktrees": [str(p) for p in final_wts.values()],

@@ -427,7 +427,7 @@ def cmd_site(a):
 
     site = _site(a)
     if a.site_command == "link-module":
-        _print(sitelinks.link_module(site, _actor(a), a.id, a.source, a.rev))
+        _print(sitelinks.link_module(site, _actor(a), a.id, a.source, a.rev, a.branch, a.relink, a.force))
     elif a.site_command == "new-module":
         _print(sitelinks.new_module(site, _actor(a), a.id, a.package, a.source, a.python, a.depends or [],
                                     a.env_rebuild))
@@ -1136,10 +1136,17 @@ def parser() -> argparse.ArgumentParser:
     add(sub, "usage", cmd_usage, "tokens per WI and per promoted WI from recorded agent runs")
 
     st = sub.add_parser("site", help="Director-side site setup").add_subparsers(dest="site_command", required=True)
-    x = add(st, "link-module", cmd_site, "clone a module repository at a pinned revision into modules/<id>")
+    x = add(st, "link-module", cmd_site, "clone a module repository at a pinned revision into modules/<id>; with "
+            "--relink change a linked module's revision (and branch) in place")
     x.add_argument("--id", required=True)
-    x.add_argument("--source", required=True)
+    x.add_argument("--source", help="the repository to clone (required unless --relink)")
     x.add_argument("--rev", required=True)
+    x.add_argument("--branch", help="release 65: the local branch, created at --rev and tracking origin/<branch> "
+                   "(recorded in the module entry; default main)")
+    x.add_argument("--relink", action="store_true", help="release 65: move a linked module to --rev [--branch] in place;"
+                   " refuses a dirty checkout or unpushed local commits")
+    x.add_argument("--force", action="store_true", help="with --relink, for a push-off module only: relink despite a "
+                   "dirty checkout or unpushed local commits")
     x.add_argument("--actor")
     x = add(st, "new-module", cmd_site, "create a NEW module repository from the standard skeleton and register it")
     x.add_argument("--id", required=True)
