@@ -53,6 +53,26 @@ Tests prove the mechanism with the neutral example package `tests/fixtures/examp
 | `models.routing` | absent (no routing) | release 54 (D3): kind -> tier name or `null`, kinds `check`, `doc`, `triage`, `build` (docs/work-items.md "Kind and model of a brief"). `null` or a missing kind keeps the role's own tier; an unknown kind or a tier not defined under `models` is refused (`adapter sync` fails, `verify --self` lists it, `status` warns, `dispatch brief` refuses). The academic and rework escalations keep precedence |
 | `models.routing_doc_roles` | `["doc-writer"]` | release 54: the roles whose dispatch is kind `doc` |
 | `modules[].submit` | `{}` | `{record_arg, log_arg, after_arg, items_arg}`: the options of the module's own submit command the harness may add (docs/slurm.md "via") |
+| `members.slurm` | `{cpus: 2, mem: 8G}` | release 64 (docs/member-runtimes.md): `#SBATCH` keys of the member-run job (`partition`, `account`, `qos`, `cpus`, `mem`, `gres`, `time`) over config `slurm`; without `time` the job gets the runtime's own limit plus 15 minutes |
+| `members.record_wait_seconds` | `300` | how long the member job waits for `member run` to record its run before it gives up |
+| `members.codex.bin` | `codex` | the codex command (on the site's PATH, config `env.path_prepend` included) |
+| `members.codex.model` | unset (codex's default) | the model passed with `-m`; recorded as requested |
+| `members.codex.reasoning_effort` | `medium` | `model_reasoning_effort` |
+| `members.codex.wait_seconds` | `1800` | the review's wait limit; past it the run is NOT_RUN |
+| `members.codex.checks_timeout` | `1800` | seconds per declared check the job runs before the review |
+| `members.codex.permission_profile` | `dureh_member` | the name of the read-only permission profile passed with `-c` |
+| `members.codex.sandbox_read` | detected | extra read-only paths the codex sandbox helper needs (default: `$CODEX_HOME/tmp/arg0` and the native binary's directory) |
+| `members.codex.env_pass` | proxy and certificate variables, `CODEX_HOME` | environment variables passed to codex besides the minimal set (HOME, USER, LOGNAME, LANG, TMPDIR, PATH) |
+| `members.local.wall_seconds`, `quiet_seconds`, `grace_windows`, `max_turns` | `3600`, `300`, `4`, `24` | the local member's wall clock, quiet timeout, grace windows while the model stays loaded, and tool-loop turns |
+| `members.local.write_cap` | `6` | writes per allowlisted file |
+| `members.local.test_timeout` | `900` | seconds per declared check `run_tests` runs |
+| `members.local.retries` | `1` | retries after a harness error (connection refused or reset) |
+| `members.local.think`, `options`, `repetition` | `false`, `{}`, `{tail_chars: 600, max_period: 80, min_repeats: 6}` | the request's `think`; options over the profile's `PARAMETER` lines; the repetition detector |
+| `office_hours.enabled` | `false` | `site session start` also starts office hours (release 64) |
+| `office_hours.partition`, `account`, `qos`, `gres`, `cpus`, `mem` | config `slurm` for partition and account | the GPU job's `#SBATCH` keys |
+| `office_hours.time` | unset | an upper bound for the job's wall time, which otherwise follows the workday clock (the day's end plus the overtime allowance, within the partition's limit) |
+| `office_hours.server` | `{kind: ollama, bin: ollama, models_dir: cache/office-hours/models, port: 11434, start_timeout: 180}` | the model server the job starts; `models_dir` relative to the site |
+| `office_hours.profiles` | `[]` | `[{name, file, base}]`: each model the server creates (`name`) from a package file (`file`, a role's `profile`), pulling `base` when missing. Unknown keys, a missing file, a duplicate name or a bad port are refused (`adapter sync`, `verify --self`; `status` warns) |
 
 ## The startup package: `startup.yaml` schema 2 (release 46)
 
@@ -79,6 +99,9 @@ roles:
     project: true                                  # also a project-level agent file (projectgen)
     skill: skills/<x>/SKILL.md                     # the role's skill (brief); must exist in the package
     instructions: [<extra agent-file lines>]
+    runtime: claude-code | codex | local           # release 64; codex: verify roles only; local: worktree workers
+    runtime_fallback: claude-code | none           # what `member run --fallback` runs instead (default claude-code)
+    profile: profiles/<x>.Modelfile                # local only: the model profile, a file in the package
 values: [{id, title, skill, manager}]              # manager: the role a bootstrap item of that value goes to
 policies:
   loop_rule: {text: <desk/agent text>, refuse: <added to the loop-rule refusal>}
@@ -119,9 +142,13 @@ lessons | bootstrap | dependencies | state: as before
   `run` record), `day close` warns while any is queued or running, and `slurm.external_match` defaults to the union
   of `job_match`. The desk, worker and project texts name the tools instead of "only through `dureh slurm submit`";
   without tools the texts are as before.
+- **Runtimes** (release 64, docs/member-runtimes.md): a role's `runtime` is `claude-code` (a subagent, the default),
+  `codex` (only a role with `verify`; the checker re-skin may set it with `runtime_fallback`) or `local` (a worker
+  without `verify`, `isolation: worktree`, write scopes and a `profile` file in the package). Non-Claude roles run
+  through `dureh member run`; the spawn hook refuses spawning them without a recorded `member run --fallback`.
 - **Default org** (`org/roles.yaml`): `desk`, a generic `manager` (dispatches `worker`, `checker`), a generic
   `worker` (module `src/`, `tests/`, `docs/`), and `checker` (`verify`). A package's `roles` add roles or replace
-  `manager`/`worker`; `checker` may only be re-skinned (skill, instructions, texts) and keeps `verify` and no write
+  `manager`/`worker`; `checker` may only be re-skinned (skill, instructions, texts, and since release 64 `runtime`, `runtime_fallback`) and keeps `verify` and no write
   scopes. Every manager and every verify role is dispatched by the desk. A package without `roles` runs on the four.
 - **Validation** (3.4): unknown top-level keys refuse (since release 49; they warned in 46-48); `harness_min` above this release
   refuses; roles: kind, tier, `may_dispatch` only on managers and only to workers (depth desk -> manager -> worker),
@@ -176,7 +203,8 @@ windows and the desk's switch to a landed release.
 ## `config_defaults` in a startup package
 
 `startup.yaml` may carry a `config_defaults` block with any of `project`, `containers`, `slurm`, `checks`, `env`,
-`limits`, `guards`, `index` (mappings) and `modules` (a list of `{id, ...}` entries). It never carries the site
+`limits`, `guards`, `index`, `members`, `office_hours` (mappings; the last two since release 64) and `modules` (a list
+of `{id, ...}` entries). It never carries the site
 identity, harness root, models or state backend. `validate_package` refuses other keys or shapes.
 
 - **Install.** `install._config` merges it below the preset: a key the preset sets stands; a mapping is merged key
