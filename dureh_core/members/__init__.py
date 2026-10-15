@@ -34,6 +34,7 @@ RUNTIMES = ("codex", "local")
 OUTCOMES = ("completed", "not_run")
 FALLBACK, NOT_RUN, COLLECTED, DISCARDED, CANARY = ("member.fallback", "member.not-run", "member.collected",
                                                   "member.discarded", "member.canary")
+HELD, CHOICE = "member.held", "member.choice"  # release 66 (UR-20261015-07): a held codex FAIL and the choice made
 DEFAULTS = {
     "slurm": {"cpus": 2, "mem": "8G"},  # partition, account, qos, gres, time: config `slurm` and computed
     "record_wait_seconds": 300,         # how long the job waits for `member run` to record its run
@@ -240,6 +241,32 @@ def cancel_live_runs(site: Site, led: Ledger, wi: str) -> list[dict]:
     return out
 
 
+def hold_state(led: Ledger, wi: str, events: list[dict] | None = None) -> tuple[dict | None, dict | None]:
+    """Release 66 (UR-20261015-07): (the item's active `member.held` event, the latest choice made for it) or
+    (None, None). A hold is active while the item is still staged on the held verdict: the latest `member.held` comes
+    after the latest `wi.staged` and no verification was recorded since. The choice is a `member.choice` (rework or
+    fallback); a hold without one is open."""
+    events = led.events(wi) if events is None else events
+    if led.wi_status(wi)["status"] != "staged":
+        return None, None
+    idx = {e["id"]: i for i, e in enumerate(events)}
+    held = [e for e in events if e["type"] == HELD]
+    if not held:
+        return None, None
+    h = held[-1]
+    after = events[idx[h["id"]] + 1:]
+    if any(e["type"] in ("wi.staged", "verification.recorded") for e in after):
+        return None, None
+    chosen = [e for e in after if e["type"] == CHOICE and e["payload"].get("held") == h["id"]]
+    return h, (chosen[-1] if chosen else None)
+
+
+def _hold_next(wi: str) -> str:
+    return (f"the verdict FAIL is held and {wi} stays staged; choose: rework with `dureh member collect --wi {wi}"
+            f" --rework [--reason ...]`, or the Claude checker on the same head with `dureh dispatch brief --wi {wi}"
+            f" --role <checker>` then `dureh member run --wi {wi} --fallback --reason ...`")
+
+
 def _brief_for(led: Ledger, wi: str, by: str, events: list[dict]) -> dict:
     """The latest brief `by` prepared for the item, unused (no spawn, member run or fallback used it)."""
     prepared = [e for e in events if e["type"] == "dispatch.prepared" and e["payload"].get("by") == by]
@@ -351,17 +378,30 @@ def run(site: Site, actor: str, wi: str, fallback: bool = False, reason: str | N
         fail(f"{wi} already has member run {live[-1]['id']} (job {live[-1]['payload'].get('job_id')}) not finished;"
              f" see `dureh member status --wi {wi}`")
     rec = led.get("work-item", wi)
+    held, choice = hold_state(led, wi, events) if pp.get("checking") else (None, None)
     if fallback:
         if role.runtime_fallback == "none":
             fail(f"{role.name} declares no fallback (runtime_fallback: none)")
         if not (reason or "").strip():
             fail("--fallback needs --reason: why the role runs as a Claude subagent this time")
         ev = led.event(FALLBACK, actor, wi, {"brief": digest, "role": role.name, "runtime": role.runtime,
-                                             "fallback": role.runtime_fallback, "reason": reason.strip(), "by": actor},
+                                             "fallback": role.runtime_fallback, "reason": reason.strip(), "by": actor,
+                                             **({"held": held["id"]} if held else {})},
                        [prepared["id"]])
-        return {"fallback": True, "event": ev["id"], "role": role.name, "brief": digest,
-                "next": f"spawn subagent_type={role.name} with brief {digest} (the `dispatch brief` output) as the whole"
-                        " prompt; the spawn is recorded with runtime_fallback"}
+        out = {"fallback": True, "event": ev["id"], "role": role.name, "brief": digest,
+               "next": f"spawn subagent_type={role.name} with brief {digest} (the `dispatch brief` output) as the whole"
+                       " prompt; the spawn is recorded with runtime_fallback"}
+        if held:  # release 66 (UR-20261015-07): the dispatcher chose the Claude checker on the held head
+            ch = led.event(CHOICE, actor, wi, {"held": held["id"], "choice": "fallback", "run": held["payload"].get("run"),
+                                               "member_run": held["payload"].get("member_run"),
+                                               "head": held["payload"].get("head"), "fallback": ev["id"],
+                                               "reason": reason.strip(), "by": actor}, [held["id"], ev["id"]])
+            out.update({"held": held["id"], "choice": ch["id"],
+                        "next": out["next"] + f"; it verifies the same head {str(held['payload'].get('head'))[:12]}"})
+        return out
+    if held and choice is None:
+        fail(f"{wi}: the codex verdict FAIL of member run {held['payload'].get('member_run')} is held ({held['id']});"
+             f" {_hold_next(wi).split('; ', 1)[1]}")
     cfg = settings(site)
     read_brief(site, wi, digest)  # the job needs its text: refuse now, not in the job
     problem = preflight(site, role, rec, cfg)
@@ -515,11 +555,17 @@ def status(site: Site, wi: str) -> dict:
                      "run_dir": str(rdir)})
     others = [{"type": e["type"], "id": e["id"], "brief": e["payload"].get("brief"), "reason": e["payload"].get("reason")}
               for e in events if e["type"] in (FALLBACK, NOT_RUN)]
-    return {"wi": wi, "runs": rows, "fallbacks_and_not_run": others}
+    held, choice = hold_state(led, wi, events)
+    hold = None
+    if held:
+        hold = {"event": held["id"], "member_run": held["payload"].get("member_run"), "run": held["payload"].get("run"),
+                "head": held["payload"].get("head"), "reason": held["payload"].get("reason"),
+                "choice": choice["payload"]["choice"] if choice else None, "choice_event": choice["id"] if choice else None}
+    return {"wi": wi, "runs": rows, "fallbacks_and_not_run": others, "held": hold}
 
 
 def render_status(st: dict) -> str:
-    if not st["runs"] and not st["fallbacks_and_not_run"]:
+    if not st["runs"] and not st["fallbacks_and_not_run"] and not st.get("held"):
         return f"{st['wi']}: no member runs"
     lines = []
     for r in st["runs"]:
@@ -535,6 +581,10 @@ def render_status(st: dict) -> str:
         lines.append(line)
     for o in st["fallbacks_and_not_run"]:
         lines.append(f"{o['type']} {o['id']} brief {o['brief']}: {o['reason']}")
+    h = st.get("held")
+    if h:
+        lines.append(f"verdict FAIL, held ({h['event']}, verify run {h['run']}, head {str(h['head'])[:12]}): "
+                     + (f"chosen {h['choice']} ({h['choice_event']})" if h["choice"] else _hold_next(st["wi"])))
     return "\n".join(lines)
 
 
@@ -562,8 +612,8 @@ def _worktree_changes(wt: Path) -> list[str]:
 
 
 def collect(site: Site, actor: str, wi: str, run_id: str | None = None, stage: bool = False, summary: str | None = None,
-            discard: bool = False, reason: str | None = None) -> dict:
-    """`member collect --wi W [--run R] [--stage --summary S | --discard --reason R]`.
+            discard: bool = False, reason: str | None = None, rework: bool = False) -> dict:
+    """`member collect --wi W [--run R] [--stage --summary S | --discard --reason R | --rework [--reason R]]`.
 
     Records the outcome of an ended member run once (`member.collected`). A run whose job ended without a result
     (cancelled, out of time, node failure) is recorded as NOT_RUN and its `agent.finished` written for it. A codex
@@ -572,8 +622,16 @@ def collect(site: Site, actor: str, wi: str, run_id: str | None = None, stage: b
     bound to the head the job reviewed (a moved head records nothing but `member.collected` with `superseded`).
     A local worker's changes stay uncommitted in the worktree for review; `--stage` (the dispatcher or the desk, after
     review) commits exactly the member's changed files on the WI branch and records `wi.staged` as the member;
-    `--discard` restores them and records `member.discarded`."""
+    `--discard` restores them and records `member.discarded`.
+
+    Release 66: a collected codex FAIL is held (UR-20261015-07: the item stays staged, `member.held`) until the
+    dispatcher chooses `--rework` (records `member.choice` and `rework.requested` from the held verification) or the
+    fallback (`member run --fallback`)."""
     led = Ledger(site)
+    if rework:
+        if stage or discard:
+            fail("--rework stands alone: it chooses rework for a held checker verdict")
+        return _choose_rework(site, led, actor, wi, reason)
     runs = member_runs(led, wi)
     if not runs:
         fail(f"{wi} has no member run")
@@ -649,12 +707,47 @@ def _collect_verdict(site: Site, led: Ledger, actor: str, wi: str, run: dict, re
                                                                            / "dispatch" / "codex-events.jsonl")}
     checks = list(result.get("checks") or [])
     led_ev = led.event(COLLECTED, actor, wi, {**base, "verdict": verdict, "head": head}, [run["id"]])
+    # release 66 (UR-20261015-07): a FAIL is recorded (one verify run, bound to this head) and held: the item stays
+    # staged until the dispatcher chooses rework (`member collect --rework`) or the Claude checker (`--fallback`)
+    hold = {"member_run": run["id"], "runtime": role.runtime, "verdict": verdict, "collected_by": actor,
+            "dispatcher": run["payload"].get("by")}
     r = wf._record_verification(site, ctx, role.name, wi, paths, head, checks, "member", None, time.monotonic(),
                                 extra={"member_run": run["id"], "runtime": role.runtime, "verdict": verdict,
                                        "collected_by": actor, "collected_event": led_ev["id"], "runner_source": "member"},
-                                review=review)
-    return {**base, "event": led_ev["id"], "verdict": verdict, "verification": r["run"], "result": r["result"],
-            "note": r["note"]}
+                                review=review, hold=hold)
+    out = {**base, "event": led_ev["id"], "verdict": verdict, "verification": r["run"], "result": r["result"],
+           "note": r["note"]}
+    if r.get("held"):
+        out.update({"held": r["held"], "status": "staged (verdict FAIL, held)", "next": _hold_next(wi)})
+    return out
+
+
+def _choose_rework(site: Site, led: Ledger, actor: str, wi: str, reason: str | None) -> dict:
+    """`member collect --wi W --rework`: the dispatcher's choice for a held codex FAIL. Records `member.choice`
+    (rework) and `rework.requested` from the held verification (its run, note, violations, missing outputs); no new
+    verification is recorded. Allowed while the hold is open or after a fallback whose checker has not verified."""
+    events = led.events(wi)
+    held, choice = hold_state(led, wi, events)
+    if held is None:
+        fail(f"{wi} has no held checker verdict (a collected codex FAIL waiting for the dispatcher's choice); status"
+             f" {led.wi_status(wi)['status']}")
+    hp = held["payload"]
+    run = next((r for r in member_runs(led, wi) if r["id"] == hp.get("member_run")), None)
+    if run is None:
+        fail(f"{wi}: the held verdict names member run {hp.get('member_run')}, which is not recorded")
+    _may_collect(site, actor, run)
+    ch = led.event(CHOICE, actor, wi, {"held": held["id"], "choice": "rework", "run": hp.get("run"),
+                                       "member_run": run["id"], "head": hp.get("head"),
+                                       "reason": (reason or "").strip() or None, "by": actor,
+                                       **({"after": choice["id"]} if choice else {})}, [held["id"]])
+    rw = led.event("rework.requested", actor, wi, {"run": hp.get("run"), "reason": hp.get("reason"),
+                                                   "violations": hp.get("violations") or [],
+                                                   "missing_outputs": hp.get("missing_outputs") or [],
+                                                   "held": held["id"], "choice": ch["id"], "verdict_by": held["actor"],
+                                                   **({"note": reason.strip()} if (reason or "").strip() else {})},
+                   [hp.get("run"), ch["id"]])
+    return {"wi": wi, "held": held["id"], "choice": ch["id"], "event": rw["id"], "status": "rework",
+            "next": f"re-dispatch the owner: `dureh dispatch brief --wi {wi}` (the brief carries the held verification)"}
 
 
 def _review(site: Site, led: Ledger, actor: str, wi: str, run: dict, result: dict, role, stage: bool,

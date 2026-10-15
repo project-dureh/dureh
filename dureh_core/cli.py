@@ -559,7 +559,7 @@ def cmd_member(a):
         _print(st if a.json else members.render_status(st))
     elif c == "collect":
         r = members.collect(site, _actor(a), a.wi, a.run, stage=a.stage, summary=a.summary, discard=a.discard,
-                            reason=a.reason)
+                            reason=a.reason, rework=a.rework)
         _print(r)
     elif c == "canary":
         from .members import codex
@@ -990,14 +990,17 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--wi", required=True)
     x.add_argument("--json", action="store_true")
     x = add(mb, "collect", cmd_member, "record an ended member run: a checker's verdict becomes the verification (bound to"
-            " the verified head); a worker's changes stay for review (--stage --summary commits and stages them,"
+            " the verified head; a codex FAIL is held, the item stays staged until --rework or `member run --fallback`);"
+            " a worker's changes stay for review (--stage --summary commits and stages them,"
             " --discard --reason restores them)")
     x.add_argument("--wi", required=True)
     x.add_argument("--run", help="a member run id (default: the item's latest)")
     x.add_argument("--stage", action="store_true", help="local worker: commit its changes and stage the item")
     x.add_argument("--summary", help="--stage: the stage summary")
     x.add_argument("--discard", action="store_true", help="local worker: restore its changes")
-    x.add_argument("--reason", help="--discard: why")
+    x.add_argument("--rework", action="store_true",
+                   help="a held codex FAIL: choose rework (records rework.requested from the held verification)")
+    x.add_argument("--reason", help="--discard, --rework: why")
     x.add_argument("--actor")
     x = add(mb, "canary", cmd_member, "prove on this host that the codex member profile refuses reads outside the"
             " evidence bundle and every write (codex sandbox, no model); recorded as member.canary")

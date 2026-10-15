@@ -452,6 +452,8 @@ def member_rule(site: Site, dureh, caller=None) -> str:
             f" `slurm watch` reports when it ends). Then `{dureh} member collect --wi <WI>` records the outcome: a checker's"
             " verdict becomes the verification (bound to the verified head); a worker's changes stay in the worktree for"
             f" review, then `member collect --wi <WI> --stage --summary ...` commits and stages them (or `--discard --reason ...`)."
+            " A codex verdict FAIL is held (the item stays staged): choose `member collect --wi <WI> --rework`, or the"
+            " Claude checker on the same head (a new checker brief, then `member run --wi <WI> --fallback --reason ...`)."
             f" `{dureh} member status --wi <WI>` is read-only. A run that could not run (NOT_RUN: wait limit, quota or login,"
             " no office-hours server) names its reason; then choose: fix and run again, or the role's fallback"
             f" `{dureh} member run --wi <WI> --fallback --reason ...` on an unused brief (a new `dispatch brief`"

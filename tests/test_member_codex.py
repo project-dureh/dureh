@@ -224,13 +224,113 @@ class CodexMember(MemberCase):
         self.assertNotIn("build-note.txt", vrun["changed"])
         self.assertEqual(vrun["violations"], [])
 
-    def test_fail_verdict_requests_rework(self):
+    def held_fail(self):
         self.pass_canary()
         self.mode("fail")
         r = self.submit()
         self.exec_(r["run"])
-        out = members.collect(self.s, "desk", self.wi)
+        return r, members.collect(self.s, "pm-modules", self.wi)
+
+    def verify_runs(self):
+        return [x for x in self.led.load("run") if x["wi"] == self.wi and x["payload"].get("run_type") == "verify"]
+
+    def test_fail_verdict_is_held_until_the_dispatcher_chooses_rework(self):
+        """Release 66 (UR-20261015-07): a collected codex FAIL is recorded (one verify run, bound to the head) and
+        held: the item stays staged; `member collect --rework` turns the held verification into the rework."""
+        r, out = self.held_fail()
         self.assertEqual(out["result"], "fail")
+        self.assertTrue(out["held"])
+        self.assertIn("--rework", out["next"])
+        self.assertIn("--fallback", out["next"])
+        self.assertEqual(self.led.wi_status(self.wi)["status"], "staged")
+        self.assertEqual(self.events(self.wi, "rework.requested"), [])
+        held = self.events(self.wi, "member.held")
+        self.assertEqual(len(held), 1)
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.wt, capture_output=True, text=True).stdout.strip()
+        self.assertEqual((held[0]["actor"], held[0]["payload"]["head"], held[0]["payload"]["member_run"]),
+                         ("checker", head, r["run"]))
+        runs = self.verify_runs()
+        self.assertEqual([x["payload"]["status"] for x in runs], ["fail"])
+        self.assertEqual(held[0]["payload"]["run"], runs[0]["id"])
+        st = members.status(self.s, self.wi)
+        self.assertEqual((st["held"]["event"], st["held"]["choice"]), (held[0]["id"], None))
+        self.assertIn("verdict FAIL, held", members.render_status(st))
+        # a new codex run of the checker is not one of the two choices
+        self.checker_brief()
+        with self.assertRaisesRegex(DurehError, "is held"):
+            members.run(self.s, "pm-modules", self.wi)
+        self.assertEqual(self.events(self.wi, "member.not-run"), [])
+        with self.assertRaisesRegex(DurehError, "only it or the desk"):
+            members.collect(self.s, "py-writer", self.wi, rework=True)
+        with self.assertRaisesRegex(DurehError, "--rework stands alone"):
+            members.collect(self.s, "pm-modules", self.wi, rework=True, stage=True)
+        done = members.collect(self.s, "pm-modules", self.wi, rework=True, reason="a real gap in g()")
+        self.assertEqual(self.led.wi_status(self.wi)["status"], "rework")
+        rw = self.events(self.wi, "rework.requested")
+        self.assertEqual(len(rw), 1)
+        self.assertEqual((rw[0]["actor"], rw[0]["payload"]["run"], rw[0]["payload"]["held"], rw[0]["payload"]["choice"]),
+                         ("pm-modules", runs[0]["id"], held[0]["id"], done["choice"]))
+        ch = self.events(self.wi, "member.choice")[-1]
+        self.assertEqual((ch["payload"]["choice"], ch["payload"]["held"]), ("rework", held[0]["id"]))
+        self.assertEqual(len(self.verify_runs()), 1, "the one FAIL stays the only verification")
+        b = self.wf.dispatch_brief(self.s, self.wi, "pm-modules")
+        self.assertIn(f"Last verification (run {runs[0]['id']}", b["brief"])
+        with self.assertRaisesRegex(DurehError, "no held checker verdict"):
+            members.collect(self.s, "pm-modules", self.wi, rework=True)
+
+    def test_held_fail_allows_the_claude_checker_fallback_on_the_same_head(self):
+        r, out = self.held_fail()
+        held = self.events(self.wi, "member.held")[-1]
+        b = self.checker_brief()
+        fb = members.run(self.s, "pm-modules", self.wi, fallback=True, reason="codex lacked evidence")
+        self.assertEqual(fb["held"], held["id"])
+        ch = self.events(self.wi, "member.choice")[-1]
+        self.assertEqual((ch["payload"]["choice"], ch["payload"]["fallback"], ch["payload"]["head"]),
+                         ("fallback", fb["event"], held["payload"]["head"]))
+        self.assertEqual(self.events(self.wi, "member.fallback")[-1]["payload"]["brief"], b["header"].split("brief=")[1])
+        self.assertEqual(self.led.wi_status(self.wi)["status"], "staged")
+        self.assertEqual(members.status(self.s, self.wi)["held"]["choice"], "fallback")
+        # the Claude checker verifies the same staged head (here: the declared checks pass, so it is verified)
+        res = self.wf.verify_wi(self.s, "checker", self.wi, local=True)
+        self.assertEqual(res["result"], "pass")
+        self.assertEqual(self.led.wi_status(self.wi)["status"], "verified")
+        runs = self.verify_runs()
+        self.assertEqual([(x["payload"]["status"], x["payload"]["head"]) for x in runs],
+                         [("fail", held["payload"]["head"]), ("pass", held["payload"]["head"])])
+        self.assertEqual(members.hold_state(self.led, self.wi), (None, None))
+
+    def test_rework_is_still_possible_after_a_fallback_that_did_not_verify(self):
+        self.held_fail()
+        self.checker_brief()
+        members.run(self.s, "pm-modules", self.wi, fallback=True, reason="try the Claude checker")
+        members.collect(self.s, "desk", self.wi, rework=True)
+        self.assertEqual(self.led.wi_status(self.wi)["status"], "rework")
+        self.assertEqual([e["payload"]["choice"] for e in self.events(self.wi, "member.choice")], ["fallback", "rework"])
+
+    def run_cli(self, *argv, actor="pm-modules"):
+        import contextlib
+        import io
+
+        from dureh_core.cli import main
+
+        out = io.StringIO()
+        os.environ["DUREH_ACTOR"] = actor
+        try:
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+                rc = main(["--site", str(self.site_root), *argv])
+        finally:
+            os.environ.pop("DUREH_ACTOR", None)
+        return rc, out.getvalue()
+
+    def test_member_held_and_choice_are_reserved_and_rework_is_a_cli_choice(self):
+        self.held_fail()
+        for t in ("member.held", "member.choice"):
+            rc, out = self.run_cli("ledger", "add", "event", "--type", t, "--wi", self.wi, actor="desk")
+            self.assertEqual(rc, 2, out)
+        rc, out = self.run_cli("member", "status", "--wi", self.wi)
+        self.assertIn("verdict FAIL, held", out)
+        rc, out = self.run_cli("member", "collect", "--wi", self.wi, "--rework", "--reason", "fix g()")
+        self.assertEqual(rc, 0, out)
         self.assertEqual(self.led.wi_status(self.wi)["status"], "rework")
 
     def pin_requirements(self, text="# Requirements\n- g() must not import anything new\n"):

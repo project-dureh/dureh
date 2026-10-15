@@ -47,6 +47,7 @@ was recorded for that exact brief; the refusal names `member run`.
 | `dureh member collect --wi W [--run R]` | the dispatcher or the desk | records the outcome of an ended run |
 | `dureh member collect --wi W --stage --summary S` | the dispatcher or the desk, after review | local worker: commits the member's changes on the WI branch and records `wi.staged` |
 | `dureh member collect --wi W --discard --reason R` | the dispatcher or the desk | local worker: restores the member's changes, records `member.discarded` |
+| `dureh member collect --wi W --rework [--reason R]` | the dispatcher or the desk | codex checker (release 66): chooses rework for a held verdict FAIL |
 | `dureh member canary --runtime codex` | the desk | proves on this host that the codex profile refuses reads outside the bundle and every write |
 | `dureh site office-hours plan\|start\|stop\|status` | the desk | the model server job of the local runtime |
 
@@ -89,8 +90,22 @@ the role's fallback with a new brief.
 
 - **codex checker**: the job's declared check results plus the reviewer's row (`exit` 0 for `VERDICT: PASS`) go
   through `workflow._record_verification` with ownership and declared outputs from the current tree: a `verify` run,
-  `verification.recorded`, then `wi.verified` or `rework.requested`, exactly as `verify --wi`. If the item's head moved
-  after the review, nothing is verified (`member.collected` with `superseded`); prepare a new checker brief.
+  `verification.recorded`, then `wi.verified` on a pass, exactly as `verify --wi`. If the item's head moved after the
+  review, nothing is verified (`member.collected` with `superseded`); prepare a new checker brief.
+- **held FAIL** (release 66, UR-20261015-07): a collected codex FAIL is recorded like any FAIL (one `verify` run and
+  `verification.recorded`, bound to the reviewed head), but the item does NOT go to rework at once: the checker
+  records `member.held` (`run`, `head`, `member_run`, the note, violations, missing outputs) and the item stays
+  `staged` ("verdict FAIL, held"; `member status` shows it). The dispatcher (the run's submitter, or the desk) chooses:
+  - **rework**: `member collect --wi W --rework [--reason R]` records `member.choice {choice: rework}` and
+    `rework.requested` from the held verification (its run, note, violations and missing outputs; no new verification);
+    the owner's rework brief carries that verification as usual.
+  - **the Claude checker on the same head**: a new checker brief (`dispatch brief --wi W --role <checker>`: the item
+    is still staged), then `member run --wi W --fallback --reason R` records `member.fallback` (with `held`) and
+    `member.choice {choice: fallback}`; the spawned checker's `verify --wi` records a second verification of that head,
+    which verifies the item or sends it to rework.
+  While a hold is open (no choice yet) a new codex `member run` of the checker is refused and names the two choices.
+  `--rework` stays possible after a fallback whose checker has not verified yet. A hold ends when the item leaves
+  `staged` or a later verification is recorded.
 - **local worker**: the member never commits. Its changes stay in the worktree for the dispatcher's review
   (`member.collected` lists them, the result shows `git diff --stat`). `--stage --summary` commits exactly the changed
   files (all must be on the allowlist) with a message naming the run, and records `wi.staged` as the member
@@ -203,6 +218,8 @@ note once as a user message and the loop goes on (a second cut answer in a row e
 | `member.not-run` | the dispatcher | `brief`, `stage: submit`, `reason` |
 | `member.fallback` | the dispatcher | `brief`, `runtime`, `fallback`, `reason` |
 | `member.collected` / `member.discarded` | the dispatcher or the desk | `run`, `outcome`, `verdict`, `changed`, `superseded` |
+| `member.held` (release 66) | the verify role, at collect | `run` (the verify run), `head`, `member_run`, `runtime`, `verdict`, `reason`, `violations`, `missing_outputs`, `collected_by`, `dispatcher` |
+| `member.choice` (release 66) | the dispatcher or the desk | `held`, `choice` (`rework` or `fallback`), `run`, `member_run`, `head`, `reason`, `fallback` (the `member.fallback` event) |
 | `member.canary` | the desk, or the checker's job | `runtime`, `host`, `version`, `result`, `rows` |
 | `office-hours.started` / `office-hours.stopped` | the desk | `job_id`, `wall`, `profiles` / `reason`, `scancel` |
 

@@ -1799,11 +1799,13 @@ def verify_wi(site: Site, actor: str, wi: str, timeout: int = 1800, local: bool 
 
 def _record_verification(site: Site, ctx: dict, actor: str, wi: str, paths: list[str], head: str | None,
                          results: list[dict], runner: str, job: dict | None, start: float, local: bool = False,
-                         extra: dict | None = None, review: dict | None = None) -> dict:
+                         extra: dict | None = None, review: dict | None = None, hold: dict | None = None) -> dict:
     """Ownership, declared outputs and check results into one verify run, its verification event, and either
     `wi.verified` or `rework.requested` (the synchronous and the collected path record the same). `review` (release
     64, a member reviewer's verdict: a check row whose exit is 0 for PASS) counts like a check and is named in the
-    note."""
+    note. `hold` (release 66, UR-20261015-07: a collected codex verdict): a FAIL is recorded (the verify run and
+    `verification.recorded`, bound to the head) but the item stays staged: instead of `rework.requested`, the
+    `member.held` event (with `hold` in its payload) waits for the dispatcher's choice (rework or the fallback)."""
     led, p, cwd, checks = ctx["led"], ctx["p"], ctx["cwd"], ctx["checks"]
     org = site.org
     violations = [x for x in paths if not org.scope_allows(p["role"], f"{p['target']}/{x}")]
@@ -1838,6 +1840,11 @@ def _record_verification(site: Site, ctx: dict, actor: str, wi: str, paths: list
     led.event("verification.recorded", actor, wi, {"result": payload["result"], "run": run["id"], "head": head}, [run["id"]])
     if passed:
         led.event("wi.verified", actor, wi, {"run": run["id"], "head": head}, [run["id"]])
+    elif hold is not None:
+        held = led.event("member.held", actor, wi, {**hold, "run": run["id"], "head": head, "reason": note,
+                                                     "violations": violations, "missing_outputs": missing},
+                         [run["id"]])
+        payload["held"] = held["id"]
     else:
         led.event("rework.requested", actor, wi, {"run": run["id"], "reason": note,
                                                   "violations": violations, "missing_outputs": missing}, [run["id"]])

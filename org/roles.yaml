@@ -66,10 +66,11 @@ roles:
 # The desk may append any. Lifecycle events are also checked against the WI state machine.
 event_authority:
   # member.*: release 64 (member runtimes): the dispatcher's fallback, NOT_RUN, collection and discard records;
-  # a member's own job records agent.started/finished and, for a codex verifier, the host canary (member.canary)
-  manager: [guard.denied, finding.created, wi.staged, rework.requested, dispatch.prepared, wi.dispatched, checker.dispatched, agent.started, agent.finished, wi.stopped, bundle.ready, agent.cleaned, lane.refused, member.fallback, member.not-run, member.collected, member.discarded]
+  # a member's own job records agent.started/finished and, for a codex verifier, the host canary (member.canary);
+  # release 66: a collected codex FAIL is held (member.held, by the verifier) until the dispatcher's member.choice
+  manager: [guard.denied, finding.created, wi.staged, rework.requested, dispatch.prepared, wi.dispatched, checker.dispatched, agent.started, agent.finished, wi.stopped, bundle.ready, agent.cleaned, lane.refused, member.fallback, member.not-run, member.collected, member.discarded, member.choice]
   worker: [guard.denied, finding.created, wi.staged, agent.started, agent.finished, agent.cleaned, member.canary]
 capability_authority:
   submit_jobs: [run.completed, run.status, slurm.via-failed]
-  verify: [verification.recorded, verification.superseded, wi.verified, rework.requested, run.completed]
+  verify: [verification.recorded, verification.superseded, wi.verified, rework.requested, run.completed, member.held]
   network: []
