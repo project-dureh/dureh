@@ -357,16 +357,19 @@ def external_jobs(site: Site, led: Ledger | None = None) -> dict | None:
             "tool_count": len(ours)}
 
 
-def config_errors(site: Site) -> list[str]:
+def config_errors(site: Site, config: dict | None = None, startup: Path | None = None) -> list[str]:
     """Config keys this release refuses: `adapter sync` fails on them, `verify --self` lists them as problems and
-    `status` shows them as warnings. `slurm.external_ignore` was ignored with a warning for one release (46-48)."""
+    `status` shows them as warnings. `slurm.external_ignore` was ignored with a warning for one release (46-48).
+    Release 65: `config` and `startup` check another config and package (`adapter sync` checks the config as the
+    package being installed will leave it, against that package's files)."""
     out = []
-    slurm = site.config.get("slurm") or {}
+    conf = site.config if config is None else config
+    slurm = conf.get("slurm") or {}
     if "external_ignore" in slurm:
         out.append("config slurm.external_ignore is refused since release 49 (ignored with a warning in 46-48): remove"
                    " it; external jobs are listed only when their name matches slurm.external_match (an include list"
                    " of name patterns; empty or absent lists none)")
-    push_cfg = site.config.get("push")
+    push_cfg = conf.get("push")
     if push_cfg is not None and not isinstance(push_cfg, dict):
         out.append("config push must be an object (allowed_remotes, standing_ff, standing_ff_new_branches)")
     else:
@@ -376,10 +379,10 @@ def config_errors(site: Site) -> list[str]:
                 out.append(f"config push.{key} must be true or false (release 58; default false)")
     from .site import routing_errors
 
-    out += routing_errors(site.config)
+    out += routing_errors(conf)
     from . import members, office_hours
 
-    out += members.config_errors(site) + office_hours.config_errors(site)
+    out += members.config_errors(site, conf) + office_hours.config_errors(site, conf, startup)
     return out
 
 

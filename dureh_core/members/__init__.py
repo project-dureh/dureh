@@ -66,9 +66,10 @@ def settings(site: Site) -> dict:
     return out
 
 
-def config_errors(site: Site) -> list[str]:
-    """What is wrong with config `members` (release 64): unknown keys, non-numeric limits."""
-    cfg = site.config.get("members")
+def config_errors(site: Site, config: dict | None = None) -> list[str]:
+    """What is wrong with config `members` (release 64): unknown keys, non-numeric limits. `config` (release 65):
+    check that config instead of the site's (`adapter sync`, before the package's config_defaults are added)."""
+    cfg = (site.config if config is None else config).get("members")
     if cfg is None:
         return []
     if not isinstance(cfg, dict):

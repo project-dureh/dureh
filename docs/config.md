@@ -74,7 +74,7 @@ Tests prove the mechanism with the neutral example package `tests/fixtures/examp
 | `office_hours.partition`, `account`, `qos`, `gres`, `cpus`, `mem` | config `slurm` for partition and account | the GPU job's `#SBATCH` keys |
 | `office_hours.time` | unset | an upper bound for the job's wall time, which otherwise follows the workday clock (the day's end plus the overtime allowance, within the partition's limit) |
 | `office_hours.server` | `{kind: ollama, bin: ollama, models_dir: cache/office-hours/models, port: 11434, start_timeout: 180}` | the model server the job starts; `models_dir` relative to the site |
-| `office_hours.profiles` | `[]` | `[{name, file, base}]`: each model the server creates (`name`) from a package file (`file`, a role's `profile`), pulling `base` when missing. Unknown keys, a missing file, a duplicate name or a bad port are refused (`adapter sync`, `verify --self`; `status` warns) |
+| `office_hours.profiles` | `[]` | `[{name, file, base}]`: each model the server creates (`name`) from a package file (`file`, a role's `profile`), pulling `base` when missing. Unknown keys, a missing file, a duplicate name or a bad port are refused (`adapter sync`, `verify --self`; `status` warns). Release 65: `adapter sync --package-rev R` checks the files in R (the package being installed), with R's `config_defaults` merged |
 
 ## The startup package: `startup.yaml` schema 2 (release 46)
 
@@ -215,6 +215,16 @@ identity, harness root, models or state backend. `validate_package` refuses othe
 - **Existing sites.** `dureh adapter sync` re-copies the package first (above), then reads the block from the
   installed `startup/` and adds the keys the site's `config.json` lacks, once; a value the site has is never
   changed. It prints `config.json: added from the package's config_defaults: ...` when it did.
+- **Deep merge.** The merge goes INTO mapping keys the site already has, recursively: a site whose
+  `office_hours` is `{enabled, partition, server: {...}}` receives the package's `office_hours.profiles` and any
+  `server` key it lacks; the site's value wins per leaf (a `null` leaf is filled); lists (other than `modules`, matched
+  by id) are never merged: the site's list stands.
+- **Checked against the incoming package (release 65).** `adapter sync [--package-rev R]` no longer validates the
+  current config against the currently installed package before the sync. It fetches and validates R into
+  `startup.new`, then checks the config as R's `config_defaults` will leave it against R's files (for example an
+  `office_hours.profiles[].file` that exists only in R passes; `office_hours.enabled` without profiles passes when R
+  supplies them). A problem refuses the sync before the swap: the installed package, `config.json` and the records
+  stay as they were. Without a package source the installed package is checked the same way.
 
 Example (neutral names):
 

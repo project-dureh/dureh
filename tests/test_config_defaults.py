@@ -154,3 +154,82 @@ class ProjectManifestKey(SiteCase):
         mod = self.make_module("demo")
         with self.assertRaisesRegex(DurehError, "project.manifest is unset.*pass --rev"):
             exectree.prepare(s, "WI-0001", "projects/lna", "demo", None, Path(mod / "tests" / "test_demo.py"), dry_run=True)
+
+
+class SyncChecksTheIncomingPackage(SiteCase):
+    """Release 65: `adapter sync [--package-rev R]` merges R's config_defaults INTO mapping keys the site already has
+    (site values win per leaf, lists are not merged) and checks the config as R leaves it against R's files, so a site
+    whose office_hours block lacks the profiles R supplies is not refused, and a profile file only R has passes."""
+
+    def setUp(self):
+        super().setUp()
+        import subprocess
+
+        def git(*args):
+            return subprocess.run(["git", *args], cwd=self.package, check=True, capture_output=True,
+                                  text=True).stdout.strip()
+
+        self.git = git
+        git("init", "-q", "-b", "main")
+        git("add", "-A")
+        git("commit", "-qm", "package 1")
+        self.install()
+        cfg = self.cfg()
+        cfg["office_hours"] = {"enabled": True, "partition": "gpu", "server": {"kind": "ollama", "port": 11999}}
+        (self.site_root / "config.json").write_text(json.dumps(cfg))
+
+    def cfg(self):
+        return json.loads((self.site_root / "config.json").read_text())
+
+    def sync(self, *extra):
+        import contextlib
+        import io
+
+        from dureh_core.cli import main
+
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            try:
+                code = main(["--site", str(self.site_root), "adapter", "sync", *extra])
+            except DurehError as exc:
+                return 1, str(exc)
+        return code, out.getvalue() + err.getvalue()
+
+    def package_rev(self, profile_file="profiles/coder.Modelfile", write_file=True):
+        (self.package / "profiles").mkdir(exist_ok=True)
+        if write_file:
+            (self.package / profile_file).write_text("FROM base\nPARAMETER num_ctx 8192\n")
+        m = self.package / "startup.yaml"
+        m.write_text(m.read_text() + "config_defaults:\n  office_hours:\n    enabled: false\n    server:\n"
+                     "      port: 1\n      bin: srv\n    profiles:\n"
+                     f"      - {{name: coder-x, file: {profile_file}, base: base}}\n")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "package 2")
+        return self.git("rev-parse", "HEAD")
+
+    def test_profiles_arrive_into_the_existing_block(self):
+        rev = self.package_rev()
+        self.assertFalse((self.site_root / "startup" / "profiles" / "coder.Modelfile").exists())
+        code, out = self.sync("--package-rev", rev)
+        self.assertEqual(code, 0, out)
+        oh = self.cfg()["office_hours"]
+        self.assertEqual(oh["profiles"], [{"name": "coder-x", "file": "profiles/coder.Modelfile", "base": "base"}])
+        self.assertEqual((oh["enabled"], oh["partition"]), (True, "gpu"), "the site's values win")
+        self.assertEqual(oh["server"], {"kind": "ollama", "port": 11999, "bin": "srv"}, "merged per leaf")
+        self.assertIn("office_hours.profiles", out)
+        self.assertTrue((self.site_root / "startup" / "profiles" / "coder.Modelfile").is_file())
+
+    def test_a_profile_missing_from_the_incoming_package_refuses_and_changes_nothing(self):
+        before = self.cfg()["startup"]["rev"]
+        rev = self.package_rev(profile_file="profiles/missing.Modelfile", write_file=False)
+        code, out = self.sync("--package-rev", rev)
+        self.assertNotEqual(code, 0)
+        self.assertIn("profiles/missing.Modelfile is not in the package being installed", out)
+        self.assertEqual(self.cfg()["startup"]["rev"], before)
+        self.assertNotIn("profiles", self.cfg()["office_hours"])
+        self.assertFalse((self.site_root / "startup.new").exists())
+
+    def test_without_the_package_profiles_the_old_refusal_stands(self):
+        code, out = self.sync()
+        self.assertNotEqual(code, 0)
+        self.assertIn("office_hours.enabled needs at least one profile", out)

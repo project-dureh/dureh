@@ -194,7 +194,7 @@ def _rmtree_writable(path: Path) -> None:
         shutil.rmtree(path, onerror=unlock)
 
 
-def sync_package(site, rev: str | None = None) -> dict:
+def sync_package(site, rev: str | None = None, check=None) -> dict:
     """`adapter sync [--package-rev REV]`: re-copy startup/ from config `startup.source` at a committed revision
     (default its HEAD), validate the copy, swap it in, and record `package.synced` {from, to, changed} when the
     revision or the files changed; config `startup.rev` and `startup.version` follow. Without a configured or
@@ -222,6 +222,15 @@ def sync_package(site, rev: str | None = None) -> dict:
     if manifest["package"]["id"] != cfg.get("id", manifest["package"]["id"]):
         _rmtree_writable(new)
         fail(f"the package source holds {manifest['package']['id']!r}, but this site runs {cfg.get('id')!r}")
+    if check is not None:  # release 65: the caller's checks against the package being installed, before the swap
+        try:
+            problems = check(manifest, new)
+        except BaseException:
+            _rmtree_writable(new)
+            raise
+        if problems:
+            _rmtree_writable(new)
+            fail("; ".join(problems) + f" (checked against the package at {to[:12]}; nothing was changed)")
     before, after = _file_digests(site.startup), _file_digests(new)
     changed = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
     frm = cfg.get("rev")
@@ -320,6 +329,16 @@ def merge_config_defaults(config: dict, defaults: dict) -> tuple[dict, list[str]
         else:
             merge(out, {key: value}, "")
     return out, added
+
+
+def sync_config_errors(site, manifest: dict, package_dir: Path) -> list[str]:
+    """Release 65: the config errors of the site's config.json as `adapter sync` will leave it (the package's
+    `config_defaults` merged in) checked against that package's files (`office_hours.profiles` files included), so a
+    key the package supplies, or a profile file only the package being installed has, does not refuse the sync."""
+    from .ops import config_errors
+
+    merged, _ = merge_config_defaults(site.config, package_config_defaults(manifest))
+    return config_errors(site, merged, package_dir)
 
 
 def apply_config_defaults(site, manifest: dict | None = None) -> list[str]:

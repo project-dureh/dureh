@@ -43,9 +43,12 @@ def enabled(site: Site) -> bool:
     return bool(config(site).get("enabled"))
 
 
-def config_errors(site: Site) -> list[str]:
-    """What is wrong with config `office_hours` (release 64)."""
-    raw = site.config.get("office_hours")
+def config_errors(site: Site, config: dict | None = None, startup: Path | None = None) -> list[str]:
+    """What is wrong with config `office_hours` (release 64). `config` and `startup` (release 65) check a config and
+    a package other than the site's current ones: `adapter sync --package-rev R` checks the config as it will be
+    after R's config_defaults against R's files, before R is installed."""
+    pkg = Path(startup) if startup is not None else site.startup
+    raw = (site.config if config is None else config).get("office_hours")
     if raw is None:
         return []
     if not isinstance(raw, dict):
@@ -77,8 +80,9 @@ def config_errors(site: Site) -> list[str]:
         f = str(p["file"])
         if f.startswith("/") or ".." in f.split("/"):
             out.append(f"{where}.file must be a path inside the startup package")
-        elif not (site.startup / f).is_file():
-            out.append(f"{where}.file {f} is not in the installed package (startup/)")
+        elif not (pkg / f).is_file():
+            out.append(f"{where}.file {f} is not in the " + ("installed package (startup/)" if startup is None else
+                                                             f"package being installed ({pkg.name}/)"))
     if raw.get("enabled") and not profiles:
         out.append("config office_hours.enabled needs at least one profile")
     return out

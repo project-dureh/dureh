@@ -70,17 +70,18 @@ def cmd_adapter_sync(a):
         if other != site.harness_root.resolve():
             os.execv(str(exe), [str(exe), "--site", str(site.root), "adapter", "sync",
                                 *(["--package-rev", a.package_rev] if a.package_rev else [])])
-    from .ops import config_errors
-
-    refused = config_errors(site)
-    if refused:
-        fail("; ".join(refused))
     old_root = (site.config.get("harness") or {}).get("root")
     stored_site_root = site.stored_root
-    from .install import apply_config_defaults, sync_package
+    from .install import apply_config_defaults, sync_config_errors, sync_package
 
-    synced = sync_package(site, a.package_rev)  # option A: startup/ is re-copied from the committed source revision
+    # release 65: the config is checked as the package being installed (--package-rev R, or the source's HEAD) will
+    # leave it, against that package's files, before anything changes; refused, the installed package stays
+    synced = sync_package(site, a.package_rev, check=lambda manifest, pkg: sync_config_errors(site, manifest, pkg))
     if synced.get("skipped"):
+        installed = site.package_manifest() if (site.startup / "startup.yaml").is_file() else {}
+        refused = sync_config_errors(site, installed, site.startup)
+        if refused:
+            fail("; ".join(refused))
         print(f"package: {synced['skipped']}")
     else:
         print(f"package {synced['id']}: {synced['from'] or 'unpinned'} -> {synced['to']}"
