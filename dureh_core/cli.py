@@ -504,6 +504,10 @@ def cmd_site_session(a):
             hs = p["harness_switch"]
             line = (f"switched harness {hs['from_label']} -> {hs['to_label']} (landed {hs['landed']}); recorded "
                     f"{hs['record']} ({sessions.SWITCHED}). ")
+        if (rec.get("office_hours") or {}).get("job_id"):
+            print(f"office hours: job {rec['office_hours']['job_id']} submitted (wall {rec['office_hours']['wall']})")
+        elif (rec.get("office_hours") or {}).get("error"):
+            print(f"note: office hours did not start: {rec['office_hours']['error']}")
         line += (f"Submitted session job {p['job_id']} at {p['submitted_at']} (wall time {p['wall_time']}, purpose "
                  f"{p['purpose']}, " + (f"first prompt {p['prompt']!r}" if p.get("prompt") else "no first prompt")
                  + f"); recorded {rec['id']} (session.started).")
@@ -523,6 +527,8 @@ def cmd_site_session(a):
             print(f"note: {n}")
     elif a.action == "release":
         out = sessions.release(site, _actor(a), cancel_now=a.cancel_now, must_run=True)
+        if (out.get("office_hours") or {}).get("event"):
+            print(f"office hours stopped ({out['office_hours']['event']}, job {out['office_hours']['job_id']})")
         if a.json:
             _print(out)
         print(sessions.render_release(out))
@@ -566,6 +572,25 @@ def cmd_member(a):
                 print(f"  {'ok  ' if row['ok'] else 'FAIL'} {row['case']}: exit {row.get('exit')}; {row.get('evidence')}")
         if r["result"] != "pass":
             fail("the codex canary did not pass on this host; codex members will not run here")
+
+
+def cmd_site_office_hours(a):
+    from . import office_hours
+
+    site = _site(a)
+    if a.action == "plan":
+        print(office_hours.plan(site)["text"], end="")
+    elif a.action == "start":
+        rec = office_hours.start(site, _actor(a))
+        p = rec["payload"]
+        print(f"office hours: job {p['job_id']} submitted (wall {p['wall']}); recorded {rec['id']} ({office_hours.STARTED})."
+              " The server file appears when the models are ready: `dureh site office-hours status`")
+    elif a.action == "stop":
+        rec = office_hours.stop(site, _actor(a), a.reason or "stopped by the desk", must_run=True)
+        print(f"office hours: job {rec['payload']['job_id']} stopped; recorded {rec['id']} ({office_hours.STOPPED})")
+    else:
+        st = office_hours.status(site)
+        _print(st if a.json else office_hours.render_status(st))
 
 
 def cmd_day(a):
@@ -1147,6 +1172,12 @@ def parser() -> argparse.ArgumentParser:
     x = add(st, "cluster", cmd_site_cluster, "cluster profile: detect from sinfo/sacctmgr, or show config.json `cluster`")
     x.add_argument("action", choices=["detect", "show"])
     x.add_argument("--write", action="store_true", help="detect: save into config.json `cluster` (desk/Director)")
+    x.add_argument("--actor")
+    x = add(st, "office-hours", cmd_site_office_hours, "release 64: the model server job for the local member runtime"
+            " (config office_hours): plan (print the script), start, stop, status")
+    x.add_argument("action", choices=["plan", "start", "stop", "status"])
+    x.add_argument("--reason", help="stop: why")
+    x.add_argument("--json", action="store_true", help="status: machine-readable")
     x.add_argument("--actor")
     x = add(st, "session", cmd_site_session, "the day's session job: plan (print the sbatch script, submit nothing), "
                                                "start (submit it and record session.started), status (read-only), "

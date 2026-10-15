@@ -1114,8 +1114,11 @@ def close(site: Site, actor: str, note: str, cancel_now: bool = False) -> dict:
 
     release_on = (site.config.get("session") or {}).get("release_on_close", True)
     if not release_on and not cancel_now:
+        from . import office_hours
+
+        oh = office_hours.stop_quietly(site, actor, "day closed")  # release 64: the model server ends with the day
         out = {"released": False, "reason": "release_on_close is off", "job_id": None,
-               "caller_job": os.environ.get("SLURM_JOB_ID")}
+               "caller_job": os.environ.get("SLURM_JOB_ID"), **({"office_hours": oh} if oh else {})}
         led.event(sessions.RELEASED, actor, None, out, [rec["id"]])
         return {**rec, "release": out}
     return {**rec, "release": sessions.release(site, actor, cancel_now=cancel_now, parent=rec["id"])}

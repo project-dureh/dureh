@@ -377,9 +377,9 @@ def config_errors(site: Site) -> list[str]:
     from .site import routing_errors
 
     out += routing_errors(site.config)
-    from . import members
+    from . import members, office_hours
 
-    out += members.config_errors(site)
+    out += members.config_errors(site) + office_hours.config_errors(site)
     return out
 
 

@@ -212,7 +212,11 @@ def start(site: Site, actor: str, purpose: str = "desk", force: bool = False, me
     payload = {"job_id": m.group(1), "submitted_at": workday._ts(now), "wall_time": b["wall"], "purpose": purpose,
                "runtime": b["runtime"], "script": str(script), "command": cmd, "notes": b["notes"],
                "prompt": b["prompt"], **again}
-    return Ledger(site).event(workday.SESSION, actor, None, payload)
+    rec = Ledger(site).event(workday.SESSION, actor, None, payload)
+    from .. import office_hours
+
+    oh = office_hours.start_quietly(site, actor)  # release 64: config office_hours.enabled; a failure is a note
+    return {**rec, "office_hours": oh} if oh else rec
 
 
 def submit_script(site: Site, script: Path, what: str) -> tuple[str, list[str]]:
@@ -357,20 +361,24 @@ def release(site: Site, actor: str, cancel_now: bool = False, parent: str | None
     caller runs inside that job, in another job (never touched) or in none. `parent` (a day.closed id) is
     referenced by the record and written into the marker. Returns the recorded payload. `must_run` (the
     `session release` command) refuses instead of recording `released: False` when no recorded job runs."""
+    from .. import office_hours
+
     led = Ledger(site)
     found, asked = running_session(site, led.events())
     caller = os.environ.get("SLURM_JOB_ID")
+    oh = office_hours.stop_quietly(site, actor, "session released")  # release 64: the model server ends with the day
     if not found:
         if must_run:
             fail("no running session job to release: " + ("; ".join(
                 f"job {a['job_id']} ({a['record']}): " + ("not in squeue" if a.get("queued") is False else a.get("error", "?"))
                 for a in asked) or "no session.started record") + "; `dureh site session status` shows the last session")
-        out = {"released": False, "reason": "no running session job", "job_id": None, "asked": asked, "caller_job": caller}
+        out = {"released": False, "reason": "no running session job", "job_id": None, "asked": asked, "caller_job": caller,
+               **({"office_hours": oh} if oh else {})}
         led.event(RELEASED, actor, None, out, [parent] if parent else None)
         return out
     job, purpose = found["job_id"], found["purpose"]
     base = {"job_id": job, "session": found["record"], "purpose": purpose, "caller_job": caller,
-            "from": "inside" if caller == job else "outside"}
+            "from": "inside" if caller == job else "outside", **({"office_hours": oh} if oh else {})}
     if found["queue"].get("queued") is None:
         base["squeue"] = f"unavailable ({found['queue'].get('error')}); the job may still run"
     if cancel_now:
