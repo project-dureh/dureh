@@ -153,6 +153,15 @@ class LocalMember(MemberCase):
         self.assertEqual([(e["tool"], e["result"]) for e in log],
                          [("list_files", "allowed"), ("read_file", "allowed"), ("read_file", "denied"),
                           ("write_file", "denied"), ("write_file", "allowed"), ("run_tests", "allowed")])
+        # the whole conversation and the final files stay in the run directory for training examples
+        rdir = members.run_dir(self.s, self.wi, r["run"]) / "dispatch"
+        tr = json.loads((rdir / "transcript-1.json").read_text())
+        self.assertEqual([m["role"] for m in tr["messages"]][:2], ["user", "assistant"])
+        self.assertIn(self.brief["header"], tr["messages"][0]["content"])
+        self.assertTrue(any(m["role"] == "tool" for m in tr["messages"]))
+        self.assertEqual(tr["messages"][-1], {"role": "assistant", "content": "Changed src/demo.py; checks pass."})
+        self.assertEqual((tr["model"], tr["status"]), ("coder-test", "ok"))
+        self.assertEqual(json.loads((rdir / "final-files.json").read_text()), {"src/demo.py": new})
         first = self.srv.requests[0]
         self.assertEqual(first["model"], "coder-test")
         self.assertFalse(first["think"])

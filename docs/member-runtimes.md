@@ -165,3 +165,11 @@ with `gpu_seconds` from `total_duration`.
 `member.*` and `office-hours.*` are reserved: `ledger add event` and `event add` refuse them.
 
 Not in this release: Claude headless members, member memory, style records.
+
+## Run directory contents (local runtime, release 65)
+
+Each attempt keeps its whole conversation in `logs/members/<WI>/<run>/dispatch/transcript-<n>.json` (model,
+profile, options, tool specs, every message: the prompt, each turn, tool calls and tool results) and the member's
+final version of every file it wrote in `final-files.json`. They stay in the run directory, never in the records:
+they are the raw material for training examples a manager proposes and the Director approves. `stream-<n>.jsonl`
+and `tools.json` are unchanged.

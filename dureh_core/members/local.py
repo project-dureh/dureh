@@ -369,7 +369,7 @@ def converse(base: str, model: str, prompt: str, tools: Tools, limits: dict, opt
             messages.append({"role": "tool", "tool_name": fn.get("name") or "", "content": out})
     else:
         status, reason = "stalled", f"max_turns reached ({limits['max_turns']})"
-    return {"status": status, "reason": reason, "output": final[-OUTPUT_TAIL:], "usage": usage}
+    return {"status": status, "reason": reason, "output": final[-OUTPUT_TAIL:], "usage": usage, "messages": messages}
 
 
 def execute(ctx: dict, converse_fn=converse) -> dict:
@@ -423,11 +423,24 @@ def execute(ctx: dict, converse_fn=converse) -> dict:
         r = converse_fn(base, model, prompt, tools, lim, options, bool(lim.get("think")),
                         log_path=d / f"stream-{attempt + 1}.jsonl")
         attempts.append({"status": r["status"], "reason": r["reason"]})
+        # the whole conversation of this attempt (prompt, every turn, tool calls and results), kept in the run
+        # directory only, never in the records: the raw material for training examples the leader proposes and the
+        # Director approves (Director, 2026-10-15)
+        write_replace(d / f"transcript-{attempt + 1}.json", dumps({
+            "model": model, "profile": profile_rec, "options": options, "think": bool(lim.get("think")),
+            "tools": [{"type": "function", "function": {"name": n, **sp}} for n, sp in TOOL_SPECS.items()],
+            "status": r["status"], "reason": r["reason"], "messages": r.get("messages") or []}))
         for k in totals:  # every attempt used the server: all count
             totals[k] += int((r.get("usage") or {}).get(k) or 0)
         if r["status"] != "harness_error":
             break
     write_replace(d / "tools.json", dumps({"log": tools.log, "writes": tools.written(), "tests": tools.tests}))
+    finals = {}
+    for rel in tools.written():  # the member's final version of each file it wrote, next to the transcripts
+        fp = wt / rel
+        if fp.is_file() and not fp.is_symlink() and fp.stat().st_size <= 1_000_000:
+            finals[rel] = fp.read_text(encoding="utf-8", errors="replace")
+    write_replace(d / "final-files.json", dumps(finals))
     out = {"profile": profile_rec, "model": model, "attempts": attempts, "output": r["output"],
            "writes": tools.written(), "tests": tools.tests[-1] if tools.tests else None, "tool_calls": len(tools.log),
            "usage": {"coverage": "runtime", "runtime": "local", "unit": "tokens", "model": model,
