@@ -171,6 +171,18 @@ def write_allowlist(site: Site, role, payload: dict) -> list[str]:
     return out
 
 
+NO_OUTPUT = ("the item declares no output inside the role's write scopes, so the local member would have no file to"
+             " write")
+
+
+def output_problem(site: Site, role, payload: dict) -> str | None:
+    """Release 65 (UR-20261015-03): the reason a `local` role's item cannot run (no declared output inside the role's
+    write scopes), shared by `member run`'s preflight, `wi new` and `wi approve`; None otherwise."""
+    if getattr(role, "runtime", None) != "local" or write_allowlist(site, role, payload):
+        return None
+    return NO_OUTPUT
+
+
 def minimal_env(extra_path: list[str] | None = None, passed: list[str] | None = None) -> dict:
     """The environment a member's processes get: an explicit allowlist, never the job's environment wholesale."""
     env = {k: os.environ[k] for k in ("HOME", "USER", "LOGNAME", "LANG", "TMPDIR") if k in os.environ}
@@ -263,9 +275,8 @@ def preflight(site: Site, role, rec: dict, cfg: dict) -> str | None:
         if not codex.passed_canary(Ledger(site)):
             return "no passing codex canary is recorded: run `dureh member canary --runtime codex` on this host first"
         return None
-    if not write_allowlist(site, role, p):
-        return ("the item declares no output inside the role's write scopes, so the local member would have no file to"
-                f" write: declare them with `wi amend --wi {rec['id']} --output <path>` (exact files)")
+    if output_problem(site, role, p):
+        return f"{NO_OUTPUT}: declare them with `wi amend --wi {rec['id']} --output <path>` (exact files)"
     from .. import office_hours
 
     entry = office_hours.profile_for(site, role.profile)

@@ -95,3 +95,11 @@ family alias `opus`/`sonnet`/`haiku` match). A spawn without `model` is always a
 brief's model is not the role's own tier model (routing, academic or rework escalation) that spawn runs the agent
 file's model, so the hook warns (`brief model <id> not passed; pass model=<id>`, on its stderr and as the hook's
 system message) and the spawn event records `model_unstated: true`.
+
+## Items of a local-runtime role need declared outputs (release 65, UR-20261015-03)
+
+A role with `runtime: local` writes only the item's declared `outputs` that lie inside its write scopes
+(docs/member-runtimes.md). `wi new` refuses an item for such a role without one (`--output <path>`, exact files, no
+globs), and `wi approve` refuses one recorded earlier, with the reason `member run` gives ("the item declares no output
+inside the role's write scopes, so the local member would have no file to write"); declare them with
+`wi amend --wi <WI> --memo ... --output <path>`. Other roles are not affected.

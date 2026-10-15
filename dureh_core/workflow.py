@@ -77,6 +77,12 @@ def wi_new(site: Site, actor: str, title: str, goal: str, role: str, target: str
         if not label or len(label) > TITLE_CHARS:
             fail(f"--label must be 1-{TITLE_CHARS} characters: {label!r}")
         payload["label"] = label
+    from .members import output_problem
+
+    why = output_problem(site, r, payload)
+    if why:  # release 65 (UR-20261015-03): refused here, not at `member run`'s preflight after approval
+        fail(f"{role} runs on the local runtime and {why}: declare them with `--output <path>` (exact files inside"
+             f" its write scopes: {', '.join(r.write_scopes)})")
     draft = {"id": "WI-0000", "payload": payload}
     n, limit = brief_bytes(site, draft), _brief_limit(site, r)
     if n > limit:
@@ -143,10 +149,23 @@ def brief_bytes(site: Site, rec: dict, extra_children: list[dict] | None = None)
 def wi_approve(site: Site, actor: str, wi: str, memo: str, by: str = "Director") -> dict:
     """Gate 1. The desk records the Director's approval as a decision, then the event."""
     led = Ledger(site)
-    led.get("work-item", wi)
+    rec = led.get("work-item", wi)
+    _local_output_check(site, wi, rec["payload"])
     dec = led.append("decision", "gate1", actor, wi, {"subject": f"Gate 1 {wi}", "disposition": "approve",
                                                         "by": by, "memo": memo})
     return led.event("wi.approved", actor, wi, {"decision": dec["id"], "by": by}, [dec["id"]])
+
+
+def _local_output_check(site: Site, wi: str, payload: dict) -> None:
+    """Release 65 (UR-20261015-03): refuse approving an item of a `local` role that declares no output inside the
+    role's write scopes (the reason `member run` gives)."""
+    from .members import output_problem
+
+    role = site.org.role(payload["role"])
+    why = output_problem(site, role, payload)
+    if why:
+        fail(f"{wi}: {role.name} runs on the local runtime and {why}: declare them first with `dureh wi amend --wi {wi}"
+             f" --memo ... --output <path>` (exact files inside its write scopes: {', '.join(role.write_scopes)})")
 
 
 # --------------------------------------------------------------- dispatch
@@ -607,6 +626,8 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
     n, limit = brief_bytes(site, draft), _brief_limit(site, role)
     if n > limit:
         fail(f"amended brief would be {n} bytes, over the {limit}-byte limit")
+    if st == "stopped":  # it is re-approved below: refuse before anything is recorded
+        _local_output_check(site, wi, draft["payload"])
     before = {k: rec["payload"].get(k) for k in fields}
     ev = led.event("wi.amended", actor, wi, {"fields": fields, "before": before, "rebase_onto": rebase_onto,
                                               "memo": memo, "by": "Director",

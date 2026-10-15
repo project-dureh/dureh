@@ -59,7 +59,10 @@ was recorded for that exact brief; the refusal names `member run`.
 3. Preflight: codex needs the command on the site's PATH and a passing canary; a local worker needs declared outputs in
    its write scopes (its allowlist), an `office_hours.profiles` entry for its profile, and a running server that serves
    it. A preflight problem is recorded as `member.not-run` (`stage: submit`, the reason) and refused: nothing is
-   submitted and the brief stays unused, so the desk can choose the fallback at once.
+   submitted and the brief stays unused, so the desk can choose the fallback at once. Release 65 (UR-20261015-03):
+   `wi new` already refuses an item of a `local` role that declares no `--output` inside the role's write scopes, with
+   the same reason, and `wi approve` (also the re-approval of an amended stopped item) refuses one recorded earlier;
+   `wi amend --output` declares them. The preflight keeps the check for items recorded before release 65.
 4. One job (`#SBATCH` from config `members.slurm` over `slurm`; job name `<prefix>-member-<WI>`; logs and script in
    `logs/members/<WI>/<run>/dispatch/`) runs `bin/dureh member exec --run <run>`. Then `wi.dispatched` (or
    `checker.dispatched`) is recorded with `runtime`, `member_run`, `job_id` and `model` (the runtime's model: the

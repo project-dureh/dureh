@@ -128,7 +128,10 @@ class LocalMember(MemberCase):
             self.submit()
 
     def test_no_declared_output_is_not_run(self):
-        wi = self.item(outputs=["README.md"])  # outside the role's write scopes
+        wi = self.item()
+        # an item recorded before release 65 refused it at creation: the preflight still refuses at `member run`
+        self.led.event("wi.amended", "desk", wi, {"fields": {"outputs": ["README.md"]}, "before": {}, "memo": "old",
+                                                  "by": "Director"})
         self.serve()
         self.wf.dispatch_brief(self.s, wi, "pm-modules")
         with self.assertRaisesRegex(DurehError, "declares no output inside the role's write scopes"):
@@ -202,6 +205,26 @@ class LocalMember(MemberCase):
         self.assertEqual((root / "src" / "demo.py").read_text(), "b")
         self.assertIn("ERROR", tools.call("write_file", {"path": "src/other.py", "content": "x"}))
         self.assertIn("the item declares no checks", tools.call("run_tests", {}))
+
+    def test_wi_new_and_approve_refuse_a_local_item_without_outputs(self):
+        """Release 65 (UR-20261015-03): the reason `member run` gives, at `wi new` and at `wi approve`."""
+        for outputs in (None, ["README.md"], ["src/*.py"]):
+            with self.assertRaisesRegex(DurehError, "py-local runs on the local runtime and the item declares no output"
+                                                    " inside the role's write scopes.*--output <path>"):
+                self.wf.wi_new(self.s, "desk", "t", "g", "py-local", "modules/demo", ["ok"], parent=self.bundle,
+                               outputs=outputs)
+        # a Claude worker is not affected
+        self.wf.wi_new(self.s, "desk", "t", "g", "py-writer", "modules/demo", ["ok"], parent=self.bundle)
+        wi = self.wf.wi_new(self.s, "desk", "t", "g", "py-local", "modules/demo", ["ok"], parent=self.bundle,
+                            outputs=["src/demo.py"])["id"]
+        self.led.event("wi.amended", "desk", wi, {"fields": {"outputs": []}, "before": {}, "memo": "old",
+                                                  "by": "Director"})
+        with self.assertRaisesRegex(DurehError, f"{wi}: py-local runs on the local runtime.*wi amend --wi {wi}"):
+            self.wf.wi_approve(self.s, "desk", wi, "ok")
+        self.assertEqual(self.events(wi, "wi.approved"), [])
+        self.wf.wi_amend(self.s, "desk", wi, "add the output", {"outputs": ["src/demo.py"]})
+        self.wf.wi_approve(self.s, "desk", wi, "ok")
+        self.assertEqual(self.led.wi_status(wi)["status"], "approved")
 
     def test_malformed_calls_are_named_before_the_allowlist(self):
         """Release 65 (UR-20261015-01): a cut-off or malformed call is answered with what is missing, never with the
