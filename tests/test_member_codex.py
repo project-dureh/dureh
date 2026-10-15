@@ -187,6 +187,39 @@ class CodexMember(MemberCase):
         again = members.collect(self.s, "pm-modules", self.wi)
         self.assertIn("already collected", again["note"])
 
+    def test_evidence_lists_tracked_changes_only_captured_before_the_checks(self):
+        """Release 65 (UR-20261015-05): build output the declared checks create (ignored or untracked) is never in
+        changed.txt or the diff; the reviewer is told that scope is judged on changed.txt and that a process claim
+        the diff cannot show is `not checked`."""
+        (self.wt / "src" / ".gitignore").write_text("*.egg-info/\n")
+        subprocess.run(["git", "add", "src/.gitignore"], cwd=self.wt, check=True)
+        subprocess.run(["git", "commit", "-qm", "ignore build output"], cwd=self.wt, check=True)
+        checks = ["mkdir -p src/demo.egg-info && echo x > src/demo.egg-info/PKG-INFO && echo y > build-note.txt"
+                  " && test -f src/demo.py"]
+        self.led.event("wi.amended", "desk", self.wi, {"fields": {"checks": checks}, "before": {}, "memo": "test",
+                                                       "by": "Director"})
+        self.assertEqual(self.led.get("work-item", self.wi)["payload"]["checks"], checks)
+        self.pass_canary()
+        r = self.submit()
+        res = self.exec_(r["run"])
+        self.assertEqual(res["outcome"], "completed", res)
+        ev = Path(json.loads((self.fake / "codex.argv").read_text())["cwd"])
+        self.assertTrue((self.wt / "src" / "demo.egg-info" / "PKG-INFO").is_file(), "the check did build it")
+        changed = (ev / "changed.txt").read_text().split()
+        self.assertEqual(changed, ["src/.gitignore", "src/demo.py"])
+        self.assertEqual(res["changed"], changed)
+        self.assertNotIn("PKG-INFO", (ev / "diff.patch").read_text())
+        self.assertNotIn("build-note", (ev / "diff.patch").read_text())
+        self.assertFalse((ev / "files").exists())
+        prompt = json.loads((self.fake / "codex.argv").read_text())["argv"][-1]
+        self.assertIn("not checked", prompt)
+        self.assertIn("changed.txt alone", prompt)
+        self.assertNotIn("build-note.txt", res["owned_paths"], "the ownership list is taken before the checks")
+        out = members.collect(self.s, "pm-modules", self.wi)
+        vrun = next(x for x in self.led.load("run") if x["id"] == out["verification"])["payload"]
+        self.assertNotIn("build-note.txt", vrun["changed"])
+        self.assertEqual(vrun["violations"], [])
+
     def test_fail_verdict_requests_rework(self):
         self.pass_canary()
         self.mode("fail")

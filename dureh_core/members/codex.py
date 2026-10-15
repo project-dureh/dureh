@@ -26,19 +26,23 @@ from ..util import DurehError, dumps, git, write_replace
 VERDICT_RE = re.compile(r"^\s*VERDICT:\s*(PASS|FAIL)\b", re.I | re.M)
 LOGIN_RE = re.compile(r"not logged in|log ?in required|please log ?in|unauthori[sz]ed|\b401\b|authenticat", re.I)
 QUOTA_RE = re.compile(r"quota|rate.?limit|usage limit|\b429\b|insufficient|too many requests", re.I)
-EVIDENCE_FILE_CAP = 200_000  # bytes of one untracked changed file copied into the bundle
 PREAMBLE = """You are the verify role `{role}` reviewing work item {wi}, read-only, on the codex runtime of the DUREH harness.
 The harness has already run the item's declared checks and gathered the evidence in the current directory:
   brief.md       the brief prepared for the checker (its instructions to run `dureh verify` are for a Claude
                  checker and are already done: the results are in checks.json)
   acceptance.md  the item's goal, acceptance criteria, constraints, declared outputs and checks
-  diff.patch     the change under review (base..head), changed.txt the changed paths
+  diff.patch     the change under review: `git diff base..head` of the item's commits
+  changed.txt    the files those commits changed (tracked changes only, listed before the checks ran)
   checks.json    the declared checks: command, exit code, seconds, last output lines
-  files/         copies of changed files git does not track yet
 Read them with read-only shell commands (cat, sed, grep, ls). Write nothing and run nothing else: the sandbox refuses
 it and a refusal is not a finding. Judge each acceptance criterion against this evidence only.
-Answer with one line per finding (criterion, evidence with file:line where you can, met / not met), then end with
-exactly one last line: `VERDICT: PASS` (every criterion met and every check passed) or `VERDICT: FAIL`.
+Scope: judge which files the item changed on changed.txt alone. Files the checks themselves build (caches, egg-info,
+build output) are not in it and are not the item's changes.
+A claim about how the work was done that the diff cannot show (for example "read X first", "ran Y before Z") is
+reported as `not checked`, never as `not met`, and does not fail the item on its own.
+Answer with one line per finding (criterion, evidence with file:line where you can, met / not met / not checked), then
+end with exactly one last line: `VERDICT: PASS` (every checkable criterion met and every check passed) or
+`VERDICT: FAIL`.
 """
 
 
@@ -254,34 +258,25 @@ def _env(site: Site, cfg: dict, binary: str, minimal_env) -> dict:
 
 
 # ------------------------------------------------------------------ run
-def _evidence(site: Site, ctx: dict, results: list[dict], paths: list[str], head: str | None) -> Path:
-    from ..workflow import _base_of
-
+def _evidence(site: Site, ctx: dict, results: list[dict], paths: list[str], head: str | None,
+              base: str | None) -> Path:
+    """The reviewer's bundle (release 65, UR-20261015-05): `changed.txt` and `diff.patch` come from the item's commits
+    only (`base..head`, captured before the checks ran); no untracked or ignored file is listed or copied."""
     wi, rec = ctx["wi"], ctx["rec"]
     ev = ctx["rdir"] / "evidence"
     ev.mkdir(parents=True, exist_ok=True)
     p = rec["payload"]
     (ev / "brief.md").write_text(ctx["brief"], encoding="utf-8")
-    lines = [f"# {wi}: {p['title']}", "", f"Goal: {p['goal']}", f"Target: {p['target']}", f"Head: {head}", "",
-             "## Acceptance", *[f"- {a}" for a in p["acceptance"]]]
+    lines = [f"# {wi}: {p['title']}", "", f"Goal: {p['goal']}", f"Target: {p['target']}", f"Base: {base}",
+             f"Head: {head}", "", "## Acceptance", *[f"- {a}" for a in p["acceptance"]]]
     for key, title in (("constraints", "Constraints"), ("outputs", "Declared outputs"), ("checks", "Declared checks")):
         if p.get(key):
             lines += ["", f"## {title}", *[f"- {x}" for x in p[key]]]
     (ev / "acceptance.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     (ev / "checks.json").write_text(dumps(results), encoding="utf-8")
-    (ev / "changed.txt").write_text("\n".join(paths) + "\n", encoding="utf-8")
+    (ev / "changed.txt").write_text("".join(f"{x}\n" for x in paths), encoding="utf-8")
     wt = site.worktrees / wi
-    diff = ""
-    if wt.is_dir() and head:
-        base = _base_of(site, wi)
-        diff = git(["diff", f"{base}..{head}"], wt, check=False) if base else ""
-        tracked = set(git(["ls-files"], wt, check=False).splitlines())
-        for name in paths:
-            src = wt / name
-            if name not in tracked and src.is_file() and not src.is_symlink() and src.stat().st_size <= EVIDENCE_FILE_CAP:
-                dst = ev / "files" / name
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(src, dst)
+    diff = git(["diff", f"{base}..{head}"], wt, check=False) if wt.is_dir() and head and base else ""
     (ev / "diff.patch").write_text(diff, encoding="utf-8")
     return ev
 
@@ -310,21 +305,26 @@ def execute(ctx: dict, runner=subprocess.run) -> dict:
     except DurehError as exc:
         return {"outcome": "not_run", "reason": f"cannot verify now: {exc}"}
     ctx["rec"] = vctx["rec"]
+    # release 65 (UR-20261015-05): what the item changed is captured BEFORE the declared checks run, so nothing the
+    # checks build is listed: the reviewer's changed.txt and diff come from the item's commits only; the harness's
+    # ownership check at collect uses the pre-check list of `changed_paths`, as `verify --wi` does
+    tracked, head, base_rev = wf.tracked_changes(site, wi)
+    owned, _ = wf.changed_paths(site, wi)
     results = []
     if vctx["checks"]:
         wf._check_venv(wi, vctx["cwd"])
         plan = wf._check_env_present(site, wi, vctx["cwd"], vctx["troot"])
         results = wf._run_checks_local(site, wi, vctx["cwd"], vctx["troot"], vctx["checks"], int(c["checks_timeout"]),
                                        plan)
-    paths, head = wf.changed_paths(site, wi)
-    evidence = _evidence(site, ctx, results, paths, head)
+    evidence = _evidence(site, ctx, results, tracked, head, base_rev)
     readable = [str(evidence)] + sandbox_read_paths(site, cfg, binary)
     argv = exec_argv(binary, evidence, cfg, readable)
     prompt = PREAMBLE.format(role=role.name, wi=wi)
     d = ctx["rdir"] / "dispatch"
     write_replace(d / "codex-argv.json", dumps(argv))
     t0 = time.monotonic()
-    base = {"checks": results, "head": head, "changed": paths, "canary": {"host": host, "version": ver},
+    base = {"checks": results, "head": head, "base": base_rev, "changed": tracked, "owned_paths": owned,
+            "canary": {"host": host, "version": ver},
             "model": c.get("model") or "default"}
     effort = str(c.get("reasoning_effort") or "medium")
     try:

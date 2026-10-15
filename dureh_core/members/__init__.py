@@ -621,6 +621,8 @@ def _collect_verdict(site: Site, led: Ledger, actor: str, wi: str, run: dict, re
 
     ctx = wf._verify_context(site, role.name, wi)
     paths, head = wf.changed_paths(site, wi)
+    if head == result.get("head") and isinstance(result.get("owned_paths"), list):
+        paths = result["owned_paths"]  # release 65: listed in the job before its checks ran (as `verify --wi` does)
     if head != result.get("head"):
         ev = led.event(COLLECTED, actor, wi, {**base, "superseded": True, "reviewed_head": result.get("head"),
                                               "head": head}, [run["id"]])

@@ -104,9 +104,16 @@ bundle read and the sandbox helper's own paths read (no write entry, so nothing 
 `--sandbox read-only` flag is never used (it overrode a named profile and widened reads in an earlier team's canary).
 
 - **Evidence bundle** (`logs/members/<WI>/<run>/evidence/`): `brief.md`, `acceptance.md` (goal, acceptance,
-  constraints, outputs, checks), `diff.patch` (base..head), `changed.txt`, `checks.json` (the declared checks, run by
-  the job before the review) and `files/` (copies of untracked changed files).
-- The reviewer ends with `VERDICT: PASS` or `VERDICT: FAIL`. NOT_RUN: past the wait limit (`members.codex.wait_seconds`),
+  constraints, outputs, checks, base and head), `diff.patch` (`git diff <base>..<head>`), `changed.txt`, `checks.json`
+  (the declared checks, run by the job before the review). Release 65 (UR-20261015-05): `changed.txt` and the diff are
+  the item's tracked changes only, `git diff --name-only <base>..<verified head>`, captured BEFORE the declared checks
+  run; untracked and ignored files (build output such as `*.egg-info/` that a check's own build creates) are never
+  listed, and no `files/` copies are made (a staged item's work is committed). The harness's own ownership check at
+  `member collect` uses the `changed_paths` list the job took before its checks too (as `verify --wi` does), carried
+  in the result as `owned_paths` and used while the head is unchanged.
+- **Review instructions**: scope is judged on `changed.txt` alone; a claim about how the work was done that the diff
+  cannot show ("read X first") is reported as `not checked`, never as not met, and does not fail the item on its own.
+  The reviewer ends with `VERDICT: PASS` or `VERDICT: FAIL`. NOT_RUN: past the wait limit (`members.codex.wait_seconds`),
   a login or quota failure, a non-zero exit, no verdict line, or a failed canary.
 - Usage: `input_tokens`, `cached_input_tokens`, `output_tokens` from `turn.completed`; the model as requested.
 - **Sandbox helper paths**: under a narrow profile, bubblewrap must be able to exec the codex sandbox helper. The

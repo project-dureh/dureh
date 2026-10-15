@@ -1040,6 +1040,20 @@ def changed_paths(site: Site, wi: str) -> tuple[list[str], str | None]:
     return sorted(names), head
 
 
+def tracked_changes(site: Site, wi: str) -> tuple[list[str], str | None, str | None]:
+    """(paths, head, base): the files the item's commits changed, `git diff --name-only <base>..<head>` only (release
+    65, UR-20261015-05). Untracked and ignored files (for example build output the declared checks create) are never
+    listed. A reviewer's evidence is built from this, captured before the checks run."""
+    wt = site.worktrees / wi
+    if not wt.is_dir():
+        return [], None, None
+    base = _base_of(site, wi)
+    if not base:
+        fail(f"no recorded base revision for {wi}")
+    head = git(["rev-parse", "HEAD"], wt)
+    return sorted(set(_git_z(["diff", "--name-only", "-z", f"{base}..{head}"], wt))), head, base
+
+
 def _git_z(args: list[str], cwd: Path) -> list[str]:
     proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
     if proc.returncode != 0:
