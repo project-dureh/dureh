@@ -370,6 +370,51 @@ class LocalMember(MemberCase):
         b = self.wf.dispatch_brief(self.s, self.wi, "pm-modules")  # superseding is allowed: the member finished
         self.assertTrue(b["brief"])
 
+    def noop_run(self):
+        """A member run that writes nothing (the model answers at once), collected."""
+        self.srv.scripts = [[("done", "nothing to change: the failure is not in my files")]]
+        r = self.submit()
+        self.exec_(r["run"])
+        return r
+
+    def test_stage_unchanged_restages_the_same_head_for_re_verification(self):
+        """Release 66 (UR-20261015-08): a local rework that correctly changed nothing re-stages the same head."""
+        self.serve()
+        self.noop_run()
+        first = self.wf.wi_stage(self.s, "py-local", self.wi, "first staging")  # the head staged before
+        self.led.event("rework.requested", "checker", self.wi, {"run": "run-x", "reason": "codex FAIL"})
+        self.wf.dispatch_brief(self.s, self.wi, "pm-modules")
+        r = self.noop_run()
+        self.assertEqual(self.led.wi_status(self.wi)["status"], "dispatched")
+        with self.assertRaisesRegex(DurehError, "--unchanged goes with --stage"):
+            members.collect(self.s, "pm-modules", self.wi, unchanged=True, reason="x")
+        with self.assertRaisesRegex(DurehError, "needs --reason"):
+            members.collect(self.s, "pm-modules", self.wi, stage=True, unchanged=True)
+        with self.assertRaisesRegex(DurehError, "the member changed nothing"):
+            members.collect(self.s, "pm-modules", self.wi, stage=True, summary="x")
+        (self.wt / "src" / "demo.py").write_text("dirty\n")
+        with self.assertRaisesRegex(DurehError, "the worktree has changes \\(src/demo.py\\)"):
+            members.collect(self.s, "pm-modules", self.wi, stage=True, unchanged=True, reason="nothing to fix")
+        subprocess.run(["git", "checkout", "--", "src/demo.py"], cwd=self.wt, check=True)
+        out = members.collect(self.s, "pm-modules", self.wi, stage=True, unchanged=True,
+                              reason="the FAIL was an evidence gap; the code is right")
+        self.assertEqual(self.led.wi_status(self.wi)["status"], "staged")
+        st = self.events(self.wi, "wi.staged")[-1]
+        self.assertEqual((st["actor"], st["payload"]["head"], st["payload"]["unchanged"], st["payload"]["restaged_from"],
+                          st["payload"]["member_run"], st["payload"]["reviewed_by"]),
+                         ("py-local", first["payload"]["head"], True, first["id"], r["run"], "pm-modules"))
+        self.assertIn("evidence gap", st["payload"]["reason"])
+        self.assertEqual(out["head"], first["payload"]["head"])
+        log = subprocess.run(["git", "log", "--format=%s"], cwd=self.wt, capture_output=True, text=True).stdout
+        self.assertNotIn("member run", log, "nothing was committed")
+
+    def test_stage_unchanged_refuses_a_head_never_staged(self):
+        self.serve()
+        self.noop_run()
+        with self.assertRaisesRegex(DurehError, "was never staged before"):
+            members.collect(self.s, "pm-modules", self.wi, stage=True, unchanged=True, reason="no-op")
+        self.assertEqual(self.led.wi_status(self.wi)["status"], "dispatched")
+
     def test_a_pending_member_run_holds_the_item(self):
         self.serve()
         r = self.submit()

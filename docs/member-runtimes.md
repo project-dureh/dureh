@@ -46,6 +46,7 @@ was recorded for that exact brief; the refusal names `member run`.
 | `dureh member status --wi W` | anyone (also `--observe`) | the item's member runs: job state, run status, outcome, verdict, collection |
 | `dureh member collect --wi W [--run R]` | the dispatcher or the desk | records the outcome of an ended run |
 | `dureh member collect --wi W --stage --summary S` | the dispatcher or the desk, after review | local worker: commits the member's changes on the WI branch and records `wi.staged` |
+| `dureh member collect --wi W --stage --unchanged --reason R` | the dispatcher or the desk | local worker (release 66): re-stages the same, already staged head for re-verification when the rework rightly changed nothing |
 | `dureh member collect --wi W --discard --reason R` | the dispatcher or the desk | local worker: restores the member's changes, records `member.discarded` |
 | `dureh member collect --wi W --rework [--reason R]` | the dispatcher or the desk | codex checker (release 66): chooses rework for a held verdict FAIL |
 | `dureh member canary --runtime codex` | the desk | proves on this host that the codex profile refuses reads outside the bundle and every write |
@@ -111,6 +112,11 @@ the role's fallback with a new brief.
   files (all must be on the allowlist) with a message naming the run, and records `wi.staged` as the member
   (`reviewed_by`, `member_run`); the checker verifies it as usual. `--discard --reason` restores them; the item stays
   dispatched for a new brief.
+- **unchanged re-stage** (release 66, UR-20261015-08): a local rework that correctly changed nothing (the FAIL was not
+  in the worker's files) is staged again with `--stage --unchanged --reason R`: `wi.staged` as the member with
+  `unchanged: true`, `reason`, `restaged_from` (the earlier `wi.staged` of the same head), `files: []`; nothing is
+  committed. Refused when the worktree has changes (stage or discard them) or when the head was never staged before.
+  The checker then verifies the same head again.
 
 ## Codex runtime (checker)
 
@@ -220,6 +226,7 @@ note once as a user message and the loop goes on (a second cut answer in a row e
 | `member.collected` / `member.discarded` | the dispatcher or the desk | `run`, `outcome`, `verdict`, `changed`, `superseded` |
 | `member.held` (release 66) | the verify role, at collect | `run` (the verify run), `head`, `member_run`, `runtime`, `verdict`, `reason`, `violations`, `missing_outputs`, `collected_by`, `dispatcher` |
 | `member.choice` (release 66) | the dispatcher or the desk | `held`, `choice` (`rework` or `fallback`), `run`, `member_run`, `head`, `reason`, `fallback` (the `member.fallback` event) |
+| `wi.staged` with `unchanged` (release 66) | the member's role | `unchanged: true`, `reason`, `restaged_from`, `member_run`, `reviewed_by`, `files: []` |
 | `member.canary` | the desk, or the checker's job | `runtime`, `host`, `version`, `result`, `rows` |
 | `office-hours.started` / `office-hours.stopped` | the desk | `job_id`, `wall`, `profiles` / `reason`, `scancel` |
 

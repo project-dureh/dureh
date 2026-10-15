@@ -612,8 +612,9 @@ def _worktree_changes(wt: Path) -> list[str]:
 
 
 def collect(site: Site, actor: str, wi: str, run_id: str | None = None, stage: bool = False, summary: str | None = None,
-            discard: bool = False, reason: str | None = None, rework: bool = False) -> dict:
-    """`member collect --wi W [--run R] [--stage --summary S | --discard --reason R | --rework [--reason R]]`.
+            discard: bool = False, reason: str | None = None, rework: bool = False, unchanged: bool = False) -> dict:
+    """`member collect --wi W [--run R] [--stage --summary S | --stage --unchanged --reason R | --discard --reason R
+    | --rework [--reason R]]`.
 
     Records the outcome of an ended member run once (`member.collected`). A run whose job ended without a result
     (cancelled, out of time, node failure) is recorded as NOT_RUN and its `agent.finished` written for it. A codex
@@ -626,12 +627,15 @@ def collect(site: Site, actor: str, wi: str, run_id: str | None = None, stage: b
 
     Release 66: a collected codex FAIL is held (UR-20261015-07: the item stays staged, `member.held`) until the
     dispatcher chooses `--rework` (records `member.choice` and `rework.requested` from the held verification) or the
-    fallback (`member run --fallback`)."""
+    fallback (`member run --fallback`); `--stage --unchanged --reason` (UR-20261015-08) re-stages a head the local
+    member correctly left unchanged, for re-verification."""
     led = Ledger(site)
     if rework:
-        if stage or discard:
+        if stage or discard or unchanged:
             fail("--rework stands alone: it chooses rework for a held checker verdict")
         return _choose_rework(site, led, actor, wi, reason)
+    if unchanged and not stage:
+        fail("--unchanged goes with --stage: it re-stages the unchanged head (with --reason)")
     runs = member_runs(led, wi)
     if not runs:
         fail(f"{wi} has no member run")
@@ -657,7 +661,7 @@ def collect(site: Site, actor: str, wi: str, run_id: str | None = None, stage: b
     done = _collected(events, run["id"])
     role = site.org.role(p["role"])
     if p["runtime"] == "local" and (stage or discard):
-        return _review(site, led, actor, wi, run, result, role, stage, summary, discard, reason, done)
+        return _review(site, led, actor, wi, run, result, role, stage, summary, discard, reason, done, unchanged)
     if stage or discard:
         fail("--stage and --discard are for a local worker's changes")
     if done:
@@ -751,7 +755,7 @@ def _choose_rework(site: Site, led: Ledger, actor: str, wi: str, reason: str | N
 
 
 def _review(site: Site, led: Ledger, actor: str, wi: str, run: dict, result: dict, role, stage: bool,
-            summary: str | None, discard: bool, reason: str | None, done: dict | None) -> dict:
+            summary: str | None, discard: bool, reason: str | None, done: dict | None, unchanged: bool = False) -> dict:
     if stage == discard:
         fail("choose one: --stage --summary \"...\" or --discard --reason \"...\"")
     if done and done["type"] == DISCARDED:
@@ -777,6 +781,8 @@ def _review(site: Site, led: Ledger, actor: str, wi: str, run: dict, result: dic
                                               "role": role.name}, [run["id"]])
         return {"run": run["id"], "event": ev["id"], "discarded": changed,
                 "next": f"the item stays dispatched; prepare a new brief (`dispatch brief --wi {wi}`) and run again"}
+    if unchanged:
+        return _restage_unchanged(site, led, actor, wi, run, result, role, wt, changed, summary, reason, done)
     if not (summary or "").strip():
         fail("--stage needs --summary")
     if led.wi_status(wi)["status"] != "dispatched":
@@ -786,7 +792,8 @@ def _review(site: Site, led: Ledger, actor: str, wi: str, run: dict, result: dic
         fail(f"{wi}: changes outside the member's write allowlist: {', '.join(outside)}; nothing was staged (discard"
              " them or let the desk decide)")
     if not changed:
-        fail(f"{wi}: the member changed nothing; nothing to stage")
+        fail(f"{wi}: the member changed nothing; nothing to stage (a head staged before is staged again for"
+             " re-verification with --stage --unchanged --reason \"...\")")
     git(["add", "--", *changed], wt)
     msg = f"{wi}: {summary.strip()} (member run {run['id']}, runtime {role.runtime}; reviewed by {actor})"
     git(["commit", "-q", "-m", msg], wt)
@@ -798,6 +805,38 @@ def _review(site: Site, led: Ledger, actor: str, wi: str, run: dict, result: dic
     ev = led.event("wi.staged", role.name, wi, {"summary": summary.strip()[:4000], "head": head, "member_run": run["id"],
                                                 "reviewed_by": actor, "files": changed}, [run["id"]])
     return {"run": run["id"], "event": ev["id"], "head": head, "files": changed,
+            "next": f"verify through the checker: `dureh dispatch brief --wi {wi} --role <checker>`"}
+
+
+def _restage_unchanged(site: Site, led: Ledger, actor: str, wi: str, run: dict, result: dict, role, wt: Path,
+                       changed: list[str], summary: str | None, reason: str | None, done: dict | None) -> dict:
+    """Release 66 (UR-20261015-08): `member collect --wi W --stage --unchanged --reason R`. A local rework that
+    correctly changed nothing re-stages the same head for re-verification: `wi.staged` as the member with
+    `unchanged: true`, the reason and the earlier staging of that head. Refused when the worktree has changes (stage
+    or discard them) or when the head was never staged before (nothing to re-verify)."""
+    if not (reason or "").strip():
+        fail("--stage --unchanged needs --reason: why the unchanged head is staged again")
+    st = led.wi_status(wi)["status"]
+    if st != "dispatched":
+        fail(f"{wi} is {st}; only a dispatched item is staged")
+    if changed:
+        fail(f"{wi}: the worktree has changes ({', '.join(changed)}); --unchanged re-stages a head the member left"
+             " unchanged. Stage them with --stage --summary, or discard them with --discard --reason")
+    head = git(["rev-parse", "HEAD"], wt)
+    prev = [e for e in led.events(wi) if e["type"] == "wi.staged" and e["payload"].get("head") == head]
+    if not prev:
+        fail(f"{wi}: head {head[:12]} was never staged before; --unchanged only re-stages a head for re-verification")
+    if not done:
+        led.event(COLLECTED, actor, wi, {"run": run["id"], "role": role.name, "runtime": role.runtime,
+                                         "outcome": result.get("outcome"), "reason": result.get("reason"),
+                                         "collected_by": actor, "changed": []}, [run["id"]])
+    why = reason.strip()
+    ev = led.event("wi.staged", role.name, wi, {"summary": ((summary or "").strip() or f"unchanged: {why}")[:4000],
+                                                "head": head, "member_run": run["id"], "reviewed_by": actor,
+                                                "files": [], "unchanged": True, "reason": why,
+                                                "restaged_from": prev[-1]["id"]}, [run["id"], prev[-1]["id"]])
+    return {"run": run["id"], "event": ev["id"], "head": head, "files": [], "unchanged": True,
+            "restaged_from": prev[-1]["id"],
             "next": f"verify through the checker: `dureh dispatch brief --wi {wi} --role <checker>`"}
 
 
