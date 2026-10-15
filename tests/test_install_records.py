@@ -65,7 +65,7 @@ class Install(SiteCase):
 
     def test_generated_instructions_carry_the_english_rule(self):
         # Director, 2026-10-04: generated documents are always in English; the desk asks the conversation language once
-        from dureh_core.runtimes.claude_code import AGENT_ENGLISH_RULE, ENGLISH_RULE, _agent_file
+        from dureh_core.runtimes.claude_code import AGENT_ENGLISH_RULE, ENGLISH_RULE, TRANSLATE_RULE, _agent_file
 
         self.install()
         root = self.site_root
@@ -73,6 +73,7 @@ class Install(SiteCase):
         self.assertEqual(persona["language"], "English")  # the fixture question's default
         claude_md = (root / "CLAUDE.md").read_text()
         self.assertIn(f"- {ENGLISH_RULE}", claude_md)
+        self.assertIn(f"- {TRANSLATE_RULE}", claude_md)  # Director 2026-10-15: translate what the Director reads
         self.assertIn("- language: English. Conversation with the Director is in the Director's preferred language. At first contact ask", claude_md)
         self.assertIn("record the answer as `language` in `state/persona/persona.json`; once recorded, keep it.", claude_md)
         agents = sorted((root / ".claude" / "agents").glob("*.md"))
