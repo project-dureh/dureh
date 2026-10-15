@@ -38,6 +38,7 @@ TOOL_SPECS = {
     "run_tests": {"description": "Run the item's declared checks; returns each exit code and its last output lines.",
                   "parameters": {"type": "object", "properties": {}}},
 }
+DEFAULT_ARGS = {"list_files": {"path": "."}}  # a call without the argument means the work root (as before)
 COUNTERS = ("prompt_eval_count", "eval_count", "load_duration", "prompt_eval_duration", "eval_duration",
             "total_duration")
 READ_CAP = 60_000
@@ -211,19 +212,67 @@ class Tools:
         t = classify(self.site, p)
         return read_refusal(self.site, p, t.logical if t.zone in ("worktree", "target") else None)
 
-    def call(self, name: str, args) -> str:
-        args = args if isinstance(args, dict) else {}
-        entry = {"tool": name, "path": args.get("path")}
+    def malformed(self, name: str, args) -> tuple[dict | None, str | None]:
+        """Release 65 (UR-20261015-01): (parsed arguments, None) or (None, why the call is incomplete). Checked
+        BEFORE any allowlist or path rule, so a call cut off by the output limit is never reported as a refusal."""
+        if isinstance(args, str):
+            if not args.strip():
+                args = {}
+            else:
+                try:
+                    args = json.loads(args)
+                except json.JSONDecodeError as exc:
+                    return None, f"the arguments are not valid JSON ({exc.msg} at character {exc.pos})"
+        if args is None:
+            args = {}
+        if not isinstance(args, dict):
+            return None, f"the arguments are not an object ({type(args).__name__})"
+        args = {**DEFAULT_ARGS.get(name, {}), **{k: v for k, v in args.items() if v not in (None, "")}} \
+            if name in DEFAULT_ARGS else args
+        spec = TOOL_SPECS[name]["parameters"]
+        missing = [k for k in spec.get("required") or [] if k not in args or args[k] is None
+                   or (k == "path" and args[k] == "")]
+        if missing:
+            return None, "missing " + ", ".join(missing)
+        wrong = [k for k in spec.get("required") or [] if not isinstance(args[k], str)]
+        if wrong:
+            return None, f"{', '.join(wrong)} must be a string"
+        return args, None
+
+    def call(self, name: str, args, cut: bool = False) -> str:
+        """Run one tool call. `args` is what the model sent (an object, or a JSON string). A malformed call (missing
+        or non-string required arguments, unparsable arguments) is answered with what is wrong and logged as
+        `malformed`, never as `denied`. `cut`: the response that carried the call stopped at the output limit."""
         fn = getattr(self, f"_{name}", None) if name in TOOL_SPECS else None
+        parsed = args if isinstance(args, dict) else {}
+        entry = {"tool": name, "path": parsed.get("path") if isinstance(parsed.get("path"), str) else None}
         if fn is None:
             out, verdict = f"ERROR: no tool {name!r}; use {', '.join(TOOL_SPECS)}", "unknown"
         else:
-            try:
-                out, verdict = fn(args)
-            except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                out, verdict = f"ERROR: {type(exc).__name__}: {exc}", "error"
+            parsed, why = self.malformed(name, args)
+            if why:
+                hint = ("the output was cut by the token limit" if cut else
+                        "the output was probably cut by the token limit")
+                out = f"ERROR: {name} call incomplete: {why}; {hint}" + (
+                    "; write smaller pieces (a shorter file, or fewer changes per call)" if name == "write_file" else
+                    "; call it again with every argument")
+                verdict = "malformed"
+                entry["why"] = why
+            else:
+                entry["path"] = parsed.get("path")
+                try:
+                    out, verdict = fn(parsed)
+                except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                    out, verdict = f"ERROR: {type(exc).__name__}: {exc}", "error"
         entry["result"] = verdict
         self.log.append(entry)
+        return out
+
+    def counts(self) -> dict:
+        """Tool calls by result (allowed, denied, malformed, unknown, error)."""
+        out: dict = {}
+        for e in self.log:
+            out[e["result"]] = out.get(e["result"], 0) + 1
         return out
 
     def _list_files(self, args):
@@ -249,9 +298,7 @@ class Tools:
         return p.read_text(encoding="utf-8", errors="replace")[:READ_CAP], "allowed"
 
     def _write_file(self, args):
-        if not isinstance(args.get("content"), str):
-            return "ERROR: write_file needs path and content (strings)", "invalid"
-        raw = args.get("path")
+        raw = args["path"]
         p = self._path(raw)
         if p is None or str(p) not in self.allow or (isinstance(raw, str) and (self.root / raw).is_symlink()):
             return f"ERROR: not on your write allowlist ({', '.join(self.allow.values())})", "denied"
@@ -285,9 +332,30 @@ class Tools:
 
 
 # ------------------------------------------------------------------ the loop
+CONTEXT_FULL_SHARE = 0.95  # a request whose prompt filled this share of num_ctx was probably truncated by the server
+CUT_NOTE = ("NOTE: your previous response stopped at the output limit (num_predict {num_predict}): it was cut. A tool"
+            " call in it may be incomplete. Keep each response short: write smaller pieces.")
+
+
+def _int_option(options: dict, name: str) -> int | None:
+    v = (options or {}).get(name)
+    return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else None
+
+
+def context_limits(options: dict) -> dict:
+    """The effective `num_ctx` and `num_predict` sent with every request (None: the server's own default)."""
+    return {"num_ctx": _int_option(options, "num_ctx"), "num_predict": _int_option(options, "num_predict")}
+
+
 def converse(base: str, model: str, prompt: str, tools: Tools, limits: dict, options: dict, think: bool,
              log_path: Path | None = None, clock=time.monotonic) -> dict:
-    """One attempt of the tool loop. Returns {status: ok | stalled | harness_error, reason, output, usage}."""
+    """One attempt of the tool loop. Returns {status: ok | stalled | harness_error, reason, output, usage, context}.
+
+    Release 65 (UR-20261015-02): the usage counters are summed over the turns; `context` records per attempt the
+    largest single request's `prompt_eval_count`, the effective `num_ctx`/`num_predict`, and the turns whose prompt
+    reached CONTEXT_FULL_SHARE of num_ctx (`context_full`) or whose response stopped with done_reason `length`
+    (`output_cut`). After a cut response the model is told so: in each tool result of that turn, or, when the cut
+    response had no tool call, in one user message (once in a row) before the loop goes on."""
     wall, quiet = float(limits["wall_seconds"]), float(limits["quiet_seconds"])
     rep = limits.get("repetition") or {}
     started = clock()
@@ -295,16 +363,20 @@ def converse(base: str, model: str, prompt: str, tools: Tools, limits: dict, opt
     messages = [{"role": "user", "content": prompt}]
     specs = [{"type": "function", "function": {"name": n, **s}} for n, s in TOOL_SPECS.items()]
     usage = {k: 0 for k in COUNTERS} | {"calls": 0, "thinking_chars": 0, "done_reasons": []}
+    ctx_lim = context_limits(options)
+    context = {**ctx_lim, "max_prompt_eval_count": 0, "context_full_turns": [], "output_cut_turns": []}
     status, reason, final = "ok", None, ""
+    nudged = False
 
     def note(obj):
         if log_path is not None:
             with open(log_path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(obj, ensure_ascii=False) + "\n")
 
-    for _ in range(int(limits["max_turns"])):
+    for turn in range(1, int(limits["max_turns"]) + 1):
         payload = {"model": model, "messages": messages, "tools": specs, "think": bool(think), "options": options}
         content, thinking, calls, grace, done = [], 0, [], 0, False
+        done_reason, prompt_count = None, 0
         try:
             stream = chat_stream(base, payload, quiet, deadline)
             while not done:
@@ -340,7 +412,9 @@ def converse(base: str, model: str, prompt: str, tools: Tools, limits: dict, opt
                 if chunk.get("done"):
                     for k in COUNTERS:
                         usage[k] += int(chunk.get(k) or 0)
-                    usage["done_reasons"].append(str(chunk.get("done_reason") or "unknown"))
+                    done_reason = str(chunk.get("done_reason") or "unknown")
+                    prompt_count = int(chunk.get("prompt_eval_count") or 0)
+                    usage["done_reasons"].append(done_reason)
                     usage["calls"] += 1
                     done = True
                 if clock() - started >= wall:
@@ -349,27 +423,37 @@ def converse(base: str, model: str, prompt: str, tools: Tools, limits: dict, opt
         except (OSError, ValueError) as exc:  # connection refused or reset, a broken JSON line
             status, reason = "harness_error", f"{type(exc).__name__}: {exc}"
         usage["thinking_chars"] += thinking
+        if done:
+            context["max_prompt_eval_count"] = max(context["max_prompt_eval_count"], prompt_count)
+            if ctx_lim["num_ctx"] and prompt_count >= CONTEXT_FULL_SHARE * ctx_lim["num_ctx"]:
+                context["context_full_turns"].append(turn)
+            if done_reason == "length":
+                context["output_cut_turns"].append(turn)
         if status != "ok":
             break
+        cut = done_reason == "length"
         text = "".join(content)
-        note({"t": time.time(), "assistant": text[-OUTPUT_TAIL:], "tool_calls": calls})
+        note({"t": time.time(), "assistant": text[-OUTPUT_TAIL:], "tool_calls": calls, "done_reason": done_reason,
+              "prompt_eval_count": prompt_count})
         messages.append({"role": "assistant", "content": text, **({"tool_calls": calls} if calls else {})})
+        cut_note = CUT_NOTE.format(num_predict=ctx_lim["num_predict"] or "server default")
         if not calls:
+            if cut and not nudged and turn < int(limits["max_turns"]):
+                nudged = True  # the answer was cut: say so once and let the model go on
+                messages.append({"role": "user", "content": cut_note + " If you meant to call a tool, call it again."})
+                continue
             final = text
             break
+        nudged = False
         for call in calls:
             fn = call.get("function") or {}
-            args = fn.get("arguments") or {}
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except json.JSONDecodeError:
-                    args = {}
-            out = tools.call(str(fn.get("name") or ""), args)
-            messages.append({"role": "tool", "tool_name": fn.get("name") or "", "content": out})
+            out = tools.call(str(fn.get("name") or ""), fn.get("arguments"), cut=cut)
+            messages.append({"role": "tool", "tool_name": fn.get("name") or "",
+                             "content": f"{cut_note}\n{out}" if cut else out})
     else:
         status, reason = "stalled", f"max_turns reached ({limits['max_turns']})"
-    return {"status": status, "reason": reason, "output": final[-OUTPUT_TAIL:], "usage": usage, "messages": messages}
+    return {"status": status, "reason": reason, "output": final[-OUTPUT_TAIL:], "usage": usage, "messages": messages,
+            "context": context}
 
 
 def execute(ctx: dict, converse_fn=converse) -> dict:
@@ -419,6 +503,7 @@ def execute(ctx: dict, converse_fn=converse) -> dict:
     d = ctx["rdir"] / "dispatch"
     attempts = []
     totals = {k: 0 for k in COUNTERS} | {"calls": 0, "thinking_chars": 0}
+    context = {**context_limits(options), "max_prompt_eval_count": 0, "context_full_turns": [], "output_cut_turns": []}
     for attempt in range(1 + int(lim["retries"])):
         r = converse_fn(base, model, prompt, tools, lim, options, bool(lim.get("think")),
                         log_path=d / f"stream-{attempt + 1}.jsonl")
@@ -429,25 +514,36 @@ def execute(ctx: dict, converse_fn=converse) -> dict:
         write_replace(d / f"transcript-{attempt + 1}.json", dumps({
             "model": model, "profile": profile_rec, "options": options, "think": bool(lim.get("think")),
             "tools": [{"type": "function", "function": {"name": n, **sp}} for n, sp in TOOL_SPECS.items()],
-            "status": r["status"], "reason": r["reason"], "messages": r.get("messages") or []}))
+            "status": r["status"], "reason": r["reason"], "context": r.get("context"),
+            "messages": r.get("messages") or []}))
         for k in totals:  # every attempt used the server: all count
             totals[k] += int((r.get("usage") or {}).get(k) or 0)
+        rc = r.get("context") or {}
+        context["max_prompt_eval_count"] = max(context["max_prompt_eval_count"], int(rc.get("max_prompt_eval_count") or 0))
+        for key in ("context_full_turns", "output_cut_turns"):
+            context[key] += [{"attempt": attempt + 1, "turn": t} for t in rc.get(key) or []]
         if r["status"] != "harness_error":
             break
-    write_replace(d / "tools.json", dumps({"log": tools.log, "writes": tools.written(), "tests": tools.tests}))
+    write_replace(d / "tools.json", dumps({"log": tools.log, "counts": tools.counts(), "writes": tools.written(),
+                                          "tests": tools.tests}))
     finals = {}
     for rel in tools.written():  # the member's final version of each file it wrote, next to the transcripts
         fp = wt / rel
         if fp.is_file() and not fp.is_symlink() and fp.stat().st_size <= 1_000_000:
             finals[rel] = fp.read_text(encoding="utf-8", errors="replace")
     write_replace(d / "final-files.json", dumps(finals))
+    notes = [n for n, key in (("context_full", "context_full_turns"), ("output_cut", "output_cut_turns")) if context[key]]
     out = {"profile": profile_rec, "model": model, "attempts": attempts, "output": r["output"],
            "writes": tools.written(), "tests": tools.tests[-1] if tools.tests else None, "tool_calls": len(tools.log),
+           "tool_results": tools.counts(), "context": context, "notes": notes,
            "usage": {"coverage": "runtime", "runtime": "local", "unit": "tokens", "model": model,
                      "profile_sha256": digest, "input_tokens": totals["prompt_eval_count"],
                      "output_tokens": totals["eval_count"], **totals,
+                     "max_prompt_eval_count": context["max_prompt_eval_count"], "num_ctx": context["num_ctx"],
+                     "num_predict": context["num_predict"],
                      "gpu_seconds": round(totals["total_duration"] / 1e9, 1),
-                     "source": "office-hours server counters (prompt_eval_count, eval_count, durations in ns)"}}
+                     "source": "office-hours server counters (prompt_eval_count, eval_count, durations in ns),"
+                               " summed over every request; max_prompt_eval_count is the largest single request"}}
     if r["status"] == "ok":
         return {**out, "outcome": "completed", "reason": None}
     return {**out, "outcome": "not_run", "reason": f"{r['status']}: {r['reason']}"}

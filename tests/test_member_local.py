@@ -59,6 +59,10 @@ class FakeServer:
                         chunk = {"message": {"role": "assistant", "content": value}, "done": False}
                     elif kind == "tools":
                         chunk = {"message": {"role": "assistant", "content": "", "tool_calls": value}, "done": False}
+                    elif kind == "final":  # a final chunk with the given counters (release 65)
+                        chunk = {"message": {"role": "assistant", "content": value.get("content", "")}, "done": True,
+                                 "done_reason": "stop", "prompt_eval_count": 100, "eval_count": 20,
+                                 **{k: v for k, v in value.items() if k != "content"}}
                     else:
                         chunk = {"message": {"role": "assistant", "content": value}, "done": True, "done_reason": "stop",
                                  "prompt_eval_count": 100, "eval_count": 20, "total_duration": 2_000_000_000,
@@ -198,6 +202,74 @@ class LocalMember(MemberCase):
         self.assertEqual((root / "src" / "demo.py").read_text(), "b")
         self.assertIn("ERROR", tools.call("write_file", {"path": "src/other.py", "content": "x"}))
         self.assertIn("the item declares no checks", tools.call("run_tests", {}))
+
+    def test_malformed_calls_are_named_before_the_allowlist(self):
+        """Release 65 (UR-20261015-01): a cut-off or malformed call is answered with what is missing, never with the
+        allowlist refusal, and counted as `malformed`."""
+        tools = local.Tools(self.s, self.wt, ["src/demo.py"], 2, [], {}, 5)
+        out = tools.call("write_file", {"content": "def g():\n    return 2\n"})
+        self.assertIn("write_file call incomplete: missing path", out)
+        self.assertIn("probably cut by the token limit", out)
+        self.assertIn("write smaller pieces", out)
+        self.assertNotIn("allowlist", out)
+        self.assertIn("missing content", tools.call("write_file", {"path": "src/demo.py"}))
+        self.assertIn("missing path", tools.call("write_file", {"path": "", "content": "x"}))
+        self.assertIn("not valid JSON", tools.call("write_file", '{"path": "src/demo.py", "content": "def g'))
+        self.assertIn("missing path", tools.call("read_file", {}))
+        self.assertIn("path must be a string", tools.call("read_file", {"path": 3}))
+        cut = tools.call("write_file", {"content": "x"}, cut=True)
+        self.assertIn("the output was cut by the token limit", cut)
+        # a JSON string of complete arguments is accepted; a call without a path lists the work root (as before)
+        self.assertIn("wrote", tools.call("write_file", json.dumps({"path": "src/demo.py", "content": "a"})))
+        self.assertNotIn("ERROR", tools.call("list_files", {}))
+        # a well-formed call off the allowlist is still a refusal
+        self.assertIn("not on your write allowlist", tools.call("write_file", {"path": "src/other.py", "content": "x"}))
+        self.assertEqual(tools.counts(), {"malformed": 7, "allowed": 2, "denied": 1})
+        self.assertFalse((self.wt / "src" / "other.py").exists())
+
+    def test_context_and_output_limits_are_recorded_and_told(self):
+        """Release 65 (UR-20261015-02): the largest single request, the effective num_ctx/num_predict, context_full
+        and output_cut notes; the model hears that its output was cut in the next tool result."""
+        self.serve()
+        self.config(members={"codex": {"sandbox_read": [], "wait_seconds": 30},
+                             "local": {"quiet_seconds": 0.5, "wall_seconds": 20, "grace_windows": 1,
+                                       "options": {"num_predict": 1400}}})
+        self.srv.scripts = [
+            [("tools", [call("write_file", content="def g(")]),
+             ("final", {"prompt_eval_count": 3000, "done_reason": "length"})],
+            [("tools", [call("read_file", path="src/demo.py")]), ("final", {"prompt_eval_count": 7900})],
+            [("text", "partial summ"), ("final", {"prompt_eval_count": 8000, "done_reason": "length"})],
+            [("final", {"content": "done.", "prompt_eval_count": 8100})]]
+        r = self.submit()
+        res = self.exec_(r["run"])
+        self.assertEqual(res["outcome"], "completed", res)
+        self.assertEqual(res["notes"], ["context_full", "output_cut"])
+        ctx = res["context"]
+        self.assertEqual((ctx["num_ctx"], ctx["num_predict"], ctx["max_prompt_eval_count"]), (8192, 1400, 8100))
+        self.assertEqual(ctx["context_full_turns"], [{"attempt": 1, "turn": 2}, {"attempt": 1, "turn": 3},
+                                                     {"attempt": 1, "turn": 4}])
+        self.assertEqual(ctx["output_cut_turns"], [{"attempt": 1, "turn": 1}, {"attempt": 1, "turn": 3}])
+        u = res["usage"]
+        self.assertEqual((u["input_tokens"], u["max_prompt_eval_count"], u["num_ctx"], u["num_predict"]),
+                         (27000, 8100, 8192, 1400))
+        self.assertEqual(res["tool_results"], {"malformed": 1, "allowed": 1})
+        self.assertEqual(self.srv.requests[0]["options"]["num_predict"], 1400, "config options over the profile")
+        self.assertEqual(self.srv.requests[0]["options"]["num_ctx"], 8192)
+        tool_msg = self.srv.requests[1]["messages"][-1]
+        self.assertEqual(tool_msg["role"], "tool")
+        self.assertIn("it was cut", tool_msg["content"])
+        self.assertIn("write_file call incomplete: missing path; the output was cut by the token limit",
+                      tool_msg["content"])
+        self.assertNotIn("it was cut", self.srv.requests[2]["messages"][-1]["content"])
+        nudge = self.srv.requests[3]["messages"][-1]  # a cut answer without a tool call: told once, then on
+        self.assertEqual(nudge["role"], "user")
+        self.assertIn("it was cut", nudge["content"])
+        tools_json = json.loads((members.run_dir(self.s, self.wi, r["run"]) / "dispatch" / "tools.json").read_text())
+        self.assertEqual(tools_json["counts"], {"malformed": 1, "allowed": 1})
+        self.assertEqual(tools_json["log"][0]["result"], "malformed")
+        out = members.collect(self.s, "pm-modules", self.wi)
+        self.assertEqual(out["notes"], ["context_full", "output_cut"])
+        self.assertIn("notes context_full, output_cut", members.render_status(members.status(self.s, self.wi)))
 
     def test_stall_without_liveness_stops_and_is_not_run(self):
         self.serve()

@@ -140,13 +140,30 @@ The local member (`member exec` of a `local` role) is a streaming `/api/chat` to
 | `write_file(path, content)` | only the brief's exact allowlist (the item's declared `outputs` inside the role's write scopes), at most `write_cap` writes per file |
 | `run_tests()` | the item's declared checks, run by the harness inside this job (cwd the worktree, the checks environment) |
 
-No shell, no git. Options: the profile's `PARAMETER` lines, then `members.local.options`; `think` off unless
+No shell, no git. Release 65 (UR-20261015-01): a tool call's arguments are checked before any path or allowlist
+rule. A call with a required argument missing or empty (`path`, `content`), a non-string one, or arguments that are not
+valid JSON is answered `ERROR: <tool> call incomplete: missing path; the output was probably cut by the token limit;
+write smaller pieces ...` and logged in `tools.json` as `malformed` (never `denied`, which stays for a well-formed call
+the rules refuse); `tools.json` also has `counts` per result. A `list_files` call without `path` lists the work root.
+There is no edit or patch tool: `write_file` replaces the whole file.
+
+Options: the profile's `PARAMETER` lines, then `members.local.options` (config wins per key); they are sent with every
+request, so `num_ctx` and `num_predict` from the profile or config are the effective limits. `think` off unless
 `members.local.think`. Stall handling: a stream quiet for `quiet_seconds` earns a grace window only while the model
 is still loaded (`/api/ps`), at most `grace_windows`; `wall_seconds` bounds the run; streamed text repeating one
 short unit stops it; `max_turns` bounds the loop; a harness error (connection refused or reset, a broken line) is
 retried once (`retries`). The run records the profile's name and sha256 and refuses (NOT_RUN) a profile that changed
-since office hours started. Usage: the server's `prompt_eval_count`, `eval_count` and durations, summed over attempts,
-with `gpu_seconds` from `total_duration`.
+since office hours started. Usage: the server's `prompt_eval_count`, `eval_count` and durations, summed over every
+request of every attempt (so `input_tokens` is not the size of one context), with `gpu_seconds` from `total_duration`.
+
+Context limits (release 65, UR-20261015-02): the run records `max_prompt_eval_count` (the largest single request's
+prompt), the effective `num_ctx` and `num_predict` (null: the server's default) in `usage` and in the result's
+`context`, with `context_full_turns` (a request whose `prompt_eval_count` reached 95% of `num_ctx`: the server probably
+truncated the prompt) and `output_cut_turns` (a response that stopped with `done_reason: length`), each as
+`{attempt, turn}`. The result's `notes` lists `context_full` and/or `output_cut`; `member collect` and `member status`
+show them. After a cut response the model is told: each tool result of that turn starts with `NOTE: your previous
+response stopped at the output limit (num_predict N): it was cut ...`; a cut response without a tool call gets that
+note once as a user message and the loop goes on (a second cut answer in a row ends the run as usual).
 
 ## Events and records
 

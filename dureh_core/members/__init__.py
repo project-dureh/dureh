@@ -497,6 +497,7 @@ def status(site: Site, wi: str) -> dict:
                      "model": r["payload"].get("model"), "job_id": r["payload"].get("job_id"), "by": r["actor"],
                      "submitted": r["ts"], "run_status": read_status(rdir), "job": _job(site, r, events),
                      "outcome": res.get("outcome"), "reason": res.get("reason"), "verdict": res.get("verdict"),
+                     "notes": res.get("notes") or [],
                      "collected": ({"event": col["id"], "type": col["type"], "by": col["actor"]} if col else None),
                      "run_dir": str(rdir)})
     others = [{"type": e["type"], "id": e["id"], "brief": e["payload"].get("brief"), "reason": e["payload"].get("reason")}
@@ -515,6 +516,8 @@ def render_status(st: dict) -> str:
             line += f", outcome {r['outcome']}" + (f" ({r['reason']})" if r.get("reason") else "")
         if r.get("verdict"):
             line += f", verdict {r['verdict']}"
+        if r.get("notes"):
+            line += f", notes {', '.join(r['notes'])}"
         line += f"; collected {r['collected']['event']}" if r["collected"] else "; not collected"
         lines.append(line)
     for o in st["fallbacks_and_not_run"]:
@@ -590,7 +593,8 @@ def collect(site: Site, actor: str, wi: str, run_id: str | None = None, stage: b
         return {"run": run["id"], "already": done["id"], "outcome": result.get("outcome"),
                 "note": f"member run {run['id']} was already collected ({done['id']})"}
     base = {"run": run["id"], "role": role.name, "runtime": p["runtime"], "outcome": result["outcome"],
-            "reason": result.get("reason"), "collected_by": actor}
+            "reason": result.get("reason"), "collected_by": actor,
+            **({"notes": result["notes"]} if result.get("notes") else {})}
     if result["outcome"] != "completed":
         ev = led.event(COLLECTED, actor, wi, base, [run["id"]])
         return {**base, "event": ev["id"],
@@ -603,6 +607,8 @@ def collect(site: Site, actor: str, wi: str, run_id: str | None = None, stage: b
     changed = _worktree_changes(wt) if wt.is_dir() else []
     payload = {**base, "changed": changed, "writes": result.get("writes"), "tests": result.get("tests"),
                "summary": (result.get("output") or "")[-2000:]}
+    if result.get("tool_results"):  # release 65: allowed / denied / malformed tool calls
+        payload["tool_results"] = result["tool_results"]
     ev = led.event(COLLECTED, actor, wi, payload, [run["id"]])
     diff = git(["diff", "--stat"], wt, check=False) if wt.is_dir() else ""
     return {**payload, "event": ev["id"], "diffstat": diff,
