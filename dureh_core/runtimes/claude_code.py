@@ -46,6 +46,7 @@ DEFAULT_LANGUAGE = "English"
 BRIEF_RE = re.compile(r"DUREH-BRIEF (WI-\d{4,}) role=([a-z0-9-]+) brief=([0-9a-f]{16})")
 WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 SPAWN_TOOLS = {"Agent", "Task"}
+SPAWN_HOOK_TIMEOUT = 180  # seconds; Claude Code lets a tool through when its hook times out (UR-20261015-01)
 NETWORK_TOOLS = {"WebFetch", "WebSearch"}
 DEFAULT_SCHEDULER_ONLY = ["apptainer", "singularity", "docker", "podman"]
 ALWAYS_DENY_FIRST = {
@@ -676,8 +677,10 @@ def _settings(site: Site) -> dict:
             "SessionStart": [{"hooks": hook(60)}],
             "SessionEnd": [{"hooks": hook(120)}],
             # release 46: Read|Grep only when the package declares a no-read path, so other sites pay nothing
-            "PreToolUse": [{"matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash|Agent|Task|WebFetch|WebSearch"
-                            + ("|Read|Grep" if has_no_read(site) else ""), "hooks": hook()}],
+            "PreToolUse": [{"matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash|WebFetch|WebSearch"
+                            + ("|Read|Grep" if has_no_read(site) else ""), "hooks": hook()},
+                           # UR-20261015-01: a spawn hook past its budget lets the spawn through unrecorded
+                           {"matcher": "Agent|Task", "hooks": hook(SPAWN_HOOK_TIMEOUT)}],
             "PostToolUse": [{"matcher": "Write|Edit|MultiEdit", "hooks": hook()}],
             "SubagentStart": [{"hooks": hook()}],
             "SubagentStop": [{"hooks": hook()}],
@@ -1375,7 +1378,8 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
     return None
 
 
-def _record_spawn(led: Ledger, role: str, target: str, wi: str, digest: str, ti: dict) -> dict | None:
+def _record_spawn(led: Ledger, role: str, target: str, wi: str, digest: str, ti: dict,
+                  extra: dict | None = None) -> dict | None:
     events = led.events(wi)
     prepared = [e for e in events if e["type"] == "dispatch.prepared" and e["payload"].get("brief") == digest]
     if not prepared:
@@ -1403,7 +1407,8 @@ def _record_spawn(led: Ledger, role: str, target: str, wi: str, digest: str, ti:
                                     "kind": prepared[-1]["payload"].get("kind"),
                                     "kind_reason": prepared[-1]["payload"].get("kind_reason"),  # release 59
                                     "background": bool(ti.get("run_in_background")),
-                                    **({"model_unstated": True} if unstated else {})}, [prepared[-1]["id"]])
+                                    **({"model_unstated": True} if unstated else {}), **(extra or {})},
+                  [prepared[-1]["id"]])
     except DurehError as exc:
         return _deny(str(exc))
     if unstated:  # release 54: allowed, warned (stderr and the hook's system message)
@@ -1569,8 +1574,13 @@ def _bind(led: Ledger, role: str, data: dict, at: str) -> str | None:
             return bound
         pending = _candidates(led, role)
         exact = [e for e in pending if digest and e["payload"].get("brief") == digest]
+        by_brief = "brief"
+        if not exact and digest:
+            late = _late_spawn(led, role, digest)
+            if late:
+                exact, by_brief = [late], "brief-late"
         if exact:
-            ev, how = exact[0], "brief"
+            ev, how = exact[0], by_brief
         elif not digest and len(pending) == 1 and at != "start":
             ev, how = pending[0], "order"
         else:
@@ -1583,6 +1593,33 @@ def _bind(led: Ledger, role: str, data: dict, at: str) -> str | None:
                                                     "bound_by": how, "bound_at": at, "prompt_brief": digest,
                                                     "runtime_pid": procs.runtime_pid()}, [ev["id"]])
         return ev["wi"]
+
+
+def _late_spawn(led: Ledger, role: str, digest: str) -> dict | None:
+    """UR-20261015-01: record a spawn its PreToolUse hook never recorded, from the agent's own brief.
+
+    Claude Code lets a tool through when a hook times out; a manager's Agent call on a busy ledger did (a site
+    2026-10-15, 31 s against the 30 s budget), so its worker ran with a valid brief and no `wi.dispatched`. When
+    exactly one `dispatch.prepared` for this role carries the agent's brief and no dispatch used it, the spawn
+    is recorded now with the checks the spawn hook makes (prepared by the spawner, unused, model, worktree, the
+    workday gate), marked `recorded: late`. Called under the ledger lock."""
+    prepared = [e for e in led.events() if e["type"] == "dispatch.prepared" and e["payload"].get("brief") == digest
+                and e["payload"].get("role") == role]
+    if len(prepared) != 1:
+        return None
+    p = prepared[0]
+    from ..workday import gate
+
+    if gate(led.site, p["wi"], checking=bool(p["payload"].get("checking"))):
+        return None
+    spawner = p["payload"].get("by") or p["actor"]
+    out = _record_spawn(led, spawner, role, p["wi"], digest, {"model": p["payload"].get("model")},
+                        extra={"recorded": "late", "late_reason": "spawn hook did not record (timeout)"})
+    if out and out.get("hookSpecificOutput", {}).get("permissionDecision") == "deny":
+        return None
+    disp = [e for e in led.events(p["wi"]) if e["type"] in ("wi.dispatched", "checker.dispatched")
+            and e["payload"].get("brief") == digest]
+    return disp[-1] if disp else None
 
 
 def _transcripts(data: dict) -> list[Path]:

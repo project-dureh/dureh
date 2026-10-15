@@ -297,6 +297,15 @@ class Protected(ExampleSiteCase):
         evs = [e for e in Ledger(self.s).events() if e["type"] == "guard.denied"]
         self.assertTrue(any("no-read" in e["payload"]["reason"] and e["payload"]["tool"] == "Read" for e in evs))
 
+    def test_spawn_hook_has_its_own_longer_timeout(self):
+        # UR-20261015-01: Claude Code lets a spawn through when its hook times out
+        from dureh_core.runtimes.claude_code import SPAWN_HOOK_TIMEOUT
+
+        pre = json.loads((self.site_root / ".claude" / "settings.json").read_text())["hooks"]["PreToolUse"]
+        spawn = [h for h in pre if h["matcher"] == "Agent|Task"]
+        self.assertEqual(spawn[0]["hooks"][0]["timeout"], SPAWN_HOOK_TIMEOUT)
+        self.assertNotIn("Agent", pre[0]["matcher"])
+
     def test_settings_matcher_has_read_only_with_a_no_read_rule(self):
         settings = json.loads((self.site_root / ".claude" / "settings.json").read_text())
         self.assertIn("|Read|Grep", settings["hooks"]["PreToolUse"][0]["matcher"])

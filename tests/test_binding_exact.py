@@ -24,7 +24,8 @@ class ExactBinding(SiteCase):
                                     parent=self.bundle)["id"] for n in (1, 2)]
         for wi in (self.bundle, self.a, self.b):
             wf.wi_approve(self.s, "desk", wi, "ok")
-        self.spawn("desk", "pm-modules", wf.dispatch_brief(self.s, self.bundle, "desk")["brief"])
+        self.pm_brief = wf.dispatch_brief(self.s, self.bundle, "desk")
+        self.spawn("desk", "pm-modules", self.pm_brief["brief"])
         hook(self.s, hook_event_name="SubagentStart", agent_type="pm-modules", agent_id="a-pm")
 
     def spawn(self, caller, target, brief, agent_id=None):
@@ -62,6 +63,27 @@ class ExactBinding(SiteCase):
 
     def digest(self, brief):
         return brief["brief"].split("brief=")[1][:16]
+
+    def test_spawn_the_hook_never_recorded_binds_late_by_brief(self):
+        # UR-20261015-01: the manager's Agent hook timed out (fail-open), so no wi.dispatched was recorded
+        ba = wf.dispatch_brief(self.s, self.a, "pm-modules")  # prepared, never spawned through the hook
+        self.start("a-late")
+        self.transcript("a-late", ba["brief"])
+        self.assertIsNone(self.write("a-late", Path(ba["worktree"]) / "src" / "demo.py"))
+        self.assertEqual(self.bound()["a-late"], (self.a, self.digest(ba), "brief-late"))
+        disp = [e for e in self.led.load("event") if e["type"] == "wi.dispatched" and e["wi"] == self.a]
+        self.assertEqual(len(disp), 1)
+        self.assertEqual((disp[0]["actor"], disp[0]["payload"]["recorded"]), ("pm-modules", "late"))
+        # a second agent with the same brief cannot take it: the brief is used now
+        self.start("a-dup")
+        self.transcript("a-dup", ba["brief"])
+        self.assertTrue(denied(self.write("a-dup", Path(ba["worktree"]) / "src" / "demo.py")))
+
+    def test_late_binding_needs_a_brief_prepared_for_this_role(self):
+        self.start("a-x")  # a py-writer whose prompt carries the manager's (pm-modules) brief
+        self.transcript("a-x", self.pm_brief["brief"])
+        self.assertTrue(denied(self.write("a-x", self.site_root / "worktrees" / self.a / "src" / "demo.py")))
+        self.assertNotIn("a-x", self.bound())
 
     def test_start_without_transcript_defers_then_binds_by_brief(self):
         ba = self.worker(self.a)
