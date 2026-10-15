@@ -62,6 +62,7 @@ Tests prove the mechanism with the neutral example package `tests/fixtures/examp
 | `members.codex.reasoning_effort` | `medium` | `model_reasoning_effort` |
 | `members.codex.wait_seconds` | `1800` | the review's wait limit; past it the run is NOT_RUN |
 | `members.codex.checks_timeout` | `1800` | seconds per declared check the job runs before the review |
+| `members.codex.tree_max_bytes` | `20971520` (20 MiB) | release 66: the cap on the evidence snapshot of the target at the reviewed head (`evidence/tree/`); over it, or `0`, no snapshot is included and the manifest says so |
 | `members.codex.permission_profile` | `dureh_member` | the name of the read-only permission profile passed with `-c` |
 | `members.codex.sandbox_read` | detected | extra read-only paths the codex sandbox helper needs (default: `$CODEX_HOME/tmp/arg0` and the native binary's directory) |
 | `members.codex.env_pass` | proxy and certificate variables, `CODEX_HOME` | environment variables passed to codex besides the minimal set (HOME, USER, LOGNAME, LANG, TMPDIR, PATH) |

@@ -82,6 +82,10 @@ class CodexUnits(unittest.TestCase):
                          ("runtime", 15, 3, "default"))
 
 
+def res_head(wt):
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt, capture_output=True, text=True).stdout.strip()
+
+
 class CodexMember(MemberCase):
     def setUp(self):
         super().setUp()
@@ -228,6 +232,87 @@ class CodexMember(MemberCase):
         out = members.collect(self.s, "desk", self.wi)
         self.assertEqual(out["result"], "fail")
         self.assertEqual(self.led.wi_status(self.wi)["status"], "rework")
+
+    def pin_requirements(self, text="# Requirements\n- g() must not import anything new\n"):
+        req = self.site_root / "req-g.md"
+        req.write_text(text)
+        pin = self.wf.requirements_pin(self.s, "req-g.md")
+        self.led.event("wi.amended", "desk", self.wi, {"fields": {"requirements": pin}, "before": {}, "memo": "test",
+                                                       "by": "Director"})
+        return req, pin
+
+    def evidence(self):
+        return Path(json.loads((self.fake / "codex.argv").read_text())["cwd"])
+
+    def test_evidence_has_the_requirements_the_brief_and_a_snapshot_of_the_target(self):
+        """Release 66 (UR-20261015-06): the pinned requirements file (sha256 checked), the checker's brief and a
+        read-only `git archive` snapshot of the target at the reviewed head, unchanged files included."""
+        req, pin = self.pin_requirements()
+        self.pass_canary()
+        b = self.checker_brief()
+        r = members.run(self.s, "pm-modules", self.wi)
+        res = self.exec_(r["run"])
+        self.assertEqual(res["outcome"], "completed", res)
+        ev = self.evidence()
+        self.assertEqual((ev / "requirements" / "req-g.md").read_text(), req.read_text())
+        self.assertIn(b["header"], (ev / "brief.md").read_text())
+        man = json.loads((ev / "manifest.json").read_text())
+        self.assertEqual((man["requirements"]["included"], man["requirements"]["sha256"]), (True, pin["sha256"]))
+        self.assertEqual(man["brief"]["digest"], b["header"].split("brief=")[1])
+        self.assertTrue(man["tree"]["included"])
+        self.assertEqual(man["head"], res["head"])
+        self.assertEqual((ev / "tree" / "src" / "demo.py").read_text(), (self.wt / "src" / "demo.py").read_text())
+        self.assertTrue((ev / "tree" / "tests" / "test_demo.py").is_file(), "an unchanged file is in the snapshot")
+        self.assertEqual((ev / "changed.txt").read_text().split(), ["src/demo.py"], "changed.txt stays base..head")
+        self.assertFalse(os.access(ev / "tree" / "src" / "demo.py", os.W_OK) and os.geteuid() != 0)
+        acc = (ev / "acceptance.md").read_text()
+        self.assertIn("requirements/req-g.md", acc)
+        self.assertIn("tree/: 2 files", acc)
+        prompt = json.loads((self.fake / "codex.argv").read_text())["argv"][-1]
+        for word in ("requirements/", "tree/", "manifest.json"):
+            self.assertIn(word, prompt)
+        self.assertEqual((res["evidence"]["requirements"], res["evidence"]["tree"]), (True, True))
+
+    def test_snapshot_cap_and_no_read_paths_are_listed_not_included(self):
+        from unittest import mock
+
+        from dureh_core.site import Site
+
+        self.config(members={**self.s.config["members"], "codex": {"sandbox_read": [], "wait_seconds": 30,
+                                                                   "tree_max_bytes": 10}})
+        self.pass_canary()
+        r = self.submit()
+        self.exec_(r["run"])
+        man = json.loads((self.evidence() / "manifest.json").read_text())
+        self.assertFalse(man["tree"]["included"])
+        self.assertIn("over the 10-byte cap", man["tree"]["reason"])
+        self.assertIsNone(man["requirements"])
+        self.assertFalse((self.evidence() / "tree").exists())
+        self.assertIn("tree/: not included", (self.evidence() / "acceptance.md").read_text())
+        members.collect(self.s, "pm-modules", self.wi)
+        self.config(members={**self.s.config["members"], "codex": {"sandbox_read": [], "wait_seconds": 30}})
+        rules = [{"path": "modules/*/tests/**", "level": "no-read", "why": "test data"}]
+        with mock.patch.object(Site, "protected", lambda site: rules):
+            ctx_dir = self.tmp / "ev-noread"
+            out = codex._tree(self.s, self.wt, "modules/demo", res_head(self.wt), ctx_dir, 1 << 20)
+        self.assertTrue(out["included"])
+        self.assertEqual(out["left_out"], [{"path": "tests/test_demo.py", "why": "no-read (protected by the package)"}])
+        self.assertTrue((ctx_dir / "tree" / "src" / "demo.py").is_file())
+        self.assertFalse((ctx_dir / "tree" / "tests").exists())
+
+    def test_requirements_changed_after_the_brief_is_not_run(self):
+        req, _ = self.pin_requirements()
+        self.pass_canary()
+        r = self.submit()
+        req.write_text("other requirements\n")
+        res = self.exec_(r["run"])
+        self.assertEqual(res["outcome"], "not_run")
+        self.assertIn("requirements file", res["reason"])
+
+    def test_tree_max_bytes_config_is_checked(self):
+        self.assertIn("config members.codex.tree_max_bytes must be a non-negative number",
+                      members.config_errors(self.s, {"members": {"codex": {"tree_max_bytes": "big"}}}))
+        self.assertEqual(members.settings(self.s)["codex"]["tree_max_bytes"], 20 * 1024 * 1024)
 
     def test_a_moved_head_supersedes_the_review(self):
         self.pass_canary()

@@ -39,6 +39,7 @@ DEFAULTS = {
     "record_wait_seconds": 300,         # how long the job waits for `member run` to record its run
     "codex": {"bin": "codex", "model": None, "reasoning_effort": "medium", "wait_seconds": 1800,
               "permission_profile": "dureh_member", "sandbox_read": None, "checks_timeout": 1800,
+              "tree_max_bytes": 20 * 1024 * 1024,  # release 66: the evidence snapshot of the target at the head
               "env_pass": ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy",
                            "SSL_CERT_FILE", "CODEX_HOME"]},
     "local": {"wall_seconds": 3600, "quiet_seconds": 300, "grace_windows": 4, "max_turns": 24, "write_cap": 6,
@@ -85,7 +86,7 @@ def config_errors(site: Site, config: dict | None = None) -> list[str]:
             continue
         known = set(DEFAULTS[block]) | ({"partition", "account", "qos", "gres", "time"} if block == "slurm" else set())
         out += [f"config members.{block}.{k}: unknown key" for k in given if k not in known]
-    for block, keys in (("codex", ("wait_seconds", "checks_timeout")),
+    for block, keys in (("codex", ("wait_seconds", "checks_timeout", "tree_max_bytes")),
                         ("local", ("wall_seconds", "quiet_seconds", "grace_windows", "max_turns", "write_cap",
                                    "test_timeout", "retries"))):
         for k in keys:
