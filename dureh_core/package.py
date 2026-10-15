@@ -39,8 +39,14 @@ ORGANIZATION_REFUSAL = ("startup.yaml organization (the managers/workers enable 
 HARNESS_DIRECT_COMMANDS = ("sbatch", "srun", "salloc", "scancel", "nohup", "setsid", "disown", "screen", "tmux",
                            "apptainer", "singularity", "docker", "podman", "dureh", "bin/dureh", "dureh.py")
 ROLE_KEYS = ("kind", "tier", "description", "output", "never", "isolation", "write_scopes", "may_dispatch",
-             "capabilities", "project", "skill", "instructions", "value")
-CHECKER_RESKIN_KEYS = ("skill", "instructions", "description", "output", "never", "project")
+             "capabilities", "project", "skill", "instructions", "value", "runtime", "runtime_fallback", "profile")
+# release 64: the checker may also choose its runtime (a read-only verifier on `codex`)
+CHECKER_RESKIN_KEYS = ("skill", "instructions", "description", "output", "never", "project", "runtime",
+                       "runtime_fallback")
+# release 64 (member runtimes): `claude-code` is today's subagent; the others run through `dureh member run`
+RUNTIMES = ("claude-code", "codex", "local")
+CLAUDE_RUNTIME = "claude-code"
+RUNTIME_FALLBACKS = ("claude-code", "none")
 SCOPE_PREFIXES = ("modules/", "projects/", "package/", "harness/")
 
 def schema_of(manifest: dict | None) -> int:
@@ -281,6 +287,8 @@ def check(manifest: dict, root: Path | None = None) -> list[str]:
         for name, spec in (manifest.get("roles") or {}).items():
             if isinstance(spec, dict) and spec.get("skill"):
                 _inside(root, spec["skill"], f"skill of role {name}")
+            if isinstance(spec, dict) and spec.get("profile"):
+                _inside(root, spec["profile"], f"model profile of role {name}")
     return warnings
 
 

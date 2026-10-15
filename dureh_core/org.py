@@ -56,6 +56,14 @@ class Role:
     instructions: list[str] = field(default_factory=list)  # extra agent-file lines from the package
     project: bool = False                 # also generate a project-level agent file (projectgen)
     source: str = "harness"               # harness | package
+    runtime: str = "claude-code"          # release 64: claude-code (a subagent) | codex | local (`dureh member run`)
+    runtime_fallback: str = "claude-code"  # what `member run --fallback` runs instead: claude-code, or none
+    profile: str | None = None            # local runtime: the package path of the role's model profile
+
+    @property
+    def is_member(self) -> bool:
+        """Run by the harness through `dureh member run`, not spawned as a Claude subagent (release 64)."""
+        return self.runtime != "claude-code"
 
     @property
     def is_manager(self) -> bool:
@@ -77,6 +85,22 @@ def _texts(value, where: str) -> list[str]:
     if not isinstance(value, list) or not all(isinstance(x, str) for x in value):
         fail(f"{where} must be a list of strings")
     return list(value)
+
+
+def _runtime_keys(name: str, spec: dict, where: str) -> dict:
+    """The release-64 runtime keys of a role spec: runtime, runtime_fallback, profile (checked by Org._validate)."""
+    from .package import RUNTIME_FALLBACKS, RUNTIMES
+
+    runtime = spec.get("runtime") or "claude-code"
+    if runtime not in RUNTIMES:
+        fail(f"{where}: role {name}: runtime must be one of {', '.join(RUNTIMES)}, not {runtime!r}")
+    fallback = spec.get("runtime_fallback") or "claude-code"
+    if fallback not in RUNTIME_FALLBACKS:
+        fail(f"{where}: role {name}: runtime_fallback must be one of {', '.join(RUNTIME_FALLBACKS)}, not {fallback!r}")
+    profile = spec.get("profile")
+    if profile is not None and (not isinstance(profile, str) or not profile.strip()):
+        fail(f"{where}: role {name}: profile must be a package path to a model profile file")
+    return {"runtime": runtime, "runtime_fallback": fallback, "profile": profile or None}
 
 
 def _role(name: str, spec, where: str, source: str) -> Role:
@@ -107,6 +131,7 @@ def _role(name: str, spec, where: str, source: str) -> Role:
         instructions=_texts(spec.get("instructions"), f"{where}: role {name} instructions"),
         project=bool(spec.get("project")),
         source=source,
+        **_runtime_keys(name, spec, where),
     )
 
 
@@ -188,6 +213,9 @@ class Org:
                     c.output = spec.get("output") or c.output
                     c.never = spec.get("never") or c.never
                     c.project = bool(spec.get("project", c.project))
+                    if "runtime" in spec or "runtime_fallback" in spec:
+                        keys = _runtime_keys(name, spec, where)
+                        c.runtime, c.runtime_fallback = keys["runtime"], keys["runtime_fallback"]
                     c.source = "package"
                     continue
                 if spec.get("kind") not in ("manager", "worker"):
@@ -238,8 +266,31 @@ class Org:
                          f" ({', '.join(verifiers) or 'none defined'})")
             if role.kind != "desk" and role.has("verify") and role.write_scopes:
                 fail(f"role {role.name} has the verify capability and may not have write scopes")
+            self._validate_runtime(role)
         if not verifiers:
             fail("the organization needs at least one role with the verify capability (the checker)")
+
+    @staticmethod
+    def _validate_runtime(role: Role) -> None:
+        """Release 64 (member runtimes): `codex` only for a verify role (read-only: a verify role has no write
+        scopes); `local` only for a worker without the verify capability that writes in a WI worktree, with a
+        `profile`; a `profile` only for `local`."""
+        rt = role.runtime
+        if role.profile and rt != "local":
+            fail(f"role {role.name}: profile is read only by the local runtime (runtime: local), not {rt}")
+        if rt == "codex" and (role.kind != "worker" or not role.has("verify")):
+            fail(f"role {role.name}: runtime codex is read-only and only for a role with the verify capability"
+                 " (the checker may set it)")
+        if rt == "local":
+            if role.kind != "worker" or role.has("verify"):
+                fail(f"role {role.name}: runtime local is only for a worker without the verify capability")
+            if role.isolation != "worktree":
+                fail(f"role {role.name}: runtime local needs isolation worktree (the member writes only in its WI"
+                     " worktree)")
+            if not [s for s in role.write_scopes if not s.startswith("site:")]:
+                fail(f"role {role.name}: runtime local needs write scopes (the exact files it writes come from the brief)")
+            if not role.profile:
+                fail(f"role {role.name}: runtime local needs profile: <package path of its model profile>")
 
     def role(self, name: str) -> Role:
         r = self.roles.get(name)
