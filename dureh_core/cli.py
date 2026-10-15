@@ -10,7 +10,7 @@ from pathlib import Path
 from .util import DurehError, dumps, fail
 
 
-RESERVED_EVENT_PREFIXES = ("workday.", "day.", "session.", "hours.", "slack.", "harness.")  # harness.switched: session start only
+RESERVED_EVENT_PREFIXES = ("workday.", "day.", "session.", "hours.", "slack.", "harness.", "member.", "office-hours.")  # harness.switched: session start only
 
 
 def _percent(value: str) -> float:
@@ -214,8 +214,13 @@ def cmd_dispatch_brief(a):
         how = (f"shares {env.get('shared')}" if env["env"] == "shared"
                else f"built with `{env.get('command')}` in {env.get('seconds')} s")
         print(f"# worktree env: {env.get('venv')} {how}")
-    print(f"# spawn subagent_type={r['subagent_type']} model={r['model']} kind={r['kind']};"
-          " pass everything below as the prompt (pass model= to the Agent tool; the hook refuses another model)")
+    if r.get("runtime") not in (None, "claude-code"):
+        print(f"# {r['subagent_type']} runs on the {r['runtime']} runtime: run `dureh member run --wi {a.wi}` (the harness"
+              f" submits it; do not spawn it). The fallback as a Claude subagent: `dureh member run --wi {a.wi} --fallback"
+              f" --reason ...`, then spawn subagent_type={r['subagent_type']} model={r['model']} with everything below")
+    else:
+        print(f"# spawn subagent_type={r['subagent_type']} model={r['model']} kind={r['kind']};"
+              " pass everything below as the prompt (pass model= to the Agent tool; the hook refuses another model)")
     print(r["brief"], end="")
 
 
@@ -526,6 +531,43 @@ def cmd_site_session(a):
         _print(st if a.json else sessions.render_status(st))
 
 
+def cmd_member(a):
+    from . import members
+
+    site, c = _site(a), a.member_command
+    if c == "run":
+        r = members.run(site, _actor(a), a.wi, fallback=a.fallback, reason=a.reason)
+        if a.json:
+            _print(r)
+        elif r.get("fallback"):
+            print(f"fallback recorded ({r['event']}): {r['next']}")
+        else:
+            print(f"member run {r['run']}: {r['role']} on {r['runtime']} ({r['model']}) submitted as job {r['job_id']}"
+                  f" (wall {r['wall']}); recorded {r['dispatch']}. Next: {r['next']}")
+    elif c == "exec":
+        r = members.execute(site, a.run)
+        print(f"member run {a.run}: {r['outcome']}" + (f" ({r['reason']})" if r.get("reason") else ""))
+    elif c == "status":
+        st = members.status(site, a.wi)
+        _print(st if a.json else members.render_status(st))
+    elif c == "collect":
+        r = members.collect(site, _actor(a), a.wi, a.run, stage=a.stage, summary=a.summary, discard=a.discard,
+                            reason=a.reason)
+        _print(r)
+    elif c == "canary":
+        from .members import codex
+
+        r = codex.canary(site, _actor(a), members.settings(site))
+        if a.json:
+            _print(r)
+        else:
+            print(f"codex canary on {r['host']} ({r['version']}): {r['result'].upper()} ({r['event']})")
+            for row in r["rows"]:
+                print(f"  {'ok  ' if row['ok'] else 'FAIL'} {row['case']}: exit {row.get('exit')}; {row.get('evidence')}")
+        if r["result"] != "pass":
+            fail("the codex canary did not pass on this host; codex members will not run here")
+
+
 def cmd_day(a):
     from . import workday
 
@@ -802,7 +844,7 @@ def cmd_artifact_write(a):
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="dureh", description="DUREH harness tools: wi, dispatch, verify, ledger, event, status, "
                                 "slurm, path-refs, purge, push, usage, site, day, upstream, slack, report, "
-                                "authorize-write, worktree, protected, artifact (plus install, adapter, hook).")
+                                "authorize-write, worktree, protected, artifact, member (plus install, adapter, hook).")
     p.add_argument("--site", help="installed site directory (or DUREH_SITE)")
     p.add_argument("--observe", action="store_true",
                    help="read-only: allow only status, wi show/list, ledger query, upstream list/message/inbox (without "
@@ -904,6 +946,37 @@ def parser() -> argparse.ArgumentParser:
     x = add(d, "stop", cmd_dispatch_stop, "record a stop for a dispatched work item")
     x.add_argument("--wi", required=True)
     x.add_argument("--reason", required=True)
+    x.add_argument("--actor")
+
+    mb = sub.add_parser("member", help="member runtimes (release 64): run a role whose runtime is not claude-code "
+                        "(codex, local) as one scheduler job").add_subparsers(dest="member_command", required=True)
+    x = add(mb, "run", cmd_member, "after `dispatch brief`: record the dispatch and submit ONE job that runs the member;"
+            " returns at once (end your turn). --fallback records the role's fallback instead (then spawn the role as a"
+            " Claude subagent with the same brief)")
+    x.add_argument("--wi", required=True)
+    x.add_argument("--fallback", action="store_true", help="run this brief as a Claude subagent instead (needs --reason)")
+    x.add_argument("--reason", help="--fallback: why")
+    x.add_argument("--json", action="store_true")
+    x.add_argument("--actor")
+    x = add(mb, "exec", cmd_member, "inside the job `member run` submitted, and only there: run the member and record it")
+    x.add_argument("--run", required=True)
+    x = add(mb, "status", cmd_member, "read-only: the item's member runs (job, run status, outcome, collection)")
+    x.add_argument("--wi", required=True)
+    x.add_argument("--json", action="store_true")
+    x = add(mb, "collect", cmd_member, "record an ended member run: a checker's verdict becomes the verification (bound to"
+            " the verified head); a worker's changes stay for review (--stage --summary commits and stages them,"
+            " --discard --reason restores them)")
+    x.add_argument("--wi", required=True)
+    x.add_argument("--run", help="a member run id (default: the item's latest)")
+    x.add_argument("--stage", action="store_true", help="local worker: commit its changes and stage the item")
+    x.add_argument("--summary", help="--stage: the stage summary")
+    x.add_argument("--discard", action="store_true", help="local worker: restore its changes")
+    x.add_argument("--reason", help="--discard: why")
+    x.add_argument("--actor")
+    x = add(mb, "canary", cmd_member, "prove on this host that the codex member profile refuses reads outside the"
+            " evidence bundle and every write (codex sandbox, no model); recorded as member.canary")
+    x.add_argument("--runtime", required=True, choices=["codex"])
+    x.add_argument("--json", action="store_true")
     x.add_argument("--actor")
 
     x = add(sub, "verify", cmd_verify, "self-test, per-WI verification (declared checks as one scheduler job), or exam scoring")
@@ -1301,7 +1374,7 @@ def parser() -> argparse.ArgumentParser:
 
 OBSERVE_ALLOWED = {("status", None), ("wi", "show"), ("wi", "list"), ("ledger", "query"), ("upstream", "list"), ("upstream", "message"), ("upstream", "inbox"),
                    ("path-refs", None), ("usage", None), ("verify", None), ("day", "status"), ("site", "session"),
-                   ("protected", "list")}
+                   ("protected", "list"), ("member", "status")}
 
 
 def _check_observe(args) -> None:

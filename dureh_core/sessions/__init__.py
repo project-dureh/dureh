@@ -215,6 +215,41 @@ def start(site: Site, actor: str, purpose: str = "desk", force: bool = False, me
     return Ledger(site).event(workday.SESSION, actor, None, payload)
 
 
+def submit_script(site: Site, script: Path, what: str) -> tuple[str, list[str]]:
+    """`sbatch --parsable <script>` for a harness-owned job (release 64: the member-run and office-hours jobs, built
+    like the session job): (job id, command). Fails with the scheduler's words; the caller records nothing then."""
+    cmd = ["sbatch", "--parsable", str(script)]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=site.env())
+    except (OSError, subprocess.SubprocessError) as exc:
+        fail(f"sbatch did not run for the {what}: {exc}; nothing was recorded")
+    out = (proc.stdout or "").strip()
+    m = JOB_ID.search(out.splitlines()[-1] if out else "")
+    if proc.returncode != 0 or not m:
+        fail(f"sbatch failed for the {what} (exit {proc.returncode}): {(proc.stderr or proc.stdout).strip()[-500:]};"
+             " nothing was recorded")
+    return m.group(1), cmd
+
+
+def slurm_head(site: Site, name: str, block: dict, wall: str, logs: Path, chdir: Path | None = None) -> list[str]:
+    """The `#SBATCH` header of a harness-owned job: name, account, partition, qos, cpus, mem, gres from `block` (a
+    config block such as `members.slurm` or `office_hours`) over config `slurm`, the wall time, the work dir and the
+    logs (`<logs>/%x-%j.out|err`)."""
+    slurm = site.config.get("slurm") or {}
+    prof = cluster.profile(site)
+    partition = block.get("partition") or slurm.get("partition") \
+        or next((n for n, p in prof["partitions"].items() if p.get("default")), None)
+    head = ["#!/bin/bash", f"#SBATCH --job-name={name}"]
+    for flag, value in (("--account", block.get("account") or slurm.get("account") or prof.get("account")),
+                        ("--partition", partition), ("--qos", block.get("qos")),
+                        ("--cpus-per-task", block.get("cpus")), ("--mem", block.get("mem")), ("--gres", block.get("gres"))):
+        if value:
+            head.append(f"#SBATCH {flag}={value}")
+    head += [f"#SBATCH --time={wall}", f"#SBATCH --chdir={chdir or site.root}",
+             f"#SBATCH --output={logs}/%x-%j.out", f"#SBATCH --error={logs}/%x-%j.err"]
+    return head
+
+
 SWITCHED = "harness.switched"
 SWITCH_TIMEOUT = 900  # adapter sync regenerates the adapter files and project guidance; measured minutes, not hours
 

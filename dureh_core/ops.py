@@ -32,6 +32,8 @@ def agent_state(led: Ledger, wi: str, events: list[dict] | None = None) -> str:
         return "ended"
     if "agent.started" in later:
         return "running"
+    if evs[last]["payload"].get("member_run"):  # release 64: the harness job starts the member; its end is recorded
+        return "starting"
     return "starting" if _deferred_start(led, evs[last], events) else "not started"
 
 
@@ -112,9 +114,9 @@ def _recorded_states(events: list[dict]) -> dict[str, tuple[str, bool]]:
 
 
 def _tracked_runs(led: Ledger) -> list[dict]:
-    """Runs submitted through `slurm submit` (single jobs and `--each` arrays) and verify jobs submitted through
-    `verify --wi --submit` (release 37), with a scheduler job id."""
-    return [r for r in led.load("run") if r["payload"].get("run_type") in ("slurm", "verify")
+    """Runs submitted through `slurm submit` (single jobs and `--each` arrays), verify jobs submitted through
+    `verify --wi --submit` (release 37) and member-run jobs (`member run`, release 64), with a scheduler job id."""
+    return [r for r in led.load("run") if r["payload"].get("run_type") in ("slurm", "verify", "member")
             and r["payload"].get("job_id") and r["payload"].get("status") == "submitted"]
 
 
@@ -375,6 +377,9 @@ def config_errors(site: Site) -> list[str]:
     from .site import routing_errors
 
     out += routing_errors(site.config)
+    from . import members
+
+    out += members.config_errors(site)
     return out
 
 
@@ -1516,6 +1521,15 @@ def _watch_line(led: Ledger, events: list[dict], run: dict, seen: dict, nxt: str
     parent = rec["payload"].get("parent")
     if nxt is not None:
         pass
+    elif run["payload"].get("run_type") == "member":  # release 64: the dispatcher (or the desk) collects the run
+        collect = f"member collect --wi {wi} (member run {run['id']}, {run['payload'].get('runtime')})"
+        by = run["payload"].get("by")
+        if by and by != "desk" and parent and agent_state(led, parent, events) in LIVE_AGENT:
+            nxt = f"the manager of bundle {parent} runs {collect}"
+        elif by and by != "desk" and parent:
+            nxt = f"dispatch brief --wi {parent} (bundle; its manager runs {collect}), or the desk runs it"
+        else:
+            nxt = collect
     elif run["payload"].get("run_type") == "verify":  # release 37: the checker collects a submitted verify job
         collect = f"checker collects verify run {run['id']}"
         gone = next((e for e in events if e["type"] == "verification.superseded" and e["payload"].get("run") == run["id"]), None)
@@ -2118,6 +2132,7 @@ def usage(site: Site) -> dict:
     led = Ledger(site)
     runs = [r for r in led.load("run") if r["payload"]["run_type"] == "agent"]
     per_wi: dict[str, dict] = {}
+    per_runtime: dict[str, dict] = {}
     for r in runs:
         u = r["payload"].get("usage") or {}
         w = per_wi.setdefault(r["wi"] or "-", {"agents": 0, "tokens": 0, "uncovered": 0})
@@ -2125,8 +2140,16 @@ def usage(site: Site) -> dict:
         if u.get("coverage") == "transcript":
             w["tokens"] += sum(u.get(k, 0) for k in ("input_tokens", "output_tokens", "cache_read_input_tokens",
                                                       "cache_creation_input_tokens"))
+        elif u.get("coverage") == "runtime":  # release 64: a member run's tokens from its runtime's own counters
+            w["tokens"] += sum(u.get(k, 0) for k in ("input_tokens", "output_tokens"))
         else:
             w["uncovered"] += 1
+        rt = r["payload"].get("runtime") or "claude-code"
+        row = per_runtime.setdefault(rt, {"runs": 0, "tokens": 0, "gpu_seconds": 0.0})
+        row["runs"] += 1
+        row["tokens"] += sum(u.get(k, 0) for k in ("input_tokens", "output_tokens", "cache_read_input_tokens",
+                                                    "cache_creation_input_tokens") if isinstance(u.get(k), int))
+        row["gpu_seconds"] = round(row["gpu_seconds"] + float(u.get("gpu_seconds") or 0), 1)
     wis = led.work_items()
     promoted = [w for w in wis if w["status"] == "promoted"]
     attempted = [w for w in wis if w["status"] not in (None, "proposed", "approved")]
@@ -2135,6 +2158,7 @@ def usage(site: Site) -> dict:
     return {"per_wi": per_wi, "attempted_wis": len(attempted), "promoted_wis": len(promoted),
             "tokens_total": total, "agent_runs_without_usage": uncovered,
             "tokens_per_promoted_wi": (round(total / len(promoted)) if promoted else "undefined (0 promoted)"),
+            "per_runtime": per_runtime,
             "spawns_today": spawn_table(led.events()),
             "note": "Token counts come from runtime transcripts; cost requires dated pricing in site config and is not computed."}
 

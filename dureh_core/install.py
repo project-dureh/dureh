@@ -266,7 +266,8 @@ def _answers(questions: list[dict], supplied: dict, interactive: bool) -> dict:
 
 # config.json keys a startup package may seed through `config_defaults` (startup.yaml); never the site identity,
 # harness root, models or state backend, which the install and the preset own.
-CONFIG_DEFAULT_KEYS = ("project", "containers", "slurm", "checks", "env", "limits", "guards", "modules", "index")
+CONFIG_DEFAULT_KEYS = ("project", "containers", "slurm", "checks", "env", "limits", "guards", "modules", "index",
+                       "members")  # release 64: member runtimes
 
 
 def package_config_defaults(manifest: dict) -> dict:
@@ -367,7 +368,7 @@ def _config(site: Path, manifest: dict, startup: Path, preset: dict, rev: str | 
         "models": models,
     }
     # precedence: the preset, then the package's config_defaults, then the harness defaults
-    for key in ("index", "slurm", "checks", "push", "state", "console", "env", "limits"):
+    for key in ("index", "slurm", "checks", "push", "state", "console", "env", "limits", "members"):
         if preset.get(key):
             config[key] = preset[key]
     for key in ("project", "containers", "guards", "modules"):

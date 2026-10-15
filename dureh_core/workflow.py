@@ -725,8 +725,12 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None) -> 
                                             **({"worktree_env": wt["env"]} if wt.get("env") else {}),
                                             **({"verification_bytes": len(block.encode("utf-8"))} if block else {}),
                                             **({"supersedes": supersedes} if supersedes else {})})
+    if role.is_member:  # release 64: the member job reads the brief's text (checked against its digest)
+        from .members import save_brief
+
+        save_brief(site, wi, digest, header + "\n\n" + full)
     return {"header": header, "brief": header + "\n\n" + full, "model": entry["model"], "kind": kind,
-            "worktree": wt["worktree"], "subagent_type": role.name,
+            "worktree": wt["worktree"], "subagent_type": role.name, "runtime": role.runtime,
             **({"worktree_env": wt["env"]} if wt.get("env") else {})}
 
 
@@ -853,6 +857,10 @@ def _superseded_dispatch(site: Site, led: Ledger, wi: str) -> dict:
     disp = evs[last]
     if "agent.finished" in later:
         return {"dispatched": disp["id"], "agent": "ended"}
+    if disp["payload"].get("member_run"):  # release 64: the harness job runs it; its end is recorded, not timed out
+        fail(f"{wi} is dispatched to member run {disp['payload']['member_run']} ({disp['payload'].get('runtime')}),"
+             f" which has not finished; see `dureh member status --wi {wi}`, collect it when it ends (`member collect"
+             f" --wi {wi}`), or release it with `dispatch stop --wi {wi} --reason ...`")
     if "agent.started" in later or _deferred_start(led, disp):
         fail(f"{wi} is dispatched and its agent has not finished; stop it before re-dispatching")
     age = int((datetime.now(timezone.utc) - datetime.fromisoformat(disp["ts"])).total_seconds())
@@ -904,6 +912,15 @@ def _render_brief(site: Site, rec: dict, role: str, wt: dict, entry: dict,
     skill = _skill_for(site, role, p.get("value"))
     if skill:
         lines.append(f"Skill: read {skill}")
+    if r.is_member:  # release 64: run by the harness (`member run`); as a Claude subagent only after a recorded fallback
+        lines.append(f"Runtime: {r.runtime} (the harness runs this brief with `dureh member run`; a Claude subagent runs it"
+                     " only as the recorded fallback)")
+        if r.runtime == "local":
+            from .members import write_allowlist
+
+            files = write_allowlist(site, r, p)
+            lines.append("Write allowlist (exact files, relative to your work root): " + (", ".join(files) or
+                         "none declared (declare them with `wi amend --output`; the local runtime refuses without them)"))
     if r.is_manager:
         values = site.startup / "CORE-VALUES.md"
         if values.is_file():
@@ -970,7 +987,14 @@ def _checker_lines(site: Site, rec: dict, dureh: Path) -> list[str]:
 
 
 def dispatch_stop(site: Site, actor: str, wi: str, reason: str) -> dict:
-    return Ledger(site).event("wi.stopped", actor, wi, {"reason": reason})
+    """Record the stop. A member run of the item still queued or running (release 64) is the harness's own job:
+    it is cancelled and the stop names it."""
+    from .members import cancel_live_runs
+
+    led = Ledger(site)
+    cancelled = cancel_live_runs(site, led, wi)
+    return led.event("wi.stopped", actor, wi, {"reason": reason, **({"member_runs_cancelled": cancelled}
+                                                                     if cancelled else {})})
 
 
 # --------------------------------------------------------------- staging
@@ -1740,9 +1764,11 @@ def verify_wi(site: Site, actor: str, wi: str, timeout: int = 1800, local: bool 
 
 def _record_verification(site: Site, ctx: dict, actor: str, wi: str, paths: list[str], head: str | None,
                          results: list[dict], runner: str, job: dict | None, start: float, local: bool = False,
-                         extra: dict | None = None) -> dict:
+                         extra: dict | None = None, review: dict | None = None) -> dict:
     """Ownership, declared outputs and check results into one verify run, its verification event, and either
-    `wi.verified` or `rework.requested` (the synchronous and the collected path record the same)."""
+    `wi.verified` or `rework.requested` (the synchronous and the collected path record the same). `review` (release
+    64, a member reviewer's verdict: a check row whose exit is 0 for PASS) counts like a check and is named in the
+    note."""
     led, p, cwd, checks = ctx["led"], ctx["p"], ctx["cwd"], ctx["checks"]
     org = site.org
     violations = [x for x in paths if not org.scope_allows(p["role"], f"{p['target']}/{x}")]
@@ -1759,6 +1785,11 @@ def _record_verification(site: Site, ctx: dict, actor: str, wi: str, paths: list
         note = f"{sum(r['exit'] == 0 for r in results)}/{len(results)} declared checks passed"
         if job:
             note += f" (scheduler job {job['job_id']}: {job['state']})"
+    if review is not None:
+        passed = passed and review["exit"] == 0
+        note = (note if checks else "no declared checks") + f"; review {review.get('verdict') or 'no verdict'}" \
+            f" ({review['command']})"
+        results = list(results) + [review]
     payload = {"result": "pass" if passed else "fail", "head": head, "changed": paths, "violations": violations,
                "missing_outputs": missing, "checks": results, "artifact_sha256": hashes,
                "seconds": round(time.monotonic() - start, 2), "note": note, "runner": runner}
