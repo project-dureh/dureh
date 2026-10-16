@@ -314,7 +314,7 @@ def _slack_rule(site: Site, dureh) -> str:
     raw = site.config.get("slack")
     if isinstance(raw, dict) and raw.get("enabled") is False:
         return (f"12. Slack is off (config `slack.enabled` false): every `{dureh} slack` command does nothing."
-                + toggle + " The Director approves the day plan in this session (`day approve --memo`)." + report)
+                + toggle + " The Director approves the day plan in this session (`day approve --memo`; DUREH's layer-2 approval: `--by DUREH`)." + report)
     where = (" The company thread is one thread per working day, opened by your first post (or `slack ask`) of the day;"
              " later posts that day reply in it." if isinstance(raw, dict) and daily(raw) else "")
     return (f"12. Slack is one-way reporting to the company's thread (channel, thread and display name are fixed by config"
@@ -613,7 +613,9 @@ def _claude_md(site: Site) -> str:
               f" at the start of the day report a plan to the Director (goal, work items, order, expected usage) and record it with `{dureh} day plan --goal ... --file <plan>`;"
               f"{upstream_start}"
               f" when the Director approves in the session, record it with `{dureh} day approve --memo \"<Director's words>\"`"
-              " (a Director ✅ reaction in Slack is recorded by `slack check`/`slack watch`, item 12)."
+              " (a Director ✅ reaction in Slack is recorded by `slack check`/`slack watch`, item 12);"
+              f" when DUREH approves it under approval layer 2 (the company day plan is a layer-2 kind), record"
+              f" `{dureh} day approve --by DUREH --memo \"<DUREH's words>\"` (workday mode on or off)."
               " The 8-hour clock runs from the moment DUREH started the company's session (`session.started` record, `dureh site session status`), not from the approval;"
               " without that record it runs from the approval (or the config window). In `workday.phase` development the clock only warns after the hours; in production it blocks new work outside the plan,"
               " and a day outside `workday.weekdays` is overtime: agents spawn only for items in a Director overtime record (`day overtime` may then precede the end report)."

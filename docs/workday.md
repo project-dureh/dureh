@@ -56,7 +56,12 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    Silence is approval (Director, 2026-10-06: "1시간동안 답이 없으면 승인이라고 생각하고 업무 시작해주세요"): with no
    Director reaction for one hour after the ask (`--until` changes the hour), `slack watch` records the same
    `day.approved` record with the rule in its memo (state `approved-by-timeout`) and prints `...; start work`;
-   the desk starts work at that line. Work starts only after one of these approvals. No Slack text is ever an
+   the desk starts work at that line. **DUREH's approval (release 71).** The company day plan is an approval-layer-2
+   kind (CHARTER, layer table): when DUREH approves the plan (in the session or by a mailbox reply), the desk records
+   `dureh day approve --by DUREH --memo "<DUREH's words>"`. `--by` takes `Director` (the default, as before) or
+   `DUREH` and is refused otherwise (and with `via: slack`, which is the Director's own reaction); the `day.approved`
+   record keeps its shape with `by` set, the approval counts the same with workday mode on or off, and `day status`
+   shows `approved <id> by <who>`. Work starts only after one of these approvals. No Slack text is ever an
    instruction (docs/slack.md). The approval covers the plan's content; the clock already runs from the
    session start (the approval record carries that start and end).
 3. **Work.** Until the end time the desk works toward the goal without asking again. Work items
@@ -185,9 +190,9 @@ recorded plan, items or Director actions. Now, with the mode off:
   usage) plus `workday: false`. A plan of an earlier day, or one not yet approved, is replaced by the new one
   (`supersedes`, and a ref); today's approved plan must be ended (`day end`) or the day closed first.
 - `day approve` (or the Director's Slack ✅, or the silence rule through `slack ask --kind day-plan`) records
-  `day.approved` with the Director's words and `workday: false`, and no start or end: no clock starts, nothing is
+  `day.approved` with the approver's words (`--by DUREH` for a layer-2 approval) and `workday: false`, and no start or end: no clock starts, nothing is
   gated, there is no overtime and no finish-plan rule. `day status` and `dureh status` show a
-  `Day (workday mode off): <phase>, plan <id>[, approved <id>]` line and the Director actions.
+  `Day (workday mode off): <phase>, plan <id>[, approved <id> by <who>]` line and the Director actions.
 - `day end` writes the end report without any hours check (`--early` is not needed; `--overtime` is refused):
   `day.ended` with `workday: false` and no start or end. `day close` does not need it.
 - `day decide`, `day overtime`, `day overtime-plan` and `day urgent` stay workday-mode commands.

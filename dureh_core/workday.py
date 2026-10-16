@@ -3,8 +3,8 @@
 Switched on and off only by the Director (`dureh site workday on|off`, refused inside agent
 sessions). While on:
 
-- the desk reports a day plan (`day plan`); the Director's approval (`day approve --memo`) starts
-  the clock; until the end time the desk works toward the plan's goal without asking again;
+- the desk reports a day plan (`day plan`); the approval (`day approve --memo`, the Director's, or DUREH's under
+  approval layer 2 with `--by DUREH`, release 71) starts the clock; until the end time the desk works toward the plan's goal without asking again;
 - important decisions follow the desk's own proposal and are recorded with a state commit
   (`day decide`), so a rollback can return to that point;
 - after the end time the day's plan is still finished the same day (Director, 2026-10-06: "버그는 수정되고,
@@ -309,7 +309,8 @@ def day(site: Site, events: list[dict] | None = None) -> dict:
                                                          "write the end report"}
         return {**out, "phase": "planned", "reason": "day plan waits for the Director's approval"}
     a = approved[-1]["payload"]
-    out.update(start=a["start"], end=a["end"], approval=approved[-1]["id"], plan_items=plan_items(plan))
+    out.update(start=a["start"], end=a["end"], approval=approved[-1]["id"], approved_by=a.get("by") or "Director",
+               plan_items=plan_items(plan))
     out["working_day"] = working_day(site, out["start"])
     # the Director's accepted items (`day overtime --items`) and the ones the finish-plan rule recorded by itself
     director = sorted({w for e in overtime if e["payload"].get("rule") != FINISH_RULE for w in e["payload"]["items"]})
@@ -366,7 +367,8 @@ def _unclocked(approval: dict) -> bool:
 def _unclocked_day(site: Site, out: dict, plan: dict, approval: dict, ended: list[dict]) -> dict:
     """The day of a plan approved with workday mode off (release 70): no hours, no clock, no overtime; the plan, its
     items, the Director's actions and the approval are on record; `on-duty` until `day end`, then `off-duty`."""
-    out.update(approval=approval["id"], plan_items=plan_items(plan), workday=False, approved_at=approval["ts"])
+    out.update(approval=approval["id"], approved_by=(approval.get("payload") or {}).get("by") or "Director",
+               plan_items=plan_items(plan), workday=False, approved_at=approval["ts"])
     if ended:
         return {**out, "report": ended[-1]["id"], "phase": "off-duty",
                 "reason": "end report written (workday mode off)"}
@@ -508,8 +510,8 @@ def status(site: Site) -> dict:
         out = {"enabled": False, **switches}
         d = day(site, evs)
         if d.get("plan") and d.get("date") == _now().date().isoformat():  # release 70: the plan without hours
-            out["day"] = {k: d[k] for k in ("phase", "reason", "plan", "date", "goal", "approval", "report",
-                                            "plan_items", "director_actions") if d.get(k) is not None}
+            out["day"] = {k: d[k] for k in ("phase", "reason", "plan", "date", "goal", "approval", "approved_by",
+                                            "report", "plan_items", "director_actions") if d.get(k) is not None}
         return out
     out = {"enabled": True, "hours": settings(site)["hours"], "workday_phase": settings(site)["phase"], **switches,
            **day(site, evs)}
@@ -624,7 +626,7 @@ def render(st: dict, with_banner: bool = True) -> str | None:
             return head
         # release 70: today's plan recorded with workday mode off (no hours, no clock)
         line = f"Day (workday mode off): {dd['phase']}, plan {dd['plan']}" + (
-            f", approved {dd['approval']}" if dd.get("approval") else "") + (
+            f", approved {dd['approval']} by {dd.get('approved_by') or 'Director'}" if dd.get("approval") else "") + (
             f", end report {dd['report']}" if dd.get("report") else "") + (f"; {dd['reason']}" if dd.get("reason") else "")
         if dd.get("director_actions"):
             line += "\n" + director_actions_text(dd["director_actions"])
@@ -652,6 +654,8 @@ def render(st: dict, with_banner: bool = True) -> str | None:
         line += "; urgent " + ", ".join(st["urgent"])
     if st.get("devices_off"):
         line += "; devices off: " + ", ".join(st["devices_off"])
+    if st.get("approval"):  # release 71: who approved the day plan (the Director, or DUREH under layer 2)
+        line += f"; approved {st['approval']} by {st.get('approved_by') or 'Director'}"
     if st.get("director_actions"):
         line += "\n" + director_actions_text(st["director_actions"])
     if st.get("warning"):
@@ -707,7 +711,7 @@ def gate(site: Site, wi: str | None, checking: bool = False) -> str | None:
         return None  # one checker run for an item staged during the day (desk request, UP-0030)
     if phase in ("off-duty", "planned"):
         return (f"workday mode: no approved day ({d.get('reason')}). Report the day plan with `dureh day plan` "
-                "and record the Director's approval with `dureh day approve --memo`.")
+                "and record the approval with `dureh day approve --memo` (`--by DUREH` for a layer-2 approval).")
     fam = _wi_family(Ledger(site), wi) if wi else set()
     if phase == "past-end":
         rule = past_end_rule(site, wi, d)
@@ -879,16 +883,26 @@ def _titles(led: Ledger, wis) -> dict[str, str]:
     return {w: short_title(payloads[w]) for w in sorted(set(wis)) if w in payloads}
 
 
-def approve(site: Site, actor: str, memo: str, via: str | None = None, extra: dict | None = None) -> dict:
-    """Record the Director's approval of the day plan. The desk records the Director's words from the session;
-    `via="slack"` is used only by `dureh slack check` after the Director's own ✅ reaction (release 33)."""
+APPROVERS = ("Director", "DUREH")  # release 71: who approved the day plan (`day approve --by`)
+
+
+def approve(site: Site, actor: str, memo: str, via: str | None = None, extra: dict | None = None,
+            by: str = "Director") -> dict:
+    """Record the approval of the day plan. The desk records the approver's words from the session;
+    `via="slack"` is used only by `dureh slack check` after the Director's own ✅ reaction (release 33).
+    `by` (release 71) is the approver: the Director (layer 3, the default) or DUREH (approval layer 2, CHARTER: the
+    company day plan is a layer-2 kind); the record keeps its shape with `by` set, with workday mode on or off."""
+    if by not in APPROVERS:
+        fail(f"--by must be one of {', '.join(APPROVERS)} (not {by!r})")
+    if via and by != "Director":
+        fail(f"an approval via {via} is the Director's own")
     if not memo.strip():
-        fail("--memo must carry the Director's words")
+        fail(f"--memo must carry the {by}'s words")
     d = day(site)
     if d["phase"] != "planned":
         fail(f"no day plan waits for approval (phase {d['phase']})")
     if not enabled(site):  # release 70: the approval is recorded without hours; no clock starts
-        payload = {"memo": memo, "by": "Director", "session": d.get("session"), "workday": False}
+        payload = {"memo": memo, "by": by, "session": d.get("session"), "workday": False}
         if via:
             payload.update(extra or {}, via=via)
         return Ledger(site).event("day.approved", actor, None, payload, [d["plan"]])
@@ -896,7 +910,7 @@ def approve(site: Site, actor: str, memo: str, via: str | None = None, extra: di
     start, end = clock(site, todays_session(_events(site)), _now())
     if hours_mode(site) == "block" and _now() >= _parse(end):
         fail(f"the day started at {start} and ended at {end}; a plan approved now would be past its end")
-    payload = {"start": start, "end": end, "memo": memo, "by": "Director", "session": d.get("session")}
+    payload = {"start": start, "end": end, "memo": memo, "by": by, "session": d.get("session")}
     if via:
         payload.update(extra or {}, via=via)
     return Ledger(site).event("day.approved", actor, None, payload, [d["plan"]])

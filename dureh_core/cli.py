@@ -618,7 +618,7 @@ def cmd_day(a):
         text = Path(a.file).read_text(encoding="utf-8") if a.file else sys.stdin.read()
         _print(workday.plan(site, actor, a.goal, text, a.wi or [], a.director_action or []))
     elif c == "approve":
-        _print(workday.approve(site, actor, a.memo))
+        _print(workday.approve(site, actor, a.memo, by=a.by))
     elif c == "decide":
         typed = None
         if a.option or a.question or a.fact:
@@ -1260,8 +1260,11 @@ def parser() -> argparse.ArgumentParser:
                    help="an action only the Director can take today (a dataset link, a push approval, a config "
                         "change; repeatable, release 58): recorded as director_actions and posted by `slack ask "
                         "--kind day-plan` under 대표님 조치 필요 so the Director handles them in one go at approval")
-    x = add(dy, "approve", cmd_day, "record the Director's approval of the plan; starts the clock (workday mode on)")
-    x.add_argument("--memo", required=True)
+    x = add(dy, "approve", cmd_day, "record the approval of the plan (the Director's, or DUREH's under approval layer 2); "
+                                    "starts the clock (workday mode on)")
+    x.add_argument("--memo", required=True, help="the approver's words")
+    x.add_argument("--by", default="Director", help="who approved: Director (default; layer 3) or DUREH (approval "
+                                                    "layer 2, CHARTER; valid with workday mode on or off)")
     x = add(dy, "decide", cmd_day, "record a decision point (own proposal followed) and commit state as a rollback point")
     x.add_argument("--title", required=True)
     x.add_argument("--choice", required=True)

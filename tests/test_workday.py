@@ -980,6 +980,47 @@ class Workday(SiteCase):
         with self.assertRaisesRegex(DurehError, "still open; write its end report first"):
             workday.plan(self.s, "desk", "again", "1. W")
 
+    # ------------------------------------------------------------ day approve --by (release 71)
+    def test_approve_by_dureh_with_workday_on(self):
+        workday.switch(self.s, True, "trial")
+        workday.plan(self.s, "desk", "finish W", "1. W")
+        with self.assertRaisesRegex(DurehError, "--by must be one of Director, DUREH"):
+            workday.approve(self.s, "desk", "ok", by="desk")
+        with self.assertRaisesRegex(DurehError, "the Director's own"):
+            workday.approve(self.s, "desk", "ok", via="slack", by="DUREH")
+        self.assertEqual(workday.day(self.s)["phase"], "planned", "a refused approval records nothing")
+        rc, out = self.cli("day", "approve", "--by", "DUREH", "--memo", "layer 2: plan within the daily share")
+        self.assertEqual(rc, 0)
+        appr = [e for e in Ledger(self.s).events() if e["type"] == "day.approved"][-1]
+        self.assertEqual(appr["payload"]["by"], "DUREH")
+        self.assertEqual(sorted(appr["payload"]), ["by", "end", "memo", "session", "start"])
+        d = workday.day(self.s)
+        self.assertEqual((d["phase"], d["approved_by"]), ("on-duty", "DUREH"))
+        self.assertIsNone(self.spawn(), "a layer-2 approval opens the day like the Director's")
+        rc, out = self.cli("day", "status")
+        self.assertIn(f"approved {appr['id']} by DUREH", out)
+
+    def test_approve_by_dureh_with_workday_off(self):
+        workday.plan(self.s, "desk", "finish W", "1. W", [self.wi])
+        appr = workday.approve(self.s, "desk", "layer 2", by="DUREH")
+        self.assertEqual((appr["payload"]["by"], appr["payload"]["workday"]), ("DUREH", False))
+        d = workday.day(self.s)
+        self.assertEqual((d["phase"], d["approved_by"]), ("on-duty", "DUREH"))
+        self.assertEqual(workday.status(self.s)["day"]["approved_by"], "DUREH")
+        text = render_status(status(self.s))
+        self.assertIn(f"approved {appr['id']} by DUREH", text)
+
+    def test_approve_default_is_the_director(self):
+        self.start_day()
+        appr = [e for e in Ledger(self.s).events() if e["type"] == "day.approved"][-1]
+        self.assertEqual(appr["payload"]["by"], "Director")
+        rc, out = self.cli("day", "status")
+        self.assertIn(f"approved {appr['id']} by Director", out)
+        with self.assertRaises(SystemExit):
+            import contextlib, io
+            with contextlib.redirect_stderr(io.StringIO()):
+                self.cli("day", "approve")  # --memo is still required
+
     def test_session_off_skips_start_and_close_checks(self):
         self.start_day()
         self.assertIsNone(self.spawn())
