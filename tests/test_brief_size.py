@@ -33,6 +33,26 @@ class BriefSizeAtCreation(SiteCase):
         sent = [e for e in led.events(wi) if e["type"] == "dispatch.prepared"][-1]["payload"]["bytes"]
         self.assertEqual(wf.brief_bytes(self.s, led.get("work-item", wi)), sent)
 
+    def test_checker_estimate_matches_the_dispatched_checker_brief(self):
+        """Release 70 (UR-20261016-01): the checker brief measured at `wi new` is the one `dispatch brief --role
+        checker` prepares once the item is staged (local checks runner: one variant of the run instructions)."""
+        led = Ledger(self.s)
+        wf.wi_approve(self.s, "desk", self.bundle, "ok")
+        led.event("wi.dispatched", "desk", self.bundle, {"role": "pm-modules", "brief": "0" * 16, "by": "desk"})
+        wi = wf.wi_new(self.s, "desk", "Add g()", "g", "py-writer", "modules/demo", ["ok"], parent=self.bundle,
+                       checks=["true"])["id"]
+        estimate = wf.checker_brief_bytes(self.s, led.get("work-item", wi), "checker")
+        wf.wi_approve(self.s, "desk", wi, "ok")
+        wf.dispatch_brief(self.s, wi, "pm-modules")
+        led.event("wi.dispatched", "desk", wi, {"role": "py-writer", "brief": "1" * 16, "by": "desk"})
+        wf.wi_stage(self.s, "py-writer", wi, "added g() " * 50)
+        r = wf.dispatch_brief(self.s, wi, "pm-modules", as_role="checker")
+        prep = [e for e in led.events(wi) if e["type"] == "dispatch.prepared"][-1]["payload"]
+        self.assertEqual(prep["bytes"], estimate)
+        self.assertIn("added g() added g()", r["brief"])
+        self.assertGreater(prep["staging_bytes"], 500)
+        self.assertEqual([c.name for c in wf.checker_roles(self.s)], ["checker"], "the desk is not a checker brief")
+
     def test_child_that_overflows_the_parent_bundle_brief_is_rejected(self):
         title = "t" * 300
         with self.assertRaisesRegex(DurehError, rf"bundle {self.bundle} brief would be \d+ bytes, over the 4096-byte"):

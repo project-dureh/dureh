@@ -297,6 +297,15 @@ dureh verify --wi <WI> --collect [RUN]   # checker, re-dispatched: record the ve
   latest failed verify run: failed check ids and commands, exit codes, the last 20 output lines of each, per-check
   log paths and the job logs, violations and missing outputs. The block is outside the 2048-byte brief budget
   (which covers the desk-written part) and capped at 4 KB.
+- **Checker briefs (release 70, UR-20261016-01).** `dispatch brief --role <checker>` for a staged item appends a
+  "Staged" block: the latest `wi.staged` record, its head, who staged it and its summary (the stager's own
+  account, not evidence). Like the rework block it is outside the brief budget, capped at 1 KB
+  (`workflow.STAGING_BLOCK_BYTES`; the summary is cut first) and counted as `staging_bytes` on
+  `dispatch.prepared`. `wi new` and `wi amend` measure the checker brief as well as the owner's (every non-desk
+  role with the `verify` capability, against `worker_brief_bytes`), with the longest run instructions (a stale
+  pending run, placeholder ids as long as real ones) and the WI worktree line, and refuse an item whose checker
+  brief would not fit, recording nothing. Before, a company site's item staged fine and its checker brief was then
+  refused at 2053 bytes, so it could not be verified without stopping and amending it.
 - **Checks environment (release 46).** A new WI worktree has no `.venv` (it is untracked). `verify --wi` picks
   the environment itself (`workflow.checks_env_plan`, recorded as `checks_env` on the verify run): the worktree's
   own `.venv` (`own`); else, when the worktree's `uv.lock` is byte-identical to the target main tree's (or neither

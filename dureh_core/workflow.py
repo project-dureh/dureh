@@ -88,6 +88,7 @@ def wi_new(site: Site, actor: str, title: str, goal: str, role: str, target: str
     if n > limit:
         fail(f"brief would be {n} bytes, over the {limit}-byte limit; shorten goal, acceptance, checks or constraints, "
              "or split the work item")
+    _checker_brief_check(site, draft, "brief")
     if prec and org.role(prec["payload"]["role"]).is_manager:
         prole = org.role(prec["payload"]["role"])
         n, limit = brief_bytes(site, prec, extra_children=[draft]), _brief_limit(site, prole)
@@ -144,6 +145,38 @@ def brief_bytes(site: Site, rec: dict, extra_children: list[dict] | None = None)
         if root is not None and (root / ".git").exists():
             wt = {"worktree": str(site.worktrees / rec["id"]), "base": "0" * 40, "branch": wi_branch(site, rec["id"], root)}
     return len(_render_brief(site, rec, role.name, wt, {}, extra_children).encode("utf-8"))
+
+
+def checker_roles(site: Site) -> list:
+    """The roles a checker brief is rendered for: every non-desk role with the verify capability that some role may
+    dispatch (release 70)."""
+    org = site.org
+    return [r for r in org.with_capability("verify") if r.kind != "desk" and org.dispatcher_of(r.name)]
+
+
+def checker_brief_bytes(site: Site, rec: dict, checker: str) -> int:
+    """Size of the budgeted part of the brief `dispatch brief --role <checker>` would render for this record once it
+    is staged (release 70, UR-20261016-01): the WI worktree line when the owner works in one, and the longest of the
+    checker's run instructions (submit, collect, or resubmit after a stale run). The staging summary rides outside
+    the budget (staging_summary_block), so nothing a worker writes at `wi stage` can push it over."""
+    owner = site.org.role(rec["payload"]["role"])
+    wt = {"worktree": None, "base": None}
+    if owner.is_worker and owner.write_scopes and owner.isolation == "worktree":
+        root = target_root(site, rec["payload"]["target"])
+        if root is not None and (root / ".git").exists():
+            wt = {"worktree": str(site.worktrees / rec["id"]), "base": None}  # the checker brief names the site branch
+    return len(_render_brief(site, rec, checker, wt, {}, estimate=True).encode("utf-8"))
+
+
+def _checker_brief_check(site: Site, draft: dict, what: str) -> None:
+    """Refuse an item whose checker brief could never be prepared (release 70, UR-20261016-01): before, only the
+    owner's brief was measured, and an item that staged fine was refused at `dispatch brief --role checker`."""
+    for c in checker_roles(site):
+        n, limit = checker_brief_bytes(site, draft, c.name), _brief_limit(site, c)
+        if n > limit:
+            fail(f"{what} fits, but the {c.name} brief would be {n} bytes, over the {limit}-byte limit, so the item"
+                 " could not be verified once staged; shorten goal, acceptance, checks or constraints, or split the"
+                 " work item")
 
 
 def wi_approve(site: Site, actor: str, wi: str, memo: str, by: str = "Director") -> dict:
@@ -626,6 +659,7 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
     n, limit = brief_bytes(site, draft), _brief_limit(site, role)
     if n > limit:
         fail(f"amended brief would be {n} bytes, over the {limit}-byte limit")
+    _checker_brief_check(site, draft, "amended brief")
     if st == "stopped":  # it is re-approved below: refuse before anything is recorded
         _local_output_check(site, wi, draft["payload"])
     before = {k: rec["payload"].get(k) for k in fields}
@@ -735,6 +769,9 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None) -> 
         fail(f"brief for {wi} is {len(body)} bytes, over the {limit}-byte limit; split the work item")
     # release 37 (UR-20261005-02): a rework brief carries the last failed verification, outside the budget
     block = "" if checking or led.wi_status(wi)["rework"] <= 0 else last_verification_block(led, wi)
+    # release 70 (UR-20261016-01): a checker brief carries the staging summary the same way, with its own cap
+    staging = staging_summary_block(led, wi) if checking else ""
+    block += staging
     block += _env_brief_line(wt)  # release 47: outside the budget, as the verification block
     full = text + block
     digest = hashlib.sha256(full.encode("utf-8")).hexdigest()[:16]
@@ -745,6 +782,7 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None) -> 
                                             "worktree": wt["worktree"], "base": wt["base"], "by": by,
                                             **({"worktree_env": wt["env"]} if wt.get("env") else {}),
                                             **({"verification_bytes": len(block.encode("utf-8"))} if block else {}),
+                                            **({"staging_bytes": len(staging.encode("utf-8"))} if staging else {}),
                                             **({"supersedes": supersedes} if supersedes else {})})
     if role.is_member:  # release 64: the member job reads the brief's text (checked against its digest)
         from .members import save_brief
@@ -817,6 +855,30 @@ def _env_brief_line(wt: dict) -> str:
 
 VERIFICATION_BLOCK_BYTES = 4096
 VERIFICATION_TAIL_LINES = 20
+
+
+STAGING_BLOCK_BYTES = 1024  # release 70: the checker brief's staging summary, outside the brief budget
+
+
+def staging_summary_block(led: Ledger, wi: str) -> str:
+    """The "Staged" block of a checker brief (release 70, UR-20261016-01): the latest `wi.staged` record's head, who
+    staged it and its summary, at most STAGING_BLOCK_BYTES (the summary is cut first). Outside the brief budget, as
+    the rework brief's last failed verification; empty when nothing is staged."""
+    staged = [e for e in led.events(wi) if e["type"] == "wi.staged"]
+    if not staged:
+        return ""
+    ev = staged[-1]
+    p = ev["payload"]
+    head = (f"\nStaged ({ev['id']}, {ev['ts'][:19]}Z, head {str(p.get('head') or '-')[:12]}, by {ev.get('actor')}); the"
+            " summary is the stager's own account, not evidence; verify measures the head:\n")
+    tail = "\n"
+    text = " ".join(str(p.get("summary") or "").split()) or "-"
+    room = STAGING_BLOCK_BYTES - len(head.encode("utf-8")) - len(tail.encode("utf-8"))
+    raw = text.encode("utf-8")
+    if len(raw) > room:
+        cut = " ... (truncated)"
+        text = raw[:max(0, room - len(cut.encode("utf-8")))].decode("utf-8", "ignore") + cut
+    return head + text + tail
 
 
 def last_verification_block(led: Ledger, wi: str) -> str:
@@ -893,7 +955,7 @@ def _superseded_dispatch(site: Site, led: Ledger, wi: str) -> dict:
 
 
 def _render_brief(site: Site, rec: dict, role: str, wt: dict, entry: dict,
-                  extra_children: list[dict] | None = None) -> str:
+                  extra_children: list[dict] | None = None, estimate: bool = False) -> str:
     p = rec["payload"]
     org = site.org
     r = org.role(role)
@@ -964,7 +1026,7 @@ def _render_brief(site: Site, rec: dict, role: str, wt: dict, entry: dict,
                   f"4. When every item is verified, run `{dureh} wi stage --wi {rec['id']} --summary ...` and return a summary"
                   f" of at most {int(site.limit('manager_report_lines', 30))} lines."]
     elif r.has("verify"):
-        lines += [""] + _checker_lines(site, rec, dureh)
+        lines += [""] + _checker_lines(site, rec, dureh, estimate)
     elif r.has("network") and not scopes:
         lines += ["", f"Record each result with `{dureh} ledger add finding --wi {rec['id']} --summary ... --evidence-level ...`.",
                   "Keep sources (identity, retrieval time, passage or hash). Do not write files."]
@@ -975,9 +1037,10 @@ def _render_brief(site: Site, rec: dict, role: str, wt: dict, entry: dict,
     return "\n".join(lines) + "\n"
 
 
-def _checker_lines(site: Site, rec: dict, dureh: Path) -> list[str]:
+def _checker_lines(site: Site, rec: dict, dureh: Path, estimate: bool = False) -> list[str]:
     """The checker's run instructions (release 37): with the slurm runner and declared checks, submit the checks
-    job and end the turn, then collect on re-dispatch; never run verify in the background."""
+    job and end the turn, then collect on re-dispatch; never run verify in the background. `estimate` (release 70)
+    returns the longest variant, with placeholder run, job and head ids, for the size check at `wi new`/`wi amend`."""
     wi = rec["id"]
     never = "Never run verify in the background. Do not edit files."
     try:
@@ -987,11 +1050,14 @@ def _checker_lines(site: Site, rec: dict, dureh: Path) -> list[str]:
         slurm = False
     if not slurm:
         return [f"Run `{dureh} verify --wi {wi}` in the foreground and return its measured output. {never}"]
-    pend = pending_verify(Ledger(site), wi) if wi != "WI-0000" else None
-    try:
-        stale = bool(pend) and _stale_verify(site, wi, pend)
-    except DurehError:
-        stale = False
+    if estimate:  # the stale variant is the longest; ids as long as real ones (run-<22>-<8 hex>, a 10-digit job)
+        pend, stale = {"id": "run-" + "0" * 22 + "-" + "0" * 8, "payload": {"job_id": "9" * 10, "head": "0" * 40}}, True
+    else:
+        pend = pending_verify(Ledger(site), wi) if wi != "WI-0000" else None
+        try:
+            stale = bool(pend) and _stale_verify(site, wi, pend)
+        except DurehError:
+            stale = False
     if pend and stale:  # release 61 (UR-20261013-02): the item moved since the job was submitted; --collect would refuse
         return [f"Verify run {pend['id']} (job {pend['payload']['job_id']}) was submitted at head"
                 f" {str(pend['payload'].get('head'))[:12]}, but {wi} has moved since, so its results do not describe the"

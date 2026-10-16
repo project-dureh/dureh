@@ -381,6 +381,83 @@ class AsyncVerify(SiteCase):
         r = wf.dispatch_brief(self.s, wi, "pm-modules")
         self.assertGreater(len(r["brief"].encode()), limit, "the block does not count against the 2048-byte budget")
 
+    # ------------------------------------------------------------ checker brief size (release 70, UR-20261016-01)
+    def _sizes(self):
+        """(worker, checker) brief bytes of an item like `item()` with an empty goal."""
+        draft = {"id": "WI-0000", "payload": {**self.led.get("work-item", self.item(["true"]))["payload"], "goal": ""}}
+        w, c = wf.brief_bytes(self.s, draft), wf.checker_brief_bytes(self.s, draft, "checker")
+        self.assertGreater(c, w + 40, "the slurm checker's run instructions are longer than the worker's")
+        return w, c
+
+    def _goal_between(self):
+        """A goal length at which the worker brief fits the 2048-byte budget and the checker brief does not."""
+        return 2048 - self._sizes()[0]
+
+    def test_wi_new_refuses_an_item_whose_checker_brief_would_not_fit(self):
+        g = self._goal_between()
+        n = len(self.led.work_items())
+        with self.assertRaisesRegex(DurehError, r"brief fits, but the checker brief would be \d+ bytes, over the 2048"):
+            wf.wi_new(self.s, "desk", "Add g()", "x" * g, "py-writer", "modules/demo", ["ok"], parent=self.bundle,
+                      checks=["true"])
+        self.assertEqual(len(self.led.work_items()), n, "nothing recorded")
+
+    def test_wi_amend_refuses_a_constraint_that_would_make_the_checker_brief_too_big(self):
+        g = self._goal_between()
+        wi = self.item(["true"])  # staged
+        with self.assertRaisesRegex(DurehError, r"amended brief fits, but the checker brief would be"):
+            wf.wi_amend(self.s, "desk", wi, "ok", {}, add_constraints=["c" * (g - 20)])
+        self.assertEqual(self.led.get("work-item", wi)["payload"].get("constraints") or [], [])
+
+    def test_an_item_that_passes_wi_new_can_always_get_its_checker_brief(self):
+        g = 2048 - self._sizes()[1]  # the checker brief's worst case exactly at the budget
+        wi = wf.wi_new(self.s, "desk", "Add g()", "x" * g, "py-writer", "modules/demo", ["ok"], parent=self.bundle,
+                       checks=["true"])["id"]
+        wf.wi_approve(self.s, "desk", wi, "ok")
+        wf.dispatch_brief(self.s, wi, "pm-modules")
+        self.led.event("wi.dispatched", "desk", wi, {"role": "py-writer", "brief": "1" * 16, "by": "desk"})
+        wf.wi_stage(self.s, "py-writer", wi, "long summary " * 400)
+        for stale in (False, True):
+            self.running()
+            if stale:  # a pending run whose head moved: the longest checker instructions
+                self.submit(wi)
+                wt = self.s.worktrees / wi
+                subprocess.run(["git", "commit", "--allow-empty", "-qm", "moved"], cwd=wt, check=True)
+            r = wf.dispatch_brief(self.s, wi, "pm-modules", as_role="checker")
+            prep = [e for e in self.led.events(wi) if e["type"] == "dispatch.prepared"][-1]["payload"]
+            self.assertLessEqual(prep["bytes"], 2048)
+            self.assertLessEqual(prep["bytes"], wf.checker_brief_bytes(self.s, self.led.get("work-item", wi), "checker"))
+        self.assertIn("verify --wi %s --submit` (it supersedes the stale run)" % wi, r["brief"])
+
+    def test_checker_brief_carries_the_staging_summary_outside_the_budget_and_capped(self):
+        wi = self.item(["true"])
+        staged = [e for e in self.led.events(wi) if e["type"] == "wi.staged"][-1]
+        r = wf.dispatch_brief(self.s, wi, "pm-modules", as_role="checker")
+        prep = [e for e in self.led.events(wi) if e["type"] == "dispatch.prepared"][-1]["payload"]
+        self.assertIn(f"\nStaged ({staged['id']}", r["brief"])
+        self.assertIn("by py-writer); the summary is the stager's own account, not evidence", r["brief"])
+        self.assertTrue(r["brief"].endswith("verify measures the head:\ndone\n"))
+        self.assertEqual(prep["bytes"], len(r["brief"].encode()) - len(r["header"].encode()) - 2 - prep["verification_bytes"],
+                         "the budget covers the desk-written part only")
+        self.assertEqual(prep["staging_bytes"], len(wf.staging_summary_block(self.led, wi).encode()))
+        # a long summary is cut to the block's cap, and only the block grows
+        long = self.item(["true"])
+        self.led.event("wi.stopped", "desk", long, {"reason": "re-stage"})
+        wf.wi_amend(self.s, "desk", long, "ok", {"acceptance": ["ok"]})
+        self.led.event("wi.dispatched", "desk", long, {"role": "py-writer", "brief": "2" * 16, "by": "desk"})
+        wf.wi_stage(self.s, "py-writer", long, "ü" * 3000)
+        block = wf.staging_summary_block(self.led, long)
+        self.assertLessEqual(len(block.encode()), wf.STAGING_BLOCK_BYTES)
+        self.assertGreater(len(block.encode()), wf.STAGING_BLOCK_BYTES - 4)
+        self.assertTrue(block.endswith("... (truncated)\n"))
+        r2 = wf.dispatch_brief(self.s, long, "pm-modules", as_role="checker")
+        prep2 = [e for e in self.led.events(long) if e["type"] == "dispatch.prepared"][-1]["payload"]
+        self.assertEqual(prep2["bytes"], prep["bytes"], "the summary does not count against the budget")
+        self.assertIn(block, r2["brief"])
+        # a worker brief carries no staging block
+        fresh = wf.wi_new(self.s, "desk", "f", "g", "py-writer", "modules/demo", ["ok"], parent=self.bundle)["id"]
+        wf.wi_approve(self.s, "desk", fresh, "ok")
+        self.assertNotIn("\nStaged (", wf.dispatch_brief(self.s, fresh, "pm-modules")["brief"])
+
     # ------------------------------------------------------------ amend
     def test_add_constraint_appends_and_constraint_replaces(self):
         wi = wf.wi_new(self.s, "desk", "c", "g", "py-writer", "modules/demo", ["ok"], parent=self.bundle,
