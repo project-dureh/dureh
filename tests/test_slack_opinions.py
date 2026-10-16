@@ -15,13 +15,13 @@ from dureh_core.cli import main
 from dureh_core.records import Ledger
 from dureh_core.runtimes.claude_code import _claude_md
 
-D = "U081JGBMDG8"
+D = "U00DIRECTOR"
 BOT, BOTU = "B0DUREH", "U0DUREHBOT"
-DAY = "1791218340.000100"
+DAY = "1791000340.000100"
 OLD = "1790000000.000001"
-CLEO = "U0C7M7DP0DN"
+CLEO = "U00EXAMPLE1"
 T0 = datetime(2026, 10, 5, 10, 0, tzinfo=timezone(timedelta(hours=-4)))
-CFG = {"channel": "C0C6U53DZD0", "username": "desk (example-org)", "director_user": D}
+CFG = {"channel": "C00EXAMPLE1", "username": "desk (example-org)", "director_user": D}
 
 
 def bot(ts, text="status", reactions=None):
@@ -93,61 +93,61 @@ class Base(base.SlackBase):
 
 class Opinions(Base):
     def test_director_question_reply_one_item_and_no_text_recorded(self):
-        self.thread(bot("1791218400.000001", reactions=[{"name": "question", "users": [D], "count": 1}]),
-                    human("1791218500.000001", D, "왜 이렇게 했나요?"))
+        self.thread(bot("1791000400.000001", reactions=[{"name": "question", "users": [D], "count": 1}]),
+                    human("1791000500.000001", D, "왜 이렇게 했나요?"))
         self.assertEqual(self.run_op(), [{"id": "op-20261005-1", "kind": "director", "by": "Director", "thread": DAY,
-                                          "flagged": "1791218400.000001", "reply_ts": "1791218500.000001",
+                                          "flagged": "1791000400.000001", "reply_ts": "1791000500.000001",
                                           "text": "왜 이렇게 했나요?"}])
         rec = self.events(slack.RECEIVED)
         self.assertEqual({k: rec[0][k] for k in ("reply_ts", "by", "kind", "chars")},
-                         {"reply_ts": "1791218500.000001", "by": "Director", "kind": "director", "chars": 10})
+                         {"reply_ts": "1791000500.000001", "by": "Director", "kind": "director", "chars": 10})
         self.assertNotIn("왜 이렇게", json.dumps(Ledger(self.site()).load("event"), ensure_ascii=False))
         self.assertNotIn(base.FAKE_TOKEN, self.err)
 
     def test_speech_balloon_and_reply_before_flag_skipped(self):
-        self.thread(human("1791218390.000001", D, "earlier"),
-                    bot("1791218400.000001", reactions=[{"name": "speech_balloon", "users": [D]}]),
-                    human("1791218500.000001", D, "의견"))
+        self.thread(human("1791000390.000001", D, "earlier"),
+                    bot("1791000400.000001", reactions=[{"name": "speech_balloon", "users": [D]}]),
+                    human("1791000500.000001", D, "의견"))
         self.assertEqual([i["text"] for i in self.run_op()], ["의견"])
 
     def test_other_users_flag_ignored(self):
-        self.thread(bot("1791218400.000001", reactions=[{"name": "question", "users": ["U0OTHER1"]}]),
-                    human("1791218500.000001", D, "x"))
+        self.thread(bot("1791000400.000001", reactions=[{"name": "question", "users": ["U0OTHER1"]}]),
+                    human("1791000500.000001", D, "x"))
         self.assertEqual(self.run_op(), [])
         self.assertIn("1 non-trusted ignored", self.err)
 
     def test_untrusted_reply_ignored(self):
-        self.thread(bot("1791218400.000001", reactions=[{"name": "grey_question", "users": [D]}]),
-                    human("1791218450.000001", "U0OTHER1", "noise"), human("1791218500.000001", D, "real"))
+        self.thread(bot("1791000400.000001", reactions=[{"name": "grey_question", "users": [D]}]),
+                    human("1791000450.000001", "U0OTHER1", "noise"), human("1791000500.000001", D, "real"))
         self.assertEqual([i["text"] for i in self.run_op()], ["real"])
         self.assertIn("1 non-trusted ignored", self.err)
 
     def test_unflagged_and_old_threads_skipped(self):
-        self.thread(bot("1791218400.000001"), human("1791218500.000001", D, "no flag"))
+        self.thread(bot("1791000400.000001"), human("1791000500.000001", D, "no flag"))
         self.threads[OLD] = [bot(OLD, reactions=[{"name": "question", "users": [D]}]),
                              human("1790000100.000001", D, "old reply")]
         self.assertEqual(self.run_op(), [])
 
     def test_dedupe_across_runs(self):
-        self.thread(bot("1791218400.000001", reactions=[{"name": "question", "users": [D]}]),
-                    human("1791218500.000001", D, "one"))
+        self.thread(bot("1791000400.000001", reactions=[{"name": "question", "users": [D]}]),
+                    human("1791000500.000001", D, "one"))
         self.assertEqual(len(self.run_op()), 1)
         self.assertEqual(self.run_op(), [])
-        self.threads[DAY].append(human("1791218600.000001", D, "two"))
+        self.threads[DAY].append(human("1791000600.000001", D, "two"))
         self.assertEqual([(i["id"], i["text"]) for i in self.run_op()], [("op-20261005-2", "two")])
         self.assertEqual(len(self.events(slack.RECEIVED)), 2)
 
     def test_agent_reply_without_request_ignored(self):
         self.configure(agents={CLEO: "Cleo"})
-        self.thread(bot("1791218400.000001", reactions=[{"name": "question", "users": [D]}]),
-                    human("1791218500.000001", CLEO, "Cleo says"), human("1791218600.000001", D, "Director says"))
+        self.thread(bot("1791000400.000001", reactions=[{"name": "question", "users": [D]}]),
+                    human("1791000500.000001", CLEO, "Cleo says"), human("1791000600.000001", D, "Director says"))
         self.assertEqual([(i["by"], i["text"]) for i in self.run_op()], [("Director", "Director says")])
         self.assertIn("1 agent unrequested ignored", self.err)
 
     def test_agent_reaction_ignored(self):
         self.configure(agents={CLEO: {"label": "Cleo"}})
-        self.thread(bot("1791218400.000001", reactions=[{"name": "question", "users": [CLEO]}]),
-                    human("1791218500.000001", D, "x"), human("1791218600.000001", CLEO, "mine"))
+        self.thread(bot("1791000400.000001", reactions=[{"name": "question", "users": [CLEO]}]),
+                    human("1791000500.000001", D, "x"), human("1791000600.000001", CLEO, "mine"))
         self.assertEqual(self.run_op(), [])
         self.assertIn("2 agent unrequested ignored", self.err)
 
@@ -179,8 +179,8 @@ class Opinions(Base):
         self.assertEqual(self.posts, [])
 
     def test_answer_posts_in_thread_and_records(self):
-        self.thread(bot("1791218400.000001", reactions=[{"name": "question", "users": [D]}]),
-                    human("1791218500.000001", D, "q"))
+        self.thread(bot("1791000400.000001", reactions=[{"name": "question", "users": [D]}]),
+                    human("1791000500.000001", D, "q"))
         oid = self.run_op()[0]["id"]
         code, out, err = self.run_cli("answer", "--id", oid, stdin="이렇게 하겠습니다.\n")
         self.assertEqual(code, 0, err)
@@ -217,8 +217,8 @@ class Opinions(Base):
         self.assertEqual(self.run_cli("opinions")[0], 2)
 
     def test_watch_emits_new_items_only(self):
-        self.thread(bot("1791218400.000001", reactions=[{"name": "question", "users": [D]}]),
-                    human("1791218500.000001", D, "one"))
+        self.thread(bot("1791000400.000001", reactions=[{"name": "question", "users": [D]}]),
+                    human("1791000500.000001", D, "one"))
         lines, sleeps = [], []
         n = slack.watch_opinions(self.site(), "desk", 2, 120, emit=lines.append, sleep=sleeps.append, rounds=2)
         self.assertEqual((n, sleeps), (1, [120.0]))

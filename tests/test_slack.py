@@ -16,7 +16,7 @@ from dureh_core.records import Ledger
 from dureh_core.runtimes.claude_code import _claude_md
 from dureh_core.util import DurehError
 
-CFG = {"channel": "C0C6U53DZD0", "thread_ts": "1791213939.792479", "username": "desk (example-org)",
+CFG = {"channel": "C00EXAMPLE1", "thread_ts": "1791000000.000100", "username": "desk (example-org)",
        "icon_emoji": ":brain:"}
 FAKE_TOKEN = "xoxb-test-not-a-real-token"
 REAL_REQUEST = slack._request
@@ -117,7 +117,7 @@ class SlackCase(SlackBase):
         self.assertEqual(self.calls, [])
 
     def test_bad_thread_ts_refused(self):
-        self.set_config(dict(CFG, thread_ts=1791213939.792479, token_file=str(self.token_file)))
+        self.set_config(dict(CFG, thread_ts=1791000000.000100, token_file=str(self.token_file)))
         self.assertEqual(self.run_cli("post", stdin="hello")[0], 2)
 
     def test_missing_token_file(self):
@@ -193,7 +193,7 @@ class SlackCase(SlackBase):
         self.assertNotIn("one-way", off)
 
 
-DIRECTOR = "U081JGBMDG8"
+DIRECTOR = "U00DIRECTOR"
 ASK_TS = "1791300000.000100"
 T0 = datetime(2026, 10, 5, 9, 0, tzinfo=timezone(timedelta(hours=-4)))
 
@@ -792,7 +792,7 @@ class SlackDailyApproval(SlackApproval):
 
         def fake(method, token, *, data, timeout=30):
             self.calls.append({"method": method, "token": token, "data": data})
-            return {"ok": True, "ts": ASK_TS if "thread_ts" in data else "1791299999.000001", "channel": data["channel"]}
+            return {"ok": True, "ts": ASK_TS if "thread_ts" in data else "1791100000.000001", "channel": data["channel"]}
 
         p = mock.patch.object(slack, "_request", fake)
         p.start()
@@ -802,17 +802,17 @@ class SlackDailyApproval(SlackApproval):
         res = self.ask()
         self.assertEqual(len(self.calls), 2)
         self.assertNotIn("thread_ts", self.calls[0]["data"])
-        self.assertEqual(self.calls[1]["data"]["thread_ts"], "1791299999.000001")
-        self.assertEqual(res["thread_ts"], "1791299999.000001")
-        self.assertEqual(self.events("slack.approval.requested")[0]["payload"]["thread_ts"], "1791299999.000001")
+        self.assertEqual(self.calls[1]["data"]["thread_ts"], "1791100000.000001")
+        self.assertEqual(res["thread_ts"], "1791100000.000001")
+        self.assertEqual(self.events("slack.approval.requested")[0]["payload"]["thread_ts"], "1791100000.000001")
         # a later post the same day replies in the same thread
         self.assertEqual(self.run_cli("post", stdin="진행")[0], 0)
-        self.assertEqual(self.calls[-1]["data"]["thread_ts"], "1791299999.000001")
+        self.assertEqual(self.calls[-1]["data"]["thread_ts"], "1791100000.000001")
         self.assertEqual(len(self.events("slack.thread.opened")), 1)
 
     def test_director_check_approves_the_day_via_slack(self):
         super().test_director_check_approves_the_day_via_slack()
-        self.assertEqual(self.calls[-1]["data"]["thread_ts"], "1791299999.000001")
+        self.assertEqual(self.calls[-1]["data"]["thread_ts"], "1791100000.000001")
 
     def test_ask_uses_the_file(self):
         self.plan()

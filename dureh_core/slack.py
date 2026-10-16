@@ -133,7 +133,7 @@ def config(site: Site) -> dict:
         fail(f"config.json slack.daily_thread must be true or false, not {c.get('daily_thread')!r}; the Director sets it")
     is_daily = daily(c)
     if (thread is not None or not is_daily) and (not isinstance(thread, str) or not _TS.match(thread)):
-        fail(f"config.json slack.thread_ts must be the thread's parent ts as a string such as \"1791213939.792479\", "
+        fail(f"config.json slack.thread_ts must be the thread's parent ts as a string such as \"1700000000.000100\", "
              f"not {thread!r} (or leave it out for one thread per working day); the Director sets it")
     if not isinstance(user, str) or not user.strip():
         fail("config.json slack.username (the company's display name) is required; the Director sets it")

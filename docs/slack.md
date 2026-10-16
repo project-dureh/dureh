@@ -24,12 +24,12 @@ it may **consult** an agent before asking the Director; `slack.enabled` switches
 
 ```json
 "slack": {
-  "channel": "C0C6U53DZD0",
+  "channel": "C00EXAMPLE1",
   "daily_thread": true,
   "username": "desk (example-org)",
   "icon_emoji": ":brain:",
-  "director_user": "U081JGBMDG8",
-  "agents": {"U0C7M7DP0DN": "Cleo"},
+  "director_user": "U00DIRECTOR",
+  "agents": {"U00EXAMPLE1": "Cleo"},
   "consult_agent": "@Cleo",
   "enabled": true
 }
