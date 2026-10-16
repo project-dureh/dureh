@@ -67,7 +67,11 @@ class LandedStart(SiteCase):
         git = lambda *a, cwd=root: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a],  # noqa: E731
                                                    cwd=cwd, check=True, capture_output=True, text=True)
         if not (root / ".git").exists():
-            git("clone", "-q", "--shared", "--no-checkout", str(base), str(root), cwd=self.tmp)
+            git("clone", "-q", "--shared", "--no-checkout", "--no-tags", str(base), str(root), cwd=self.tmp)
+            # release 71: a fake never carries the tags of its base (a release checkout running the suite has its
+            # real release tag on HEAD); only the tag the test names is set below
+            for t in git("tag", "-l").stdout.split():
+                git("tag", "-d", t)
             git("checkout", "-q", "--detach", git("rev-parse", at, cwd=base).stdout.strip())
             if commit:
                 git("commit", "-q", "--allow-empty", "-m", f"landed {name}")
