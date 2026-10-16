@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 from pathlib import Path
 
 from helpers import SiteCase
@@ -57,10 +58,21 @@ class LandedStart(SiteCase):
         self.s = Site(self.site_root)
         return cfg
 
-    def checkout(self, name="release-38", code=0) -> Path:
+    def checkout(self, name="release-38", code=0, base=None, tag=None, commit=True, at="HEAD") -> Path:
         """A fake release checkout: `dureh_core/` and a `dureh` that logs its argv and re-pins config.json harness.root
-        the way the real adapter sync does (then exits `code`)."""
+        the way the real adapter sync does (then exits `code`). Release 70: a git repository sharing the objects of
+        `base` (default the running harness), one empty commit on top of its `at` (`commit`), optionally tagged."""
         root = self.tmp / name
+        base = base or HARNESS_ROOT
+        git = lambda *a, cwd=root: subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *a],  # noqa: E731
+                                                   cwd=cwd, check=True, capture_output=True, text=True)
+        if not (root / ".git").exists():
+            git("clone", "-q", "--shared", "--no-checkout", str(base), str(root), cwd=self.tmp)
+            git("checkout", "-q", "--detach", git("rev-parse", at, cwd=base).stdout.strip())
+            if commit:
+                git("commit", "-q", "--allow-empty", "-m", f"landed {name}")
+            if tag:
+                git("tag", "-f", tag)
         (root / "dureh_core").mkdir(parents=True, exist_ok=True)
         (root / "dureh").write_text(SWITCH.format(log=root / "argv.log", cfg=str(self.site_root / "config.json"),
                                                   root=str(root), code=code))
@@ -207,7 +219,92 @@ class LandedStart(SiteCase):
         self.landed(co)
         rc, out = self.cli("site", "session", "plan")
         self.assertEqual(rc, 0, out)
-        self.assertIn(f"will switch harness to not-a-g (?, not a release) at {co} (landed a94fde) before submitting", out)
+        from dureh_core.util import harness_label
+
+        self.assertIn(f"will switch harness to {harness_label(co)} at {co} (landed a94fde) before submitting", out)
         self.assertIn("#!/bin/bash\n", out)
         self.assertIsNone(self.argv_log(co), "plan switches nothing")
         self.assertNotIn("will switch harness", self.cli("site", "session", "plan", "--no-apply-landed")[1])
+
+    # ------------------------------------------------------- release order (release 70)
+    def pin(self, checkout: Path):
+        """Pin the site to `checkout` as its current harness (what adapter sync records in config.json)."""
+        cfg = json.loads((self.site_root / "config.json").read_text())
+        cfg.setdefault("harness", {})["root"] = str(checkout)
+        (self.site_root / "config.json").write_text(json.dumps(cfg, indent=2))
+        self.s = Site(self.site_root)
+
+    def test_an_older_landed_release_is_skipped_recorded_and_not_applied_again(self):
+        current = self.checkout("r-current", tag="r2026.10.15-3")
+        older = self.checkout("r-older", tag="r2026.10.13-2", commit=False)  # the parent of the current release
+        self.pin(current)
+        self.landed(older, mid="b01a72")
+        rc, out = self.cli("site", "session", "plan")
+        self.assertIn("will skip landed b01a72: r2026.10.13-2 is not newer than r2026.10.15-3", out)
+        rc, out = self.cli("site", "session", "start")
+        self.assertEqual(rc, 0, out)
+        self.assertIsNone(self.argv_log(older), "never a downgrade")
+        self.assertIn("skipped landed b01a72: r2026.10.13-2 is not newer than r2026.10.15-3 (release tag order); recorded",
+                      out)
+        self.assertEqual(self.events(sessions.SWITCHED), [])
+        sk = self.events(up.LANDED_SKIPPED)
+        self.assertEqual(len(sk), 1)
+        self.assertEqual((sk[0]["payload"]["landed"], sk[0]["payload"]["to"], sk[0]["payload"]["from_release"]),
+                         ("b01a72", str(older), "r2026.10.15-3"))
+        started = self.events("session.started")[-1]["payload"]
+        self.assertEqual(started["harness_switch_skipped"]["record"], sk[0]["id"])
+        self.assertIn(f"\nexport DUREH_ROOT={current}\n", Path(started["script"]).read_text())
+        self.assertIsNone(up.pending_landed_checkout(Site(self.site_root)), "the skipped message is consumed")
+        rc, out = self.cli("site", "session", "start", "--purpose", "overtime")
+        self.assertNotIn("skipped landed", out, "reported once, not applied later")
+        self.assertEqual(len(self.events(up.LANDED_SKIPPED)), 1)
+
+    def test_a_newer_landed_release_is_applied(self):
+        current = self.checkout("r-current", tag="r2026.10.13-2")
+        newer = self.checkout("r-newer", base=current, tag="r2026.10.15-3")
+        self.pin(current)
+        self.landed(newer)
+        order = up.release_order(current, newer)
+        self.assertTrue(order["newer"], order)
+        self.assertEqual(order["reason"], "r2026.10.15-3 is newer than r2026.10.13-2 (contains it)")
+        rc, out = self.cli("site", "session", "start")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.argv_log(newer), ["--site", str(self.site_root), "adapter", "sync"])
+        self.assertEqual(len(self.events(sessions.SWITCHED)), 1)
+        self.assertEqual(self.events(up.LANDED_SKIPPED), [])
+
+    def test_the_same_release_at_another_path_is_skipped(self):
+        current = self.checkout("r-current", tag="r2026.10.15-3")
+        same = self.checkout("r-same", base=current, commit=False, tag="r2026.10.15-3")
+        self.pin(current)
+        self.landed(same)
+        order = up.release_order(current, same)
+        self.assertEqual((order["newer"], order["reason"]),
+                         (False, "r2026.10.15-3 is not newer than r2026.10.15-3 (same revision)"))
+        rec = sessions.start(self.s, "desk")
+        self.assertEqual(rec["payload"]["harness_switch_skipped"]["landed"], "a94fde")
+        self.assertIsNone(self.argv_log(same))
+
+    def test_ancestry_decides_without_tags_and_overrides_a_later_tag(self):
+        current = self.checkout("r-current")  # untagged: ancestry alone decides
+        child = self.checkout("r-child", base=current)
+        sibling = self.checkout("r-sibling", base=current, at="HEAD~1")  # a sibling commit: does not contain current
+        self.assertTrue(up.release_order(current, child)["newer"])
+        order = up.release_order(current, sibling)
+        self.assertFalse(order["newer"])
+        self.assertIn("its history does not contain", order["reason"])
+        self.assertFalse(up.release_order(child, current)["newer"], "the parent is older")
+        # a later tag on a branch that does not contain the current release is still not newer
+        tagged_cur = self.checkout("t-current", tag="r2026.10.13-2")
+        stray = self.checkout("t-stray", base=tagged_cur, at="HEAD~1", tag="r2026.10.16-1")
+        self.assertIn("does not contain", up.release_order(tagged_cur, stray)["reason"])
+        # not a git checkout: never applied
+        plain = self.tmp / "plain"
+        (plain / "dureh_core").mkdir(parents=True)
+        self.assertEqual(up.release_order(current, plain)["newer"], False)
+        # --no-apply-landed still switches and skips nothing
+        self.pin(current)
+        self.landed(sibling)
+        rec = sessions.start(self.s, "desk", apply_landed=False)
+        self.assertNotIn("harness_switch_skipped", rec["payload"])
+        self.assertEqual(self.events(up.LANDED_SKIPPED), [])

@@ -612,13 +612,81 @@ def is_checkout(path: Path) -> bool:
     return (path / "dureh_core").is_dir() and os.access(path / "dureh", os.X_OK)
 
 
+RELEASE_TAG = re.compile(r"^r(\d{4})\.(\d{2})\.(\d{2})-(\d+)$")
+LANDED_SKIPPED = "harness.switch-skipped"  # release 70: a landed checkout not newer than the site's harness
+
+
+def _head(path: Path) -> str | None:
+    import subprocess
+
+    try:
+        proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=path, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout.strip() or None if proc.returncode == 0 else None
+
+
+def _release_key(tag: str | None) -> tuple | None:
+    m = RELEASE_TAG.match(tag or "")
+    return tuple(int(x) for x in m.groups()) if m else None
+
+
+def release_order(current: Path, candidate: Path) -> dict:
+    """Whether `candidate` is a strictly newer harness than `current` (release 70; on 2026-10-16 a site was switched
+    from r2026.10.15-3 back to r2026.10.13-2 because the newest landed message named it). Newer means: a different
+    revision; when both are release tags (rYYYY.MM.DD-N), a later tag; and, when git can tell, the candidate's
+    history contains the current revision. When ancestry cannot be decided (the current revision is not in the
+    candidate's repository) the tag order alone decides; with neither, it is not newer. Returns {newer, reason,
+    from, to} where from/to are the tag, else the short revision."""
+    import subprocess
+
+    from .util import git_tag
+
+    cur_rev, cand_rev = _head(current), _head(candidate)
+    cur_tag, cand_tag = git_tag(current), git_tag(candidate)
+    name = lambda tag, rev: tag or (rev[:7] if rev else "?")  # noqa: E731
+    out = {"from": name(cur_tag, cur_rev), "to": name(cand_tag, cand_rev), "from_rev": cur_rev, "to_rev": cand_rev}
+
+    def no(why: str) -> dict:
+        return {**out, "newer": False, "reason": f"{out['to']} is not newer than {out['from']} ({why})"}
+
+    if cand_rev is None:
+        return no("not a git checkout")
+    if cand_rev == cur_rev:
+        return no("same revision")
+    ck, kk = _release_key(cur_tag), _release_key(cand_tag)
+    if ck and kk and kk <= ck:
+        return no("release tag order")
+    ancestor = None
+    if cur_rev:
+        try:
+            proc = subprocess.run(["git", "merge-base", "--is-ancestor", cur_rev, cand_rev], cwd=candidate,
+                                  capture_output=True, text=True, timeout=60)
+            ancestor = {0: True, 1: False}.get(proc.returncode)
+        except (OSError, subprocess.SubprocessError):
+            ancestor = None
+    if ancestor is False:
+        return no(f"its history does not contain {cur_rev[:7]}")
+    if ancestor is None and not (ck and kk):
+        return no("neither commit ancestry nor release tags tell")
+    return {**out, "newer": True, "reason": f"{out['to']} is newer than {out['from']}"
+            + (" (contains it)" if ancestor else " (release tag order)")}
+
+
+def skipped_landed(site: Site) -> set[str]:
+    """Ids of landed messages a `session start` already skipped as not newer (release 70): never applied later."""
+    return {e["payload"].get("landed") for e in Ledger(site).events() if e["type"] == LANDED_SKIPPED}
+
+
 def pending_landed_checkout(site: Site) -> dict | None:
     """The release checkout the newest `landed` message in <exchange>/<mailbox>/from-upstream/ names
     (`adapter sync --harness <checkout>` in its body) when the site does not run it yet: `{"id", "file",
     "checkout", "created"}`, else None. None when no exchange is configured or reachable, when no landed message
     names a checkout, when the named path is not a checkout, and when it is already the site's pinned harness
     (config.json `harness.root`, what `bin/dureh` execs). Only the newest landed message that names a checkout
-    counts: an older landed message never pulls the site back to an older release. Read-only."""
+    counts: an older landed message never pulls the site back to an older release. Release 70: a landed message
+    that `session start` skipped as not newer (`harness.switch-skipped`) is consumed: it is never pending again.
+    Whether the checkout is newer is `release_order`'s question, asked by the caller. Read-only."""
     raw = (site.config.get("upstream") or {}).get("exchange")
     if not raw:
         return None
@@ -635,6 +703,8 @@ def pending_landed_checkout(site: Site) -> dict | None:
         if not checkout.is_dir() or not is_checkout(checkout):
             return None
         if checkout.resolve() == site.pinned_harness_root.resolve():
+            return None
+        if (h.get("id") or p.stem) in skipped_landed(site):
             return None
         return {"id": h.get("id") or p.stem, "file": p.name, "checkout": checkout, "created": h.get("created")}
     return None

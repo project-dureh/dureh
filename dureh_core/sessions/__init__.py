@@ -187,12 +187,17 @@ def start(site: Site, actor: str, purpose: str = "desk", force: bool = False, me
     is applied first unless `apply_landed` is False: that checkout's own `dureh --site <root> adapter sync`
     runs as a subprocess, `harness.switched` is recorded and the job is built from the re-read site, so the
     session boots on the new release (Director, 2026-10-06: the release goes on before the start, not by the
-    desk after it). A failed switch stops the start; nothing is submitted."""
+    desk after it). A failed switch stops the start; nothing is submitted. Release 70: only a strictly newer
+    release is applied (`upstream.release_order`); a landed checkout that is not newer is skipped, recorded as
+    `harness.switch-skipped` (consumed: never pending again) and named in the record (`harness_switch_skipped`)."""
     b = _build(site, purpose, prompt, no_prompt)
     if b["problems"] and workday.device_on(site, "session"):
         fail("the session cannot start here: " + "; ".join(b["problems"]))
     again = _second_start(site, workday.todays_session(Ledger(site).events()), purpose, force, memo)
     switched = _apply_landed(site, actor) if apply_landed else None
+    if switched and switched.get("skipped"):
+        again = {**again, "harness_switch_skipped": switched}
+        switched = None
     if switched:
         site = Site(site.root)  # config.json harness.root changed: the script must export the new checkout
         b = _build(site, purpose, prompt, no_prompt)
@@ -271,6 +276,14 @@ def _apply_landed(site: Site, actor: str) -> dict | None:
         return None
     old_root = site.pinned_harness_root
     checkout = pending["checkout"]
+    order = upstream.release_order(old_root, checkout)
+    if not order["newer"]:  # release 70: never a downgrade; the message is consumed by the record
+        payload = {"from": str(old_root), "to": str(checkout), "via": "session start", "landed": pending["id"],
+                   "landed_file": pending["file"], "reason": order["reason"], "from_release": order["from"],
+                   "to_release": order["to"], "from_rev": order["from_rev"], "to_rev": order["to_rev"]}
+        rec = Ledger(site).event(upstream.LANDED_SKIPPED, actor, None, payload)
+        return {"skipped": True, "landed": pending["id"], "to": str(checkout), "reason": order["reason"],
+                "record": rec["id"]}
     cmd = [str(checkout / "dureh"), "--site", str(site.root), "adapter", "sync"]
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=SWITCH_TIMEOUT, env=site.env())

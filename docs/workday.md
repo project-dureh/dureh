@@ -23,7 +23,14 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    job from the new checkout, so the session boots on the new release instead of the desk syncing after
    clock-in. A failed switch stops the start with the sync output; nothing is submitted. `session plan`
    prints a `will switch harness to ...` line when one is pending; `--no-apply-landed` boots on the current
-   harness. One session a day: a second `session start` on the same local day is refused while today's job
+   harness. **Never a downgrade (release 70).** On 2026-10-16 a start switched a site from r2026.10.15-3 back to
+   r2026.10.13-2 because the newest landed message named it. Now the checkout is applied only when it is strictly
+   newer than the pinned harness (`upstream.release_order`): a different revision; with release tags on both
+   (`rYYYY.MM.DD-N`), a later tag; and, when git can tell, a history that contains the current revision (when it
+   cannot, the tag order alone decides; with neither, it is not newer). Otherwise the start goes on with the
+   current harness, prints `skipped landed <id>: <to> is not newer than <from> (<why>)`, and records
+   `harness.switch-skipped` (from, to, landed id, reason; `harness_switch_skipped` on `session.started`). A skipped
+   message is consumed: it is never pending again. `session plan` prints `will skip landed ...` instead. One session a day: a second `session start` on the same local day is refused while today's job
    is still in squeue (the message names the job id; `--force --memo "why"` overrides and the record carries
    `force`). When that job is gone the start is a restart (`restart: true`, `previous`); either way the
    record's `day_start` keeps the first session's start, so the 8 hours do not begin again. An overtime

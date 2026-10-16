@@ -493,7 +493,10 @@ def cmd_site_session(a):
             from .util import harness_label
 
             pending = upstream.pending_landed_checkout(site)
-            if pending:
+            order = upstream.release_order(site.pinned_harness_root, pending["checkout"]) if pending else None
+            if pending and not order["newer"]:
+                print(f"will skip landed {pending['id']}: {order['reason']}; the site keeps its harness")
+            elif pending:
                 print(f"will switch harness to {harness_label(pending['checkout'])} at {pending['checkout']} "
                       f"(landed {pending['id']}) before submitting; the script above still names the current harness")
     elif a.action == "start":
@@ -501,6 +504,9 @@ def cmd_site_session(a):
                              apply_landed=not a.no_apply_landed)
         p = rec["payload"]
         line = ""
+        if p.get("harness_switch_skipped"):
+            sk = p["harness_switch_skipped"]
+            line = f"skipped landed {sk['landed']}: {sk['reason']}; recorded {sk['record']} (harness.switch-skipped). "
         if p.get("harness_switch"):
             hs = p["harness_switch"]
             line = (f"switched harness {hs['from_label']} -> {hs['to_label']} (landed {hs['landed']}); recorded "
