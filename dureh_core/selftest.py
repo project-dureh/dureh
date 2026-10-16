@@ -74,6 +74,40 @@ def tool_coverage(site: Site | None) -> list[str]:
     return [f"tool `{t}` is not referenced by any generated instruction" for t in missing]
 
 
+MAX_FAILED_TESTS, FAILED_TAIL_LINES, FAILED_LINE_CHARS = 10, 5, 300
+_SEP = "=" * 70
+
+
+def unit_failures(stderr: str) -> list[dict]:
+    """Release 71 (UR-20261016-02): each failing or erroring test of a unittest run, `{test, kind, tail}`: the test id
+    (module.Class.method), FAIL or ERROR, and the last FAILED_TAIL_LINES lines of its report (each at most
+    FAILED_LINE_CHARS characters). Every failure is listed; the caller bounds how many it keeps."""
+    import re
+
+    out = []
+    for block in stderr.split(_SEP)[1:]:
+        lines = block.strip("\n").splitlines()
+        if not lines:
+            continue
+        m = re.match(r"^(FAIL|ERROR): (\S+) \(([^)]+)\)", lines[0])
+        if not m:
+            continue
+        kind, method, where = m.groups()
+        test = where if where.endswith("." + method) else f"{where}.{method}"
+        body = []
+        for line in lines[1:]:
+            if line.startswith("-" * 70):
+                if body:  # the line under the traceback: the run's summary follows
+                    break
+                continue
+            body.append(line)
+        body = [ln.rstrip() for ln in body if ln.strip() and set(ln.strip()) - set("^~")]  # no caret markers
+        tail = [ln if len(ln) <= FAILED_LINE_CHARS else ln[:FAILED_LINE_CHARS - 3] + "..."
+                for ln in body[-FAILED_TAIL_LINES:]]
+        out.append({"test": test, "kind": kind, "tail": tail})
+    return out
+
+
 def run_self(site: Site | None, actor: str = "checker", unit: bool = True) -> dict:
     start = time.monotonic()
     problems: list[str] = []
@@ -90,6 +124,14 @@ def run_self(site: Site | None, actor: str = "checker", unit: bool = True) -> di
         counts["unit"] = {"exit": proc.returncode, "summary": " | ".join(tail)}
         if proc.returncode != 0:
             problems.append("unit tests failed: " + " | ".join(tail))
+            failed = unit_failures(proc.stderr)
+            kept = failed[:MAX_FAILED_TESTS]
+            for f in kept:  # release 71: name each failing test with the end of its report
+                problems.append(f"{f['kind']} {f['test']}: " + " | ".join(f["tail"]))
+            if len(failed) > len(kept):
+                problems.append(f"... and {len(failed) - len(kept)} more failing test(s)")
+            counts["unit"]["failures"] = kept
+            counts["unit"]["failed_tests"] = len(failed)
     if site is not None:
         from .install import package_warnings, validate_package
         from .ops import config_errors, config_warnings
