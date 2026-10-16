@@ -20,6 +20,9 @@ sessions). While on:
   the weekly allowance (default 1/7, all models including Fable), shared by every company and
   the upstream team.
 
+While off (release 70) `day plan`, `day approve` and `day end` still record the plan, its items, the Director's
+actions, the approval and the report, with `workday: false` and no hours: no clock, gate, overtime or budget.
+
 State is the event records (append-only); there is no other switch. The weekly allowance comes
 from the Director's calibration, kept in the shared exchange (`<exchange>/usage-budget.json`) when
 one is configured, so every site reads the same number, else in this site's records.
@@ -295,6 +298,11 @@ def day(site: Site, events: list[dict] | None = None) -> dict:
     if closed:
         return {**out, "phase": "off-duty", "reason": f"day closed {closed[-1]['ts']}"}
     mode = hours_mode(site)
+    on = enabled(site, all_evs)
+    if on:  # release 70: an approval recorded with workday mode off starts no clock; switched on, approve again
+        approved = [e for e in approved if not _unclocked(e)]
+    elif approved and _unclocked(approved[-1]):
+        return _unclocked_day(site, out, plan, approved[-1], ended)
     if not approved:
         if mode == "block" and out.get("end") and _now() >= _parse(out["end"]) and not ended:
             return {**out, "phase": "past-end", "reason": f"the day ended at {out['end']} (never approved); "
@@ -348,6 +356,21 @@ def day(site: Site, events: list[dict] | None = None) -> dict:
     if not out["working_day"]:
         return {**out, "phase": "overtime"}
     return {**out, "phase": "on-duty"}
+
+
+def _unclocked(approval: dict) -> bool:
+    """A `day.approved` record written with workday mode off (release 70): no start or end, `workday: false`."""
+    return (approval.get("payload") or {}).get("workday") is False
+
+
+def _unclocked_day(site: Site, out: dict, plan: dict, approval: dict, ended: list[dict]) -> dict:
+    """The day of a plan approved with workday mode off (release 70): no hours, no clock, no overtime; the plan, its
+    items, the Director's actions and the approval are on record; `on-duty` until `day end`, then `off-duty`."""
+    out.update(approval=approval["id"], plan_items=plan_items(plan), workday=False, approved_at=approval["ts"])
+    if ended:
+        return {**out, "report": ended[-1]["id"], "phase": "off-duty",
+                "reason": "end report written (workday mode off)"}
+    return {**out, "phase": "on-duty", "reason": "plan approved; workday mode off: no hours"}
 
 
 def plan_items(plan_event: dict) -> list[str]:
@@ -482,7 +505,12 @@ def status(site: Site) -> dict:
     switches = {"devices": dv["state"], "devices_off": [d for d in DEVICES if not dv["state"][d]],
                 "black_company": dv["black_company"]}
     if not enabled(site, evs):
-        return {"enabled": False, **switches}
+        out = {"enabled": False, **switches}
+        d = day(site, evs)
+        if d.get("plan") and d.get("date") == _now().date().isoformat():  # release 70: the plan without hours
+            out["day"] = {k: d[k] for k in ("phase", "reason", "plan", "date", "goal", "approval", "report",
+                                            "plan_items", "director_actions") if d.get(k) is not None}
+        return out
     out = {"enabled": True, "hours": settings(site)["hours"], "workday_phase": settings(site)["phase"], **switches,
            **day(site, evs)}
     out["urgent"] = _urgent(evs)
@@ -591,7 +619,16 @@ def banner(st: dict) -> str | None:
 def render(st: dict, with_banner: bool = True) -> str | None:
     head = banner(st) if with_banner else None
     if not st.get("enabled"):
-        return head
+        dd = st.get("day")
+        if not dd:
+            return head
+        # release 70: today's plan recorded with workday mode off (no hours, no clock)
+        line = f"Day (workday mode off): {dd['phase']}, plan {dd['plan']}" + (
+            f", approved {dd['approval']}" if dd.get("approval") else "") + (
+            f", end report {dd['report']}" if dd.get("report") else "") + (f"; {dd['reason']}" if dd.get("reason") else "")
+        if dd.get("director_actions"):
+            line += "\n" + director_actions_text(dd["director_actions"])
+        return f"{head}\n{line}" if head else line
     line = f"Workday: {st['phase']}"
     if st.get("workday_phase") and st["workday_phase"] != "production":
         line += f" [{st['workday_phase']} phase]"
@@ -806,12 +843,18 @@ def plan(site: Site, actor: str, goal: str, text: str, items: list[str] | None =
     every WI id the text names: the finish-plan rule reads them (`plan_items`). `director_actions` (release 58,
     `--director-action`, repeatable) lists every action only the Director can take today (a dataset link, a push
     approval, a config change); `slack ask --kind day-plan` posts them so the Director handles them in one go."""
-    _require_on(site)
     if not goal.strip() or not text.strip():
         fail("a day plan needs --goal and the plan text")
+    on = enabled(site)  # release 70: with workday mode off the plan is recorded the same way, without hours
     d = day(site)
-    if d["phase"] in ("on-duty", "past-end"):
+    if on and d["phase"] in ("on-duty", "past-end"):
         fail(f"the current day ({d['plan']}) is still open; write its end report first")
+    supersedes = None
+    if not on and d.get("plan") and d["phase"] != "off-duty":
+        if d.get("approval") and d.get("date") == _now().date().isoformat():
+            fail(f"today's plan {d['plan']} is approved and open; write its end report (`dureh day end`) or close the"
+                 " day (`dureh day close`) first")
+        supersedes = d["plan"]  # an unapproved plan, or an earlier day's: no clock to protect
     led = Ledger(site)
     for w in items or []:
         led.get("work-item", w)
@@ -823,7 +866,11 @@ def plan(site: Site, actor: str, goal: str, text: str, items: list[str] | None =
     if actions:
         payload["director_actions"] = actions
     payload["titles"] = _titles(led, plan_items({"payload": payload}))  # UR-20261008-02
-    return led.event("day.planned", actor, None, payload)
+    if not on:
+        payload["workday"] = False
+        if supersedes:
+            payload["supersedes"] = supersedes
+    return led.event("day.planned", actor, None, payload, [supersedes] if supersedes else None)
 
 
 def _titles(led: Ledger, wis) -> dict[str, str]:
@@ -835,12 +882,16 @@ def _titles(led: Ledger, wis) -> dict[str, str]:
 def approve(site: Site, actor: str, memo: str, via: str | None = None, extra: dict | None = None) -> dict:
     """Record the Director's approval of the day plan. The desk records the Director's words from the session;
     `via="slack"` is used only by `dureh slack check` after the Director's own ✅ reaction (release 33)."""
-    _require_on(site)
     if not memo.strip():
         fail("--memo must carry the Director's words")
     d = day(site)
     if d["phase"] != "planned":
         fail(f"no day plan waits for approval (phase {d['phase']})")
+    if not enabled(site):  # release 70: the approval is recorded without hours; no clock starts
+        payload = {"memo": memo, "by": "Director", "session": d.get("session"), "workday": False}
+        if via:
+            payload.update(extra or {}, via=via)
+        return Ledger(site).event("day.approved", actor, None, payload, [d["plan"]])
     # the clock runs from the session dureh started today; approval covers the plan's content
     start, end = clock(site, todays_session(_events(site)), _now())
     if hours_mode(site) == "block" and _now() >= _parse(end):
@@ -905,11 +956,18 @@ def decide(site: Site, actor: str, title: str, choice: str, why: str, revs: list
 
 
 def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], early: str = "") -> dict:
-    _require_on(site)
+    """The end report. With workday mode off (release 70) it ends a plan approved without hours: no clock, so
+    no early-end or finish-plan refusal; the report carries `workday: false` and no start or end."""
     d = day(site)
     if d.get("report") or d["phase"] not in ("on-duty", "past-end", "overtime"):
         fail(f"no open day to end (phase {d['phase']})")
-    if d["phase"] in ("on-duty", "overtime") and not d.get("hours_exceeded") and hours_mode(site) and not early.strip():
+    on = enabled(site)
+    if not on and d.get("workday") is not False:
+        _require_on(site)  # a clocked day of a site switched off since: as before
+    if not on and overtime:
+        fail("workday mode is off: there is no overtime to propose (--overtime needs workday mode)")
+    if on and d["phase"] in ("on-duty", "overtime") and not d.get("hours_exceeded") and hours_mode(site) \
+            and not early.strip():
         fail(f"the day runs to {d['end']}; stay on duty even when idle (propose next work, watch upstream messages)."
              " End early only on the Director's word: --early \"<Director's words>\"")
     evs = _events(site)
@@ -932,8 +990,8 @@ def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], e
               "decisions": d["decisions"], "provisional": provisional(d["decisions"]), "waiting": waiting(d["decisions"]),
               "start": d.get("start"), "end": d.get("end"), "ended_at": _ts(_now()),
               "session": d.get("session"), "working_day": d.get("working_day", True),
-              "early": early or None, "usage": u, "heads": heads(site)}
-    past = past_end_section(site, d, stop, early)
+              "early": early or None, "usage": u, "heads": heads(site), **({} if on else {"workday": False})}
+    past = past_end_section(site, d, stop, early) if on else None
     if past:
         report["past_end"] = past
     from .ops import day_jobs
@@ -949,6 +1007,8 @@ def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], e
     named += [x["wi"] for x in (past or {}).get("items", []) + (past or {}).get("director", [])]
     report["titles"] = _titles(led, named)  # UR-20261008-02
     rec = led.event("day.ended", actor, None, report, [d["plan"]])
+    if not on:
+        return {**rec, "next": "give the Director this report, then `dureh day close`"}
     return {**rec, "next": "give the Director this report; record accepted overtime with "
                            "`dureh day overtime --items ... --memo \"<Director's words>\"`, else `dureh day close`"}
 
@@ -1081,13 +1141,18 @@ def close(site: Site, actor: str, note: str, cancel_now: bool = False) -> dict:
     false releases nothing (unless `cancel_now` asks for it explicitly). With workday mode off (release 67,
     after 10-15 at a site without it: the close was refused and the job was scancelled by hand) there is no
     plan or end report to wait for: the idle and handoff checks still apply, the handoff must postdate the
-    running session's start (when one is recorded), `day.closed` carries `workday: false` and no plan ref,
-    and the session is released the same way."""
+    running session's start (when one is recorded), `day.closed` carries `workday: false`, and the session is
+    released the same way; it references today's plan (release 70: `day plan` with the mode off) when one is
+    recorded and the day is not closed yet, else nothing."""
     from .ops import status as site_status
     from .upstream import _live_agents
 
     on = enabled(site)  # release 67: workday mode off has no plan or end report; the close still checks and releases
-    d = day(site) if on else None
+    d = day(site)
+    # release 70: with workday mode off the close references today's plan (`day plan` with the mode off) when one is
+    # recorded and not closed yet; none needs to exist
+    plan_ref = d["plan"] if on else (d["plan"] if d.get("plan") and d.get("date") == _now().date().isoformat()
+                                      and not str(d.get("reason", "")).startswith("day closed") else None)
     if on and (d["phase"] not in ("overtime", "off-duty") or not d.get("report")):
         fail(f"close a day after its end report (phase {d['phase']})")
     from .ops import external_jobs, render_external
@@ -1121,7 +1186,8 @@ def close(site: Site, actor: str, note: str, cancel_now: bool = False) -> dict:
         extra = {"external_jobs": ext}
     rec = led.event("day.closed", actor, None, {"note": note, "idle": checked or None, "checked": checked,
                                                "handoff": str(handoff), **({} if on else {"workday": False}),
-                                               **extra}, [d["plan"]] if on else None)
+                                               **({"plan": plan_ref} if plan_ref and not on else {}),
+                                               **extra}, [plan_ref] if plan_ref else None)
     if extra:
         rec = {**rec, "warning": f"{render_external(ext)}. They keep running after the close; cancel any that"
                                  " should not (they are not the harness's to end)."}

@@ -166,6 +166,26 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    runs with the mode off: there is no plan or end report to wait for; the idle and handoff checks still apply
    (session device on), the handoff must be newer than the running session's `session.started` (when one is
    recorded), `day.closed` carries `workday: false` and no plan ref, and the job is released the same way.
+   When a plan was recorded today with the mode off (below), and the day is not closed yet, `day.closed`
+   references it (`refs` and `plan`), whether or not `day end` was written.
+
+### Workday mode off: the plan without hours (release 70)
+
+`day plan` was refused with the mode off ("workday mode is off"), so a site without workday mode had no
+recorded plan, items or Director actions. Now, with the mode off:
+
+- `day plan` records `day.planned` as with the mode on (goal, text, `items`, `director_actions`, titles, heads,
+  usage) plus `workday: false`. A plan of an earlier day, or one not yet approved, is replaced by the new one
+  (`supersedes`, and a ref); today's approved plan must be ended (`day end`) or the day closed first.
+- `day approve` (or the Director's Slack ✅, or the silence rule through `slack ask --kind day-plan`) records
+  `day.approved` with the Director's words and `workday: false`, and no start or end: no clock starts, nothing is
+  gated, there is no overtime and no finish-plan rule. `day status` and `dureh status` show a
+  `Day (workday mode off): <phase>, plan <id>[, approved <id>]` line and the Director actions.
+- `day end` writes the end report without any hours check (`--early` is not needed; `--overtime` is refused):
+  `day.ended` with `workday: false` and no start or end. `day close` does not need it.
+- `day decide`, `day overtime`, `day overtime-plan` and `day urgent` stay workday-mode commands.
+- When the Director switches the mode on later that day, an approval recorded with the mode off does not count:
+  the day is `planned` again and `day approve` starts the clock as usual.
 
 ### Closing the session job (release 39)
 

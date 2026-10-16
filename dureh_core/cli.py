@@ -1254,7 +1254,7 @@ def parser() -> argparse.ArgumentParser:
                    help="an action only the Director can take today (a dataset link, a push approval, a config "
                         "change; repeatable, release 58): recorded as director_actions and posted by `slack ask "
                         "--kind day-plan` under 대표님 조치 필요 so the Director handles them in one go at approval")
-    x = add(dy, "approve", cmd_day, "record the Director's approval of the plan; starts the clock")
+    x = add(dy, "approve", cmd_day, "record the Director's approval of the plan; starts the clock (workday mode on)")
     x.add_argument("--memo", required=True)
     x = add(dy, "decide", cmd_day, "record a decision point (own proposal followed) and commit state as a rollback point")
     x.add_argument("--title", required=True)

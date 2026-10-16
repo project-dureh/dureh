@@ -660,12 +660,14 @@ def _claude_md(site: Site) -> str:
               f" stop every Monitor and background task, write the handoff, run `{dureh} day close` (it checks that nothing runs and the handoff is fresh), then do nothing."
               " `day plan` and `day end` record the heads of every module and project and of state, so any day's start or end is a rollback point."
               " Talk to the Director at the start and the end of the day; between them only for data at risk. `dureh day status` shows the phase and usage (account total and this site's part);"
-              " the usage budget is shared by every company and upstream, so check it before each work item.",
+              " the usage budget is shared by every company and upstream, so check it before each work item."
+              f" With workday mode off (no `Workday:` line) `{dureh} day plan`, `day approve` and `day end` still record the plan, its items, the Director actions,"
+              " the approval and the report, without hours: no clock, no gate, no overtime (release 70).",
               _slack_rule(site, dureh),
               _github_rule(site, dureh),
               f"13. Ending the day, in this order: first stop every Monitor and background task (TaskStop; nothing may still be running or writing);"
               " then write a short handoff to `state/memory/handoff.md` (what is open, what the Director decided, what is next);"
-              f" then run `{dureh} day close` (with workday mode off it has no end report to wait for, still checks that nothing runs and the handoff is fresh, and releases the session the same way; release 67)."
+              f" then run `{dureh} day close` (with workday mode off it has no end report to wait for, still checks that nothing runs and the handoff is fresh, references today's day plan when one was recorded, and releases the session the same way; release 67, 70)."
               " After it, do nothing: the session job sends `/exit` to this session within about 20 s and ends by itself;"
               " never scancel your own job.", "",
               "Small questions the Director asks may be answered directly." + _research_text(org),

@@ -882,6 +882,104 @@ class Workday(SiteCase):
         self.assertNotIn("workday", rec["payload"])
         self.assertEqual(len(rec["refs"]), 1, "the day plan is referenced")
 
+    # ------------------------------------------------------------ day plan with workday mode off (release 70)
+    def _plan_off(self, approve=True):
+        rec = workday.plan(self.s, "desk", "finish W", "1. W", [self.wi], ["link the dataset"])
+        return rec, (workday.approve(self.s, "desk", "승인") if approve else None)
+
+    def test_plan_with_workday_off_records_items_actions_and_approval(self):
+        self.assertFalse(workday.enabled(self.s))
+        plan, appr = self._plan_off()
+        self.assertEqual(plan["type"], "day.planned")
+        self.assertIs(plan["payload"]["workday"], False)
+        self.assertEqual((plan["payload"]["items"], plan["payload"]["director_actions"]), ([self.wi], ["link the dataset"]))
+        self.assertIn("heads", plan["payload"])
+        self.assertEqual(appr["type"], "day.approved")
+        self.assertEqual(appr["refs"], [plan["id"]])
+        self.assertIs(appr["payload"]["workday"], False)
+        self.assertEqual(appr["payload"]["by"], "Director")
+        self.assertNotIn("start", appr["payload"], "no hours: no clock starts")
+        self.assertNotIn("end", appr["payload"])
+        d = workday.day(self.s)
+        self.assertEqual((d["phase"], d["plan"], d["approval"], d["plan_items"], d["workday"]),
+                         ("on-duty", plan["id"], appr["id"], [self.wi], False))
+        self.assertIsNone(self.spawn(), "workday mode off: no gate")
+        st = workday.status(self.s)
+        self.assertFalse(st["enabled"])
+        self.assertEqual((st["day"]["plan"], st["day"]["approval"]), (plan["id"], appr["id"]))
+        text = render_status(status(self.s))
+        self.assertIn(f"Day (workday mode off): on-duty, plan {plan['id']}, approved {appr['id']}", text)
+        self.assertIn("link the dataset", text)
+        with self.assertRaisesRegex(DurehError, "no day plan waits for approval"):
+            workday.approve(self.s, "desk", "again")
+        with self.assertRaisesRegex(DurehError, "workday mode is off"):
+            workday.overtime(self.s, "desk", [self.wi], "ok")
+
+    def test_end_and_close_with_workday_off_reference_the_plan(self):
+        plan, _ = self._plan_off()
+        with self.assertRaisesRegex(DurehError, "no overtime to propose"):
+            workday.end(self.s, "desk", "done", "", [self.wi])
+        rep = workday.end(self.s, "desk", "W done", "none", [])  # no clock: no --early needed
+        self.assertEqual(rep["type"], "day.ended")
+        self.assertIs(rep["payload"]["workday"], False)
+        self.assertIsNone(rep["payload"]["start"])
+        self.assertNotIn("past_end", rep["payload"])
+        self.assertEqual(rep["refs"], [plan["id"]])
+        self.assertEqual(workday.day(self.s)["phase"], "off-duty")
+        with self.assertRaisesRegex(DurehError, "no open day to end"):
+            workday.end(self.s, "desk", "again", "", [])
+        self._closable_off()
+        rec = workday.close(self.s, "desk", "done")
+        self.assertIs(rec["payload"]["workday"], False)
+        self.assertEqual((rec["refs"], rec["payload"]["plan"]), ([plan["id"]], plan["id"]))
+
+    def test_close_with_workday_off_references_an_unended_plan_of_today_only(self):
+        self._plan_off()
+        self.at(T0 + timedelta(days=1))
+        self._closable_off()
+        rec = workday.close(self.s, "desk", "done")
+        self.assertEqual(rec["refs"], [], "yesterday's plan is not today's")
+        self.assertNotIn("plan", rec["payload"])
+        self.at(T0 + timedelta(days=2))
+        plan, _ = self._plan_off()
+        self._closable_off()
+        rec = workday.close(self.s, "desk", "done")  # day end is not required with workday mode off
+        self.assertEqual(rec["refs"], [plan["id"]])
+
+    def test_plan_with_workday_off_replaces_an_unapproved_or_old_plan(self):
+        first, _ = self._plan_off(approve=False)
+        second, _ = self._plan_off(approve=False)
+        self.assertEqual((second["payload"]["supersedes"], second["refs"]), (first["id"], [first["id"]]))
+        workday.approve(self.s, "desk", "승인")
+        with self.assertRaisesRegex(DurehError, "approved and open; write its end report"):
+            self._plan_off(approve=False)
+        self.at(T0 + timedelta(days=1))
+        third, _ = self._plan_off(approve=False)
+        self.assertEqual(third["payload"]["supersedes"], second["id"])
+
+    def test_plan_approved_with_workday_off_needs_a_clocked_approval_once_switched_on(self):
+        plan, _ = self._plan_off()
+        workday.switch(self.s, True, "trial")
+        d = workday.day(self.s)
+        self.assertEqual((d["phase"], d["plan"]), ("planned", plan["id"]))
+        self.assertTrue(denied(self.spawn()), "the gate holds until the clock starts")
+        appr = workday.approve(self.s, "desk", "승인")
+        self.assertEqual((appr["payload"]["start"], appr["payload"]["end"]),
+                         ("2026-10-03T09:00:00-04:00", "2026-10-03T17:00:00-04:00"))
+        self.assertNotIn("workday", appr["payload"])
+        self.assertEqual(workday.day(self.s)["phase"], "on-duty")
+        self.assertIsNone(self.spawn())
+
+    def test_plan_with_workday_on_is_unchanged(self):
+        self.start_day()
+        plan = [e for e in Ledger(self.s).events() if e["type"] == "day.planned"][-1]
+        appr = [e for e in Ledger(self.s).events() if e["type"] == "day.approved"][-1]
+        self.assertNotIn("workday", plan["payload"])
+        self.assertNotIn("workday", appr["payload"])
+        self.assertIn("start", appr["payload"])
+        with self.assertRaisesRegex(DurehError, "still open; write its end report first"):
+            workday.plan(self.s, "desk", "again", "1. W")
+
     def test_session_off_skips_start_and_close_checks(self):
         self.start_day()
         self.assertIsNone(self.spawn())
