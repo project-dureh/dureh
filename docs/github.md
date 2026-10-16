@@ -66,7 +66,7 @@ Every `gh` call goes through one runner that reads the token at call time and pa
 | command | who | what |
 |---|---|---|
 | `github status [--json]` | anyone; allowed with `--observe` | the board's items grouped by Status, each with its Decision, Project and Layer |
-| `github watch [--interval 30] [--once]` | desk, as a Monitor in working hours | one line per Decision change and per new comment not marked as the desk's; nothing else |
+| `github watch [--interval 30] [--once]` | desk, as a Monitor in working hours | one line per Decision change, per new comment and per newly opened issue not marked as the desk's; nothing else |
 | `github item add --wi WI [--status S] [--project P] [--layer 1-3] [--units N] [--repo R \| --url U]` | desk | an issue for the work item (its title and goal only) in `office_repo` or `--repo` (or the existing issue `--url`), added to the board with its fields |
 | `github item set (--wi WI \| --url U) [--status] [--project] [--layer] [--units] [--decision]` | desk | change a linked item's fields; `--decision` only on a layer 1-2 item |
 | `github item ask --title T --body-file F [--options O1 O2 O3] [--layer 3] [--wi WI] [--project P]` | desk | a decision ask: a `kind:decision` issue with the options and the Decision line; layer 3: assigned to `director_login`, Status Waiting for Director |
@@ -77,16 +77,29 @@ carry it.
 
 ### Watch
 
-`watch` polls the board every `--interval` seconds (at least 5) with one GraphQL query (paged by 100 items) and prints
+`watch` polls the board every `--interval` seconds (at least 5) with one GraphQL query (paged by 100 items), then the
+open issues of the organization's repositories (release 71: `office_repo` always; every unarchived repository the
+token can list, up to 100 repositories and the newest 50 open issues each, when it can), and prints
 
 ```
 decision: office#12 WI-0007 example item -> Option 1 (was none) [layer 3] https://github.com/example-org/office/issues/12
 comment: office#12 by example-director: please also check the edge case https://github.com/example-org/office/issues/12#issuecomment-1
+work request office#14 by example-director: rerun the example analysis | https://github.com/example-org/office/issues/14
+issue example-project#3 by example-director: the plot axis is wrong | https://github.com/example-org/example-project/issues/3
 ```
+
+A newly opened issue whose body carries the desk marker is not reported. An issue labelled `kind:request` (the
+office repository's "일 요청 · Work request" issue template) is a **work request** from the Director: the desk creates
+or picks the work item, links the issue with `item add --wi WI --url <issue url>` (desk rule 12a), and replies on the
+issue with `item comment --url <issue url>` when work starts. Every reported issue is recorded as
+`github.issue.opened` `{issue_id, repo, number, url, author, request, created}`.
 
 The last seen Decision of every item and the comment ids already seen are kept in `cache/github/watch.json` under the
 site (a runtime cache, not a record; deleting it only makes the next poll a first poll). A first poll reports the
-Decisions already set and takes the existing comments as seen. A failed `gh` call (network, rate limit) skips that
+Decisions already set and takes the existing comments as seen. The ids of the issues already seen and the repositories
+already scanned are kept there too: a restart does not report an issue again; a first poll (or a repository scanned
+for the first time) takes its open issues as seen, except those opened after the last saved poll time, so an issue
+opened while no watch ran is still reported once. A failed `gh` call (network, rate limit) skips that
 poll; the next one sees the same changes. Each Decision change is recorded as `github.decision.changed`
 `{item_id, url, from, to, layer, first_poll}` (with the WI when the item is linked).
 
@@ -102,5 +115,6 @@ GitHub does not report who changed a field value; the Decision column's authorit
 | `github.ask.created` | `{url, repo, number, item_id, layer, options, assignee, fields, chars}` (the WI when given) |
 | `github.comment.posted` | `{url, chars}` |
 | `github.decision.changed` | `{item_id, url, from, to, layer, first_poll}` |
+| `github.issue.opened` | `{issue_id, repo, number, url, author, request, created}` |
 
 No record carries issue or comment text. `github.*` events are written only by `dureh github` (`event add` refuses them).

@@ -1399,9 +1399,10 @@ def parser() -> argparse.ArgumentParser:
                          "board items").add_subparsers(dest="github_command", required=True)
     x = add(gp, "status", cmd_github, "the board's items grouped by Status, with Decision, Project and Layer; read-only")
     x.add_argument("--json", action="store_true")
-    x = add(gp, "watch", cmd_github, "desk: poll the board; print one line per Decision change and per new comment not "
-                                     "marked as the desk's, nothing else (for Monitor); a failed poll is skipped; "
-                                     "records github.decision.changed")
+    x = add(gp, "watch", cmd_github, "desk: poll the board and the organization's open issues; print one line per "
+                                     "Decision change, per new comment and per newly opened issue (a kind:request one "
+                                     "is a work request) not marked as the desk's, nothing else (for Monitor); a failed "
+                                     "poll is skipped; records github.decision.changed and github.issue.opened")
     x.add_argument("--interval", type=float, default=30, help="seconds between polls (default 30, at least 5)")
     x.add_argument("--once", action="store_true", help="one poll, then exit")
     x.add_argument("--actor")

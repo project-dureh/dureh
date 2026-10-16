@@ -4,6 +4,7 @@ import io
 import json
 import os
 import subprocess
+import time
 import unittest
 from contextlib import redirect_stdout
 from unittest import mock
@@ -47,11 +48,24 @@ def node(item_id, number, title, status=None, decision=None, layer=None, comment
                                                for cid, who, body in comments]}}}
 
 
+def issue(iid, number, title, author="example-director", created="2026-10-16T12:00:00Z", body="", labels=(),
+          repo="office"):
+    return {"id": iid, "number": number, "title": title, "url": f"https://github.com/{ORG}/{repo}/issues/{number}",
+            "createdAt": created, "body": body, "author": {"login": author},
+            "labels": {"nodes": [{"name": n} for n in labels]}}
+
+
 class FakeGh:
-    """Answers the gh commands the harness uses, from an in-memory board."""
+    """Answers the gh commands the harness uses, from an in-memory board and in-memory repositories."""
 
     def __init__(self):
         self.calls, self.items, self.next_issue, self.fail_next = [], [], 10, None
+        self.repos = {"office": []}  # repository name -> open issues (newest first, as GitHub orders them)
+        self.org_listable = True
+
+    def _repo_node(self, name):
+        return {"nameWithOwner": f"{ORG}/{name}", "isArchived": False,
+                "issues": {"nodes": sorted(self.repos[name], key=lambda i: i["createdAt"], reverse=True)}}
 
     def __call__(self, argv, env, input_text, timeout):
         self.calls.append({"argv": argv, "env": env, "input": input_text})
@@ -61,6 +75,16 @@ class FakeGh:
         a = argv[1:]
         if a[:2] == ["api", "graphql"]:
             req = json.loads(input_text)
+            if "repository(owner" in req["query"]:
+                name = req["variables"]["repo"]
+                repo = self._repo_node(name) if name in self.repos else None
+                return subprocess.CompletedProcess(argv, 0, json.dumps({"data": {"repository": repo}}), "")
+            if "repositories(" in req["query"]:
+                if not self.org_listable:
+                    return subprocess.CompletedProcess(argv, 0, json.dumps(
+                        {"data": None, "errors": [{"message": "Resource not accessible by personal access token"}]}), "")
+                org = {"repositories": {"nodes": [self._repo_node(n) for n in self.repos]}}
+                return subprocess.CompletedProcess(argv, 0, json.dumps({"data": {"organization": org}}), "")
             proj = {"id": "PVT_1", "title": "Example board", "fields": {"nodes": FIELDS},
                     "items": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": self.items}}
             return subprocess.CompletedProcess(argv, 0, json.dumps({"data": {"organization": {"projectV2": proj}}})
@@ -255,6 +279,56 @@ class Watch(GithubBase):
         self.assertEqual(len(got), 1)
         self.assertEqual(slept, [5.0])
 
+    def test_new_issues_are_reported_once(self):
+        self.gh.repos["office"] = [issue("IS1", 1, "old issue", created="2026-01-01T00:00:00Z")]
+        self.gh.repos["example-project"] = [issue("IS2", 4, "old project issue", created="2026-01-01T00:00:00Z",
+                                                  repo="example-project")]
+        self.assertEqual(self.lines(), [])  # the first poll takes existing open issues as seen
+        self.gh.repos["office"].append(issue("IS3", 2, "please run the\nnew analysis", labels=["kind:request"]))
+        self.gh.repos["office"].append(issue("IS4", 3, "desk issue", author="desk-bot", body=f"x\n{github.DESK_MARK}"))
+        self.gh.repos["example-project"].append(issue("IS5", 5, "a bug", author="someone", repo="example-project"))
+        got = self.lines()
+        self.assertEqual(got, [f"work request office#2 by example-director: please run the new analysis | "
+                               f"https://github.com/{ORG}/office/issues/2",
+                               f"issue example-project#5 by someone: a bug | "
+                               f"https://github.com/{ORG}/example-project/issues/5"])
+        opened = self.events(github.OPENED)
+        self.assertEqual([(e["payload"]["number"], e["payload"]["request"], e["payload"]["repo"]) for e in opened],
+                         [(2, True, f"{ORG}/office"), (5, False, f"{ORG}/example-project")])
+        self.assertTrue(all("title" not in e["payload"] and "body" not in e["payload"] for e in opened))
+        self.assertEqual(self.lines(), [])
+        code, out, _ = self.run_cli("watch", "--once")  # a restart: nothing again
+        self.assertEqual((code, out), (0, ""))
+        state = json.loads(github.state_path(self.site()).read_text())
+        self.assertEqual(sorted(state["issues"]), ["IS1", "IS2", "IS3", "IS4", "IS5"])
+
+    def test_issues_opened_while_no_watch_ran_are_reported(self):
+        self.lines()
+        state_file = github.state_path(self.site())
+        state = json.loads(state_file.read_text())
+        for k in ("issues", "issue_repos", "polled_utc"):  # a state saved before release 71
+            state.pop(k, None)
+        state["polled"] = "2026-10-16T10:00:00"
+        state_file.write_text(json.dumps(state))
+        self.gh.repos["office"] = [issue("IS1", 1, "before", created="2026-10-16T09:00:00Z"),
+                                   issue("IS2", 2, "after", created="2026-10-16T11:00:00Z")]
+        with mock.patch.dict(os.environ, {"TZ": "UTC"}):
+            time.tzset()
+            got = self.lines()
+        time.tzset()
+        self.assertEqual(got, [f"issue office#2 by example-director: after | https://github.com/{ORG}/office/issues/2"])
+
+    def test_office_only_when_the_org_cannot_be_listed(self):
+        self.gh.org_listable = False
+        self.gh.repos["example-project"] = []
+        self.lines()
+        self.gh.repos["office"].append(issue("IS1", 1, "new"))
+        self.gh.repos["example-project"].append(issue("IS2", 2, "hidden", created="2026-01-01T00:00:00Z",
+                                                      repo="example-project"))
+        self.assertEqual(self.lines(), [f"issue office#1 by example-director: new | https://github.com/{ORG}/office/issues/1"])
+        self.gh.org_listable = True  # listed later: issues it already had count as seen, newer ones are reported
+        self.assertEqual(self.lines(), [])
+
     def test_only_the_desk_watches(self):
         with self.assertRaises(DurehError):
             github.watch(self.site(), "py-writer", polls=1)
@@ -371,6 +445,8 @@ class DeskText(GithubBase):
         self.assertIn("github item add --wi <WI>", text)
         self.assertIn("github watch` as a Monitor", text)
         self.assertIn("Decision column", text)
+        self.assertIn("A `work request` line", text)
+        self.assertIn("github item add --wi <WI> --url <issue url>", text)
 
     def test_rule_when_off(self):
         self.set_config({"enabled": False})

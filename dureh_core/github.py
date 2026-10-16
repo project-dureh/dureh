@@ -9,7 +9,11 @@ Organization, board, office repository and token file come only from site config
 changes them. Every `gh` call goes through `gh()`, which reads the fine-grained token from its file (mode 600) at call
 time and passes it to the subprocess as GH_TOKEN only: the token is never printed, logged, put on a command line or
 recorded. Records carry ids, URLs and counts (`github.item.added`, `github.item.updated`, `github.ask.created`,
-`github.comment.posted`, `github.decision.changed`), never text."""
+`github.comment.posted`, `github.decision.changed`, `github.issue.opened`), never text.
+
+Release 71: `watch` also reports every newly opened issue in the organization's repositories (the office repository
+always, every repository the token can list when it can) that the desk did not write; a `kind:request` issue (the
+"일 요청 · Work request" template) is a work request."""
 from __future__ import annotations
 
 import json
@@ -28,6 +32,7 @@ KEYS = ("enabled", "org", "project", "office_repo", "token_file", "director_logi
 DEFAULT_OFFICE = "office"
 DESK_MARK = "<!-- dureh-desk -->"
 DECISION_LABEL = "kind:decision"
+REQUEST_LABEL = "kind:request"
 STATUSES = ("Backlog", "Today", "In progress", "Waiting for Director", "Done")
 DECISIONS = ("Approved", "Option 1", "Option 2", "Option 3", "Rejected", "Later")
 LAYERS = {1: "company", 2: "DUREH", 3: "Director"}
@@ -41,6 +46,7 @@ NO_CONFIG = ("GitHub is not configured for this site: the Director/DUREH set `gi
              "({enabled, org, project, office_repo?, token_file, director_login?}; see docs/github.md)")
 ADDED, UPDATED, ASKED, COMMENTED, DECIDED = ("github.item.added", "github.item.updated", "github.ask.created",
                                             "github.comment.posted", "github.decision.changed")
+OPENED = "github.issue.opened"
 
 
 class GhError(DurehError):
@@ -326,11 +332,98 @@ def _linked(site: Site) -> dict[str, dict]:
     return out
 
 
+_ISSUE = ("issues(first: 50, states: OPEN, orderBy: {field: CREATED_AT, direction: DESC}) { nodes {"
+          " id number title url createdAt body author { login } labels(first: 20) { nodes { name } } } }")
+OFFICE_ISSUES_QUERY = ("query($org: String!, $repo: String!) { repository(owner: $org, name: $repo) {"
+                       " nameWithOwner %s } }" % _ISSUE)
+ORG_ISSUES_QUERY = ("query($org: String!) { organization(login: $org) { repositories(first: 100,"
+                    " orderBy: {field: PUSHED_AT, direction: DESC}) { nodes { nameWithOwner isArchived %s } } } }"
+                    % _ISSUE)
+MAX_SEEN_ISSUES = 5000
+
+
+def _parse_issues(repo_node: dict) -> list[dict]:
+    repo = repo_node.get("nameWithOwner")
+    out = []
+    for n in (repo_node.get("issues") or {}).get("nodes") or []:
+        if not n or not n.get("id"):
+            continue
+        out.append({"id": n["id"], "repo": repo, "number": n.get("number"), "title": n.get("title") or "",
+                    "url": n.get("url"), "created": n.get("createdAt") or "", "body": n.get("body") or "",
+                    "author": (n.get("author") or {}).get("login"),
+                    "labels": [lab.get("name") for lab in (n.get("labels") or {}).get("nodes") or [] if lab]})
+    return out
+
+
+def open_issues(cfg: dict) -> tuple[dict[str, list[dict]], bool]:
+    """({repo: [open issue]}, org_listed): the office repository's open issues (required; a failure raises GhError)
+    and, when the token can list them, those of every other unarchived repository of the organization."""
+    data = graphql(cfg, OFFICE_ISSUES_QUERY, {"org": cfg["org"], "repo": cfg["office_repo"]})
+    office = data.get("repository")
+    if not office:
+        raise GhError(f"repository {cfg['org']}/{cfg['office_repo']} is not readable with the token")
+    repos = {office.get("nameWithOwner") or f"{cfg['org']}/{cfg['office_repo']}": _parse_issues(office)}
+    try:
+        org = graphql(cfg, ORG_ISSUES_QUERY, {"org": cfg["org"]}).get("organization") or {}
+    except GhError:
+        return repos, False  # the token may not list the organization's repositories: the office repository only
+    for r in (org.get("repositories") or {}).get("nodes") or []:
+        if r and r.get("nameWithOwner") and not r.get("isArchived") and r["nameWithOwner"] not in repos:
+            repos[r["nameWithOwner"]] = _parse_issues(r)
+    return repos, True
+
+
+def _utc_stamp(old: dict | None) -> str | None:
+    """The last saved poll time as UTC `YYYY-MM-DDTHH:MM:SSZ` (older states saved local time without a zone)."""
+    if not old:
+        return None
+    if old.get("polled_utc"):
+        return old["polled_utc"]
+    try:
+        t = time.mktime(time.strptime(old.get("polled") or "", "%Y-%m-%dT%H:%M:%S"))
+    except (ValueError, OverflowError):
+        return None
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+def _issue_lines(site: Site, actor: str, cfg: dict, old: dict | None) -> tuple[list[str], dict]:
+    """Lines for newly opened issues not written by the desk, and the issue part of the state. A repository seen for
+    the first time (or the first poll) takes its open issues as seen, except those opened after the last saved poll."""
+    repos, _ = open_issues(cfg)
+    old = old or {}
+    seen = set(old.get("issues") or [])
+    scanned = set(old.get("issue_repos") or [])
+    since = _utc_stamp(old) if old else None
+    lines, led = [], Ledger(site)
+    for repo, issues in repos.items():
+        fresh_repo = repo not in scanned
+        for it in sorted(issues, key=lambda i: (i["created"], i["number"] or 0)):
+            if it["id"] in seen:
+                continue
+            seen.add(it["id"])
+            if fresh_repo and not (since and it["created"] > since):
+                continue
+            if DESK_MARK in it["body"]:
+                continue
+            request = REQUEST_LABEL in it["labels"]
+            kind = "work request" if request else "issue"
+            short = (repo or "").split("/")[-1]
+            lines.append(f"{kind} {short}#{it['number']} by {it['author'] or '?'}: {_one_line(it['title'], 200)} | "
+                         f"{it['url'] or ''}".rstrip())
+            led.event(OPENED, actor, None, {"issue_id": it["id"], "repo": repo, "number": it["number"],
+                                            "url": it["url"], "author": it["author"], "request": request,
+                                            "created": it["created"]})
+    keep = sorted(seen)[-MAX_SEEN_ISSUES:] if len(seen) > MAX_SEEN_ISSUES else sorted(seen)
+    return lines, {"issues": keep, "issue_repos": sorted(scanned | set(repos))}
+
+
 def poll(site: Site, actor: str, cfg: dict) -> list[str]:
     """One poll: the lines for Decision changes and new comments not marked as the desk's; saves the state. The first
-    poll (no state) reports the Decisions already set and takes the existing comments as seen."""
+    poll (no state) reports the Decisions already set and takes the existing comments as seen. Newly opened issues
+    not by the desk come after (`_issue_lines`)."""
     b = board(cfg)
     old = _load_state(site, cfg)
+    issue_lines, issue_state = _issue_lines(site, actor, cfg, old)
     first = old is None
     seen_dec = {} if first else dict(old.get("decisions") or {})
     seen_com = {} if first else {k: set(v) for k, v in (old.get("comments") or {}).items()}
@@ -358,8 +451,9 @@ def poll(site: Site, actor: str, cfg: dict) -> list[str]:
                                  f"{c['url'] or ''}".rstrip())
         new_com[iid] = sorted(before | set(ids))[-200:]
     _save_state(site, {"board": f"{cfg['org']}/{cfg['project']}", "decisions": new_dec, "comments": new_com,
-                       "polled": time.strftime("%Y-%m-%dT%H:%M:%S")})
-    return lines
+                       "polled": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                       "polled_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **issue_state})
+    return lines + issue_lines
 
 
 def watch(site: Site, actor: str, interval: float = 30, emit=print, sleep=time.sleep, polls: int | None = None) -> None:
