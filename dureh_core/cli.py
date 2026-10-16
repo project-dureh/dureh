@@ -10,7 +10,7 @@ from pathlib import Path
 from .util import DurehError, dumps, fail
 
 
-RESERVED_EVENT_PREFIXES = ("workday.", "day.", "session.", "hours.", "slack.", "harness.", "member.", "office-hours.")  # harness.switched: session start only
+RESERVED_EVENT_PREFIXES = ("workday.", "day.", "session.", "hours.", "slack.", "github.", "harness.", "member.", "office-hours.")  # harness.switched: session start only
 
 
 def _percent(value: str) -> float:
@@ -338,7 +338,7 @@ def cmd_event_add(a):
     if not a.kind.strip() or not a.wi.strip() or not _actor(a).strip():
         fail("--kind, --wi, and --actor must be nonempty")
     if a.kind.startswith(RESERVED_EVENT_PREFIXES):
-        fail(f"{a.kind} events are written only by `dureh day`, `dureh site workday`, `dureh site session start` and `dureh slack`")
+        fail(f"{a.kind} events are written only by `dureh day`, `dureh site workday`, `dureh site session start`, `dureh slack` and `dureh github`")
     _print(Ledger(_site(a)).event(a.kind, _actor(a), a.wi, payload))
 
 
@@ -725,6 +725,33 @@ def cmd_slack(a):
         _print(slack.post(site, _actor(a), text, a.dry_run))
 
 
+def cmd_github(a):
+    from . import github
+
+    site, c = _site(a), a.github_command
+    if not github.enabled(site):
+        print(github.OFF_LINE)
+        return
+    if c == "status":
+        res = github.status(site)
+        if a.json:
+            _print(res)
+        else:
+            print("\n".join(github.status_lines(res)))
+    elif c == "watch":
+        github.watch(site, _actor(a), a.interval, emit=lambda line: print(line, flush=True), polls=1 if a.once else None)
+    elif a.item_command == "add":
+        _print(github.item_add(site, _actor(a), a.wi, a.status, a.project, a.layer, a.units, a.repo, a.url))
+    elif a.item_command == "set":
+        _print(github.item_set(site, _actor(a), a.wi, a.url, a.status, a.project, a.layer, a.units, a.decision))
+    elif a.item_command == "ask":
+        body = Path(a.body_file).read_text(encoding="utf-8")
+        _print(github.item_ask(site, _actor(a), a.title, body, a.options, a.layer, a.wi, a.project, a.repo, a.units))
+    else:
+        text = Path(a.file).read_text(encoding="utf-8") if a.file else sys.stdin.read()
+        _print(github.comment(site, _actor(a), text, a.wi, a.url))
+
+
 def cmd_report(a):
     from . import slack
 
@@ -869,13 +896,13 @@ def cmd_artifact_write(a):
 # ------------------------------------------------------------------- parser
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="dureh", description="DUREH harness tools: wi, dispatch, verify, ledger, event, status, "
-                                "slurm, path-refs, purge, push, usage, site, day, upstream, slack, report, "
+                                "slurm, path-refs, purge, push, usage, site, day, upstream, slack, github, report, "
                                 "authorize-write, worktree, protected, artifact, member (plus install, adapter, hook).")
     p.add_argument("--site", help="installed site directory (or DUREH_SITE)")
     p.add_argument("--observe", action="store_true",
                    help="read-only: allow only status, wi show/list, ledger query, upstream list/message/inbox (without "
                         "--record; --watch included), path-refs, usage, verify --self, day status, site session status, "
-                        "protected list; never record anything (or DUREH_OBSERVE=1)")
+                        "protected list, member status, github status; never record anything (or DUREH_OBSERVE=1)")
     sub = p.add_subparsers(dest="command", required=True)
 
     def add(parent, name, func, help_):
@@ -1361,6 +1388,59 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--wait", type=float, default=600, help="seconds to wait for the reply (default 600; polled every 30 s)")
     x.add_argument("--actor")
 
+    gp = sub.add_parser("github", help="the company's GitHub board (release 69; organization, board, office repository "
+                         "and token file come from config `github`; docs/github.md): status, watch, and the desk's "
+                         "board items").add_subparsers(dest="github_command", required=True)
+    x = add(gp, "status", cmd_github, "the board's items grouped by Status, with Decision, Project and Layer; read-only")
+    x.add_argument("--json", action="store_true")
+    x = add(gp, "watch", cmd_github, "desk: poll the board; print one line per Decision change and per new comment not "
+                                     "marked as the desk's, nothing else (for Monitor); a failed poll is skipped; "
+                                     "records github.decision.changed")
+    x.add_argument("--interval", type=float, default=30, help="seconds between polls (default 30, at least 5)")
+    x.add_argument("--once", action="store_true", help="one poll, then exit")
+    x.add_argument("--actor")
+    gi = add(gp, "item", cmd_github, "desk: board items for work items and decision asks").add_subparsers(
+        dest="item_command", required=True)
+    x = add(gi, "add", cmd_github, "create an issue for a work item (title and goal) in config github.office_repo or "
+                                   "--repo, add it to the board and set its fields (or link an existing issue with "
+                                   "--url); records github.item.added")
+    x.add_argument("--wi", required=True)
+    x.add_argument("--status", default="Backlog", help="Backlog (default), Today, In progress, Waiting for Director, Done")
+    x.add_argument("--project", help="the board's Project option (the project's repository name)")
+    x.add_argument("--layer", type=int, choices=[1, 2, 3], help="1 company, 2 DUREH, 3 Director")
+    x.add_argument("--units", type=float, help="expected work units")
+    x.add_argument("--repo", help="a repository of the company's organization (default: config github.office_repo)")
+    x.add_argument("--url", help="link this existing issue instead of creating one")
+    x.add_argument("--actor")
+    x = add(gi, "set", cmd_github, "change a linked item's fields (by --wi or --url); a Decision only on a layer 1-2 "
+                                   "item; records github.item.updated")
+    x.add_argument("--wi")
+    x.add_argument("--url")
+    x.add_argument("--status")
+    x.add_argument("--project")
+    x.add_argument("--layer", type=int, choices=[1, 2, 3])
+    x.add_argument("--units", type=float)
+    x.add_argument("--decision", help="layer 1-2 only: Approved, Option 1..3, Rejected, Later")
+    x.add_argument("--actor")
+    x = add(gi, "ask", cmd_github, "a decision ask: a kind:decision issue on the board (layer 3: assigned to config "
+                                   "github.director_login, Status Waiting for Director); the answer is the Decision "
+                                   "column (`github watch`/`status`); records github.ask.created")
+    x.add_argument("--title", required=True)
+    x.add_argument("--body-file", required=True)
+    x.add_argument("--options", nargs="+", default=[], help="up to 3 options (Option 1..3 in the Decision column)")
+    x.add_argument("--layer", type=int, choices=[1, 2, 3], default=3)
+    x.add_argument("--wi", help="the work item the ask belongs to")
+    x.add_argument("--project")
+    x.add_argument("--units", type=float)
+    x.add_argument("--repo")
+    x.add_argument("--actor")
+    x = add(gi, "comment", cmd_github, "the desk's comment (from --file or stdin) on a linked item's issue, marked so "
+                                       "`watch` skips it; records github.comment.posted")
+    x.add_argument("--wi")
+    x.add_argument("--url")
+    x.add_argument("--file")
+    x.add_argument("--actor")
+
     x = add(sub, "report", cmd_report, "desk only: report by kind; one routing table decides where (Slack day thread, "
                                        "consult agent, the session); prints \"deliver in the session\" when the desk "
                                        "writes it in its reply")
@@ -1418,7 +1498,7 @@ def parser() -> argparse.ArgumentParser:
 
 OBSERVE_ALLOWED = {("status", None), ("wi", "show"), ("wi", "list"), ("ledger", "query"), ("upstream", "list"), ("upstream", "message"), ("upstream", "inbox"),
                    ("path-refs", None), ("usage", None), ("verify", None), ("day", "status"), ("site", "session"),
-                   ("protected", "list"), ("member", "status")}
+                   ("protected", "list"), ("member", "status"), ("github", "status")}
 
 
 def _check_observe(args) -> None:

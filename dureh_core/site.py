@@ -12,7 +12,7 @@ from .util import DurehError, fail, is_within, read_json
 RECORD_KINDS = ("work-item", "run", "decision", "session", "finding", "event")
 READ_ONLY_SITE_DIRS = ("references", "startup")
 _VAR = re.compile(r"\$\{(\w+)(?::-([^}]*))?\}|\$(\w+)")
-TOOL_NAMES = ("wi", "dispatch", "verify", "ledger", "status", "slurm", "path-refs", "purge", "push", "usage", "upstream", "worktree", "day", "slack", "report", "protected", "member")
+TOOL_NAMES = ("wi", "dispatch", "verify", "ledger", "status", "slurm", "path-refs", "purge", "push", "usage", "upstream", "worktree", "day", "slack", "github", "report", "protected", "member")
 
 # Company-specific names the harness used to carry in code (UP-0069): now config keys with generic defaults. A startup
 # package supplies its own values through `config_defaults` in startup.yaml (merged at install, docs/config.md).

@@ -380,9 +380,10 @@ def config_errors(site: Site, config: dict | None = None, startup: Path | None =
     from .site import routing_errors
 
     out += routing_errors(conf)
-    from . import members, office_hours
+    from . import github, members, office_hours
 
     out += members.config_errors(site, conf) + office_hours.config_errors(site, conf, startup)
+    out += github.config_errors(site, conf)
     return out
 
 

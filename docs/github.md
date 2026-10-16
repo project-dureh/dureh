@@ -1,0 +1,106 @@
+# The company's GitHub board (`dureh github`, release 69)
+
+Director, 2026-10-16: company coordination moves from Slack to GitHub. Each company has its own GitHub
+organization with
+
+- a private repository `office`: the home of issues not tied to a project (no Discussions);
+- one repository per project (one project = one repository of the organization);
+- the organization Project (v2) board number 1 with the fields
+  - **Status**: Backlog, Today, In progress, Waiting for Director, Done
+  - **Project**: single select, one option per project
+  - **Layer**: 1 (company), 2 (DUREH), 3 (Director)
+  - **Decision**: Approved, Option 1, Option 2, Option 3, Rejected, Later
+  - **Units**: number
+- and the views All, Today, Director, Projects.
+
+**The Director decides only through the Decision column.** Comments are opinions, never instructions. Approval layers
+(CHARTER): layer 1, the company decides; layer 2, DUREH decides after one delegation; layer 3, the Director decides each
+time. Layers 1 and 2 are recorded on the board by the desk; a layer-3 Decision is set only by the Director.
+
+Slack (docs/slack.md) is unchanged and is switched off per company by config later. While both are on, the desk asks
+on GitHub; Slack keeps the day thread reports, and the Slack opinions and consult paths drop out of the desk text.
+
+## Site config
+
+```json
+"github": {
+  "enabled": true,
+  "org": "example-org",
+  "project": 1,
+  "office_repo": "office",
+  "token_file": "~/.config/dureh/github-token-example-org",
+  "director_login": "example-director"
+}
+```
+
+| key | default | meaning |
+|---|---|---|
+| `enabled` | `false` | the switch; while not `true` every `dureh github` command prints `github: off ...` and does nothing |
+| `org` | required when enabled | the company's organization login |
+| `project` | required when enabled | the organization Project (v2) number |
+| `office_repo` | `office` | the repository for issues not tied to a project |
+| `token_file` | required when enabled | the file that holds the fine-grained token (`~` and `$VAR` expanded); it must exist and be mode 600 |
+| `director_login` | unset | the Director's GitHub login; layer-3 asks are assigned to it (unset: no assignee) |
+
+Unknown keys, a wrong type, and (when enabled) a missing `org`/`project`/`token_file` or a token file that is missing
+or readable by group or others are refused: `adapter sync` and `verify --self` fail, `status` warns.
+
+## Token
+
+The desk authenticates with a fine-grained personal access token scoped to the company's organization (repository
+access: `office` and the project repositories; permissions: Issues read and write, Metadata read; organization
+permissions: Projects read and write).
+
+```sh
+mkdir -p ~/.config/dureh && chmod 700 ~/.config/dureh
+# paste the token into the file named by github.token_file, then
+chmod 600 ~/.config/dureh/github-token-example-org
+```
+
+Every `gh` call goes through one runner that reads the token at call time and passes it to the `gh` subprocess as
+`GH_TOKEN` only (`GITHUB_TOKEN` from the environment is dropped). The token is never on a command line, never printed
+(gh's error text is redacted), never logged and never recorded. Text that carries a GitHub token prefix is refused.
+
+## Commands
+
+| command | who | what |
+|---|---|---|
+| `github status [--json]` | anyone; allowed with `--observe` | the board's items grouped by Status, each with its Decision, Project and Layer |
+| `github watch [--interval 30] [--once]` | desk, as a Monitor in working hours | one line per Decision change and per new comment not marked as the desk's; nothing else |
+| `github item add --wi WI [--status S] [--project P] [--layer 1-3] [--units N] [--repo R \| --url U]` | desk | an issue for the work item (its title and goal only) in `office_repo` or `--repo` (or the existing issue `--url`), added to the board with its fields |
+| `github item set (--wi WI \| --url U) [--status] [--project] [--layer] [--units] [--decision]` | desk | change a linked item's fields; `--decision` only on a layer 1-2 item |
+| `github item ask --title T --body-file F [--options O1 O2 O3] [--layer 3] [--wi WI] [--project P]` | desk | a decision ask: a `kind:decision` issue with the options and the Decision line; layer 3: assigned to `director_login`, Status Waiting for Director |
+| `github item comment (--wi WI \| --url U) [--file F]` | desk | the desk's comment, carrying the marker `<!-- dureh-desk -->` |
+
+Every issue and comment the desk writes ends with the hidden marker `<!-- dureh-desk -->`; `watch` skips comments that
+carry it.
+
+### Watch
+
+`watch` polls the board every `--interval` seconds (at least 5) with one GraphQL query (paged by 100 items) and prints
+
+```
+decision: office#12 WI-0007 example item -> Option 1 (was none) [layer 3] https://github.com/example-org/office/issues/12
+comment: office#12 by example-director: please also check the edge case https://github.com/example-org/office/issues/12#issuecomment-1
+```
+
+The last seen Decision of every item and the comment ids already seen are kept in `cache/github/watch.json` under the
+site (a runtime cache, not a record; deleting it only makes the next poll a first poll). A first poll reports the
+Decisions already set and takes the existing comments as seen. A failed `gh` call (network, rate limit) skips that
+poll; the next one sees the same changes. Each Decision change is recorded as `github.decision.changed`
+`{item_id, url, from, to, layer, first_poll}` (with the WI when the item is linked).
+
+GitHub does not report who changed a field value; the Decision column's authority rests on the board's permissions
+(only the Director should set Decision on a layer-3 item).
+
+## Records
+
+| event | payload |
+|---|---|
+| `github.item.added` | `{url, repo, number, item_id, fields}`, on the WI |
+| `github.item.updated` | `{item_id, url, fields}` |
+| `github.ask.created` | `{url, repo, number, item_id, layer, options, assignee, fields, chars}` (the WI when given) |
+| `github.comment.posted` | `{url, chars}` |
+| `github.decision.changed` | `{item_id, url, from, to, layer, first_poll}` |
+
+No record carries issue or comment text. `github.*` events are written only by `dureh github` (`event add` refuses them).

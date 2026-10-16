@@ -1,0 +1,399 @@
+"""Release 69: the company's GitHub board (`dureh github`, docs/github.md). The gh subprocess is replaced by a fake
+runner that answers from an in-memory board; no test touches the network or a real token."""
+import io
+import json
+import os
+import subprocess
+import unittest
+from contextlib import redirect_stdout
+from unittest import mock
+
+from helpers import SiteCase
+
+from dureh_core import github
+from dureh_core.cli import main
+from dureh_core.ops import config_errors
+from dureh_core.records import Ledger
+from dureh_core.runtimes.claude_code import _claude_md
+from dureh_core.util import DurehError
+
+FAKE_TOKEN = "github_pat_test-not-a-real-token"
+ORG = "example-org"
+FIELDS = [
+    {"id": "F_STATUS", "name": "Status", "dataType": "SINGLE_SELECT",
+     "options": [{"id": f"O_S{i}", "name": n} for i, n in enumerate(github.STATUSES)]},
+    {"id": "F_PROJECT", "name": "Project", "dataType": "SINGLE_SELECT",
+     "options": [{"id": "O_P0", "name": "example-project"}]},
+    {"id": "F_LAYER", "name": "Layer", "dataType": "SINGLE_SELECT",
+     "options": [{"id": "O_L1", "name": "1 company"}, {"id": "O_L2", "name": "2 DUREH"}, {"id": "O_L3", "name": "3 Director"}]},
+    {"id": "F_DECISION", "name": "Decision", "dataType": "SINGLE_SELECT",
+     "options": [{"id": f"O_D{i}", "name": n} for i, n in enumerate(github.DECISIONS)]},
+    {"id": "F_UNITS", "name": "Units", "dataType": "NUMBER"},
+    {"id": "F_TITLE", "name": "Title", "dataType": "TITLE"},
+]
+
+
+def node(item_id, number, title, status=None, decision=None, layer=None, comments=()):
+    values = []
+    for field, v in (("Status", status), ("Decision", decision), ("Layer", layer)):
+        if v is not None:
+            values.append({"name": v, "field": {"name": field}})
+    return {"id": item_id, "fieldValues": {"nodes": values},
+            "content": {"__typename": "Issue", "number": number, "title": title, "state": "OPEN",
+                        "url": f"https://github.com/{ORG}/office/issues/{number}",
+                        "repository": {"nameWithOwner": f"{ORG}/office"}, "assignees": {"nodes": []},
+                        "comments": {"nodes": [{"id": cid, "url": f"https://github.com/{ORG}/office/issues/{number}#{cid}",
+                                                "author": {"login": who}, "body": body}
+                                               for cid, who, body in comments]}}}
+
+
+class FakeGh:
+    """Answers the gh commands the harness uses, from an in-memory board."""
+
+    def __init__(self):
+        self.calls, self.items, self.next_issue, self.fail_next = [], [], 10, None
+
+    def __call__(self, argv, env, input_text, timeout):
+        self.calls.append({"argv": argv, "env": env, "input": input_text})
+        if self.fail_next:
+            msg, self.fail_next = self.fail_next, None
+            return subprocess.CompletedProcess(argv, 1, "", msg)
+        a = argv[1:]
+        if a[:2] == ["api", "graphql"]:
+            req = json.loads(input_text)
+            proj = {"id": "PVT_1", "title": "Example board", "fields": {"nodes": FIELDS},
+                    "items": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": self.items}}
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"data": {"organization": {"projectV2": proj}}})
+                                               if req["variables"]["org"] == ORG else '{"data": {}}', "")
+        if a[:2] == ["issue", "create"]:
+            self.next_issue += 1
+            repo = a[a.index("--repo") + 1]
+            return subprocess.CompletedProcess(argv, 0, f"https://github.com/{repo}/issues/{self.next_issue}\n", "")
+        if a[:2] == ["project", "item-add"]:
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"id": f"PVTI_{self.next_issue}"}), "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def commands(self):
+        return [c["argv"][1:3] for c in self.calls]
+
+
+class GithubBase(SiteCase):
+    def setUp(self):
+        super().setUp()
+        self.install()
+        self.token_file = self.tmp / "github-token"
+        self.token_file.write_text(FAKE_TOKEN + "\n")
+        self.token_file.chmod(0o600)
+        self.set_config({"enabled": True, "org": ORG, "project": 1, "token_file": str(self.token_file),
+                         "director_login": "example-director"})
+        self.gh = FakeGh()
+        p = mock.patch.object(github, "_exec", self.gh)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def set_config(self, value, key="github"):
+        path = self.site_root / "config.json"
+        cfg = json.loads(path.read_text())
+        if value is None:
+            cfg.pop(key, None)
+        else:
+            cfg[key] = value
+        path.write_text(json.dumps(cfg))
+
+    def run_cli(self, *args, stdin=""):
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("sys.stdin", io.StringIO(stdin)), redirect_stdout(out), mock.patch("sys.stderr", err):
+            code = main(["--site", str(self.site_root), "github", *args])
+        return code, out.getvalue(), err.getvalue()
+
+    def events(self, prefix="github."):
+        return [e for e in Ledger(self.site()).load("event") if e["type"].startswith(prefix)]
+
+
+class Config(GithubBase):
+    def test_valid_config_has_no_errors(self):
+        self.assertEqual(github.config_errors(self.site()), [])
+        self.assertEqual([e for e in config_errors(self.site()) if "github" in e], [])
+
+    def test_enabled_without_token_file_or_org_is_refused(self):
+        self.set_config({"enabled": True, "project": 1})
+        errs = [e for e in config_errors(self.site()) if "github" in e]
+        self.assertEqual(len(errs), 1)
+        self.assertIn("github.org, github.token_file are missing", errs[0])
+
+    def test_missing_token_file_is_refused(self):
+        self.set_config({"enabled": True, "org": ORG, "project": 1, "token_file": str(self.tmp / "nope")})
+        errs = github.config_errors(self.site())
+        self.assertTrue(any("does not exist" in e for e in errs), errs)
+
+    def test_wrong_mode_is_refused_and_no_gh_runs(self):
+        self.token_file.chmod(0o644)
+        errs = github.config_errors(self.site())
+        self.assertTrue(any("mode 644" in e and "chmod 600" in e for e in errs), errs)
+        code, out, err = self.run_cli("status")
+        self.assertEqual(code, 2)
+        self.assertIn("mode 644", err)
+        self.assertEqual(self.gh.calls, [])
+
+    def test_disabled_block_is_only_shape_checked(self):
+        self.set_config({"enabled": False})
+        self.assertEqual(github.config_errors(self.site()), [])
+        code, out, _ = self.run_cli("status")
+        self.assertEqual((code, out.strip()), (0, github.OFF_LINE))
+        self.set_config({"enabled": "yes", "colour": 1, "project": 0})
+        errs = github.config_errors(self.site())
+        self.assertTrue(any("unknown key" in e for e in errs))
+        self.assertTrue(any("enabled must be true or false" in e for e in errs))
+        self.assertTrue(any("github.project" in e for e in errs))
+
+    def test_no_block_means_off(self):
+        self.set_config(None)
+        self.assertFalse(github.enabled(self.site()))
+        self.assertEqual(github.config_errors(self.site()), [])
+
+
+class Runner(GithubBase):
+    def test_token_goes_to_the_subprocess_environment_only(self):
+        os.environ["GITHUB_TOKEN"] = "other-token-from-the-environment"
+        code, out, err = self.run_cli("status", "--json")
+        self.assertEqual(code, 0, err)
+        call = self.gh.calls[0]
+        self.assertEqual(call["env"]["GH_TOKEN"], FAKE_TOKEN)
+        self.assertNotIn("GITHUB_TOKEN", call["env"])
+        self.assertNotIn(FAKE_TOKEN, " ".join(call["argv"]))
+        self.assertNotIn(FAKE_TOKEN, call["input"])
+        self.assertNotIn(FAKE_TOKEN, out + err)
+        self.assertNotIn(FAKE_TOKEN, os.environ.get("GH_TOKEN", ""))
+
+    def test_failure_text_is_redacted(self):
+        self.gh.fail_next = f"HTTP 401: Bad credentials for {FAKE_TOKEN}"
+        code, out, err = self.run_cli("status")
+        self.assertEqual(code, 2)
+        self.assertIn("exit 1", err)
+        self.assertIn("***", err)
+        self.assertNotIn(FAKE_TOKEN, out + err)
+
+    def test_secret_text_is_refused(self):
+        body = self.tmp / "ask.md"
+        body.write_text("please use ghp_abcdef")
+        code, _, err = self.run_cli("item", "ask", "--title", "Q", "--body-file", str(body))
+        self.assertEqual(code, 2)
+        self.assertIn("token prefix", err)
+        self.assertEqual(self.gh.calls, [])
+
+
+class Status(GithubBase):
+    def test_groups_by_status(self):
+        self.gh.items = [node("I1", 1, "first", "Today", None, "2 DUREH"),
+                         node("I2", 2, "second", "Waiting for Director", "Option 1", "3 Director"),
+                         node("I3", 3, "third")]
+        res = github.status(self.site())
+        self.assertEqual(list(res["groups"]), ["Today", "Waiting for Director", "(no status)"])
+        row = res["groups"]["Waiting for Director"][0]
+        self.assertEqual((row["decision"], row["layer"], row["number"]), ("Option 1", "3 Director", 2))
+        code, out, _ = self.run_cli("status")
+        self.assertIn("office#2 second [decision: Option 1] [layer: 3 Director]", out)
+        code, out, _ = self.run_cli("status", "--json")
+        self.assertEqual(json.loads(out)["count"], 3)
+
+    def test_status_is_allowed_with_observe_and_records_nothing(self):
+        before = len(Ledger(self.site()).load("event"))
+        out = io.StringIO()
+        with redirect_stdout(out), mock.patch("sys.stderr", io.StringIO()):
+            code = main(["--site", str(self.site_root), "--observe", "github", "status"])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(Ledger(self.site()).load("event")), before)
+        with redirect_stdout(io.StringIO()), mock.patch("sys.stderr", io.StringIO()):
+            self.assertEqual(main(["--site", str(self.site_root), "--observe", "github", "watch", "--once"]), 2)
+
+
+class Watch(GithubBase):
+    def lines(self, polls=1, sleep=None):
+        got = []
+        github.watch(self.site(), "desk", 5, emit=got.append, sleep=sleep or (lambda s: None), polls=polls)
+        return got
+
+    def test_decision_changes_and_comments(self):
+        self.gh.items = [node("I1", 1, "first", "Waiting for Director", None, "3 Director",
+                              [("C1", "example-director", "old opinion")]),
+                         node("I2", 2, "second", "Today", "Approved")]
+        first = self.lines()
+        self.assertEqual(len(first), 1)  # the Decision already set; old comments taken as seen
+        self.assertTrue(first[0].startswith("decision: office#2 second -> Approved (was none)"), first)
+        self.assertEqual(self.lines(), [])
+        self.gh.items[0] = node("I1", 1, "first", "Waiting for Director", "Option 2", "3 Director",
+                                [("C1", "example-director", "old opinion"),
+                                 ("C2", "desk-bot", f"answer\n{github.DESK_MARK}"),
+                                 ("C3", "example-director", "one more\nthought")])
+        got = self.lines()
+        self.assertEqual(len(got), 2, got)
+        self.assertTrue(got[0].startswith("decision: office#1 first -> Option 2 (was none) [layer 3 Director]"))
+        self.assertEqual(got[1], f"comment: office#1 by example-director: one more thought "
+                                 f"https://github.com/{ORG}/office/issues/1#C3")
+        decided = [e for e in self.events() if e["type"] == github.DECIDED]
+        self.assertEqual([(e["payload"]["from"], e["payload"]["to"]) for e in decided],
+                         [(None, "Approved"), (None, "Option 2")])
+
+    def test_state_survives_a_restart(self):
+        self.gh.items = [node("I1", 1, "first", "Today", "Later")]
+        self.assertEqual(len(self.lines()), 1)
+        state = json.loads(github.state_path(self.site()).read_text())
+        self.assertEqual(state["decisions"], {"I1": "Later"})
+        self.assertTrue(str(github.state_path(self.site())).startswith(str(self.site_root / "cache")))
+        code, out, _ = self.run_cli("watch", "--once")  # a new process: nothing new
+        self.assertEqual((code, out), (0, ""))
+        self.gh.items = [node("I1", 1, "first", "Today", "Rejected")]
+        code, out, _ = self.run_cli("watch", "--once")
+        self.assertIn("-> Rejected (was Later)", out)
+        self.assertEqual(len(out.strip().splitlines()), 1)
+
+    def test_transient_failure_is_skipped(self):
+        self.gh.items = [node("I1", 1, "first", "Today", "Approved")]
+        self.gh.fail_next = "HTTP 502: Bad Gateway"
+        slept = []
+        got = self.lines(polls=2, sleep=slept.append)
+        self.assertEqual(len(got), 1)
+        self.assertEqual(slept, [5.0])
+
+    def test_only_the_desk_watches(self):
+        with self.assertRaises(DurehError):
+            github.watch(self.site(), "py-writer", polls=1)
+
+
+class Items(GithubBase):
+    def test_item_add_creates_links_and_records(self):
+        code, out, err = self.run_cli("item", "add", "--wi", "WI-0001", "--status", "today", "--layer", "2",
+                                      "--project", "example-project", "--units", "3")
+        self.assertEqual(code, 0, err)
+        cmds = self.gh.commands()
+        self.assertEqual(cmds[0], ["api", "graphql"])
+        self.assertIn(["issue", "create"], cmds)
+        self.assertIn(["project", "item-add"], cmds)
+        create = next(c for c in self.gh.calls if c["argv"][1:3] == ["issue", "create"])
+        self.assertIn(f"{ORG}/office", create["argv"])
+        self.assertIn("WI-0001 A bootstrap proposal", create["argv"])
+        self.assertIn(github.DESK_MARK, create["input"])
+        edits = [c["argv"] for c in self.gh.calls if c["argv"][1:3] == ["project", "item-edit"]]
+        opts = {e[e.index("--field-id") + 1]: e[-1] for e in edits}
+        self.assertEqual(opts, {"F_STATUS": "O_S1", "F_LAYER": "O_L2", "F_PROJECT": "O_P0", "F_UNITS": "3"})
+        self.assertTrue(all(e[e.index("--id") + 1] == "PVTI_11" and "PVT_1" in e for e in edits))
+        ev = [e for e in self.events() if e["type"] == github.ADDED]
+        self.assertEqual(len(ev), 1)
+        self.assertEqual(ev[0]["wi"], "WI-0001")
+        self.assertEqual(ev[0]["payload"]["url"], f"https://github.com/{ORG}/office/issues/11")
+        self.assertEqual(ev[0]["payload"]["item_id"], "PVTI_11")
+        code, _, err = self.run_cli("item", "add", "--wi", "WI-0001")
+        self.assertEqual(code, 2)
+        self.assertIn("already has a board item", err)
+
+    def test_unknown_option_fails_before_anything_is_created(self):
+        code, _, err = self.run_cli("item", "add", "--wi", "WI-0001", "--project", "no-such-project")
+        self.assertEqual(code, 2)
+        self.assertIn("no option 'no-such-project'", err)
+        self.assertNotIn(["issue", "create"], self.gh.commands())
+
+    def test_item_set_status_and_decision_by_layer(self):
+        self.run_cli("item", "add", "--wi", "WI-0001", "--layer", "3")
+        self.gh.calls.clear()
+        code, out, err = self.run_cli("item", "set", "--wi", "WI-0001", "--status", "Done")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["fields"], {"Status": "Done"})
+        code, _, err = self.run_cli("item", "set", "--wi", "WI-0001", "--decision", "Approved")
+        self.assertEqual(code, 2)
+        self.assertIn("only the Director decides", err)
+        code, out, err = self.run_cli("item", "set", "--wi", "WI-0001", "--layer", "2", "--decision", "approved")
+        self.assertEqual(code, 0, err)
+        self.assertEqual([e["type"] for e in self.events()].count(github.UPDATED), 2)
+
+    def test_ask_assigns_the_director_and_marks(self):
+        body = self.tmp / "ask.md"
+        body.write_text("Which order for the next two items?")
+        code, out, err = self.run_cli("item", "ask", "--title", "Order of work", "--body-file", str(body),
+                                      "--options", "first A", "first B", "--layer", "3", "--wi", "WI-0001")
+        self.assertEqual(code, 0, err)
+        create = next(c for c in self.gh.calls if c["argv"][1:3] == ["issue", "create"])
+        argv = create["argv"]
+        self.assertEqual(argv[argv.index("--assignee") + 1], "example-director")
+        self.assertEqual(argv[argv.index("--label") + 1], "kind:decision")
+        self.assertTrue(create["input"].rstrip().endswith(github.DESK_MARK))
+        self.assertIn("**Option 2**: first B", create["input"])
+        self.assertIn("Approved, Option 1, Option 2, Rejected, Later", create["input"])
+        self.assertIn(["label", "create"], self.gh.commands())
+        edits = [c["argv"] for c in self.gh.calls if c["argv"][1:3] == ["project", "item-edit"]]
+        self.assertIn("O_S3", [e[-1] for e in edits])  # Waiting for Director
+        self.assertIn("O_L3", [e[-1] for e in edits])
+        ev = [e for e in self.events() if e["type"] == github.ASKED]
+        self.assertEqual(len(ev), 1)
+        p = ev[0]["payload"]
+        self.assertEqual((p["layer"], p["options"], p["assignee"], ev[0]["wi"]), (3, 2, "example-director", "WI-0001"))
+        self.assertNotIn("Which order", json.dumps(ev[0]))  # no text in the record
+        res = json.loads(out)
+        self.gh.calls.clear()
+        code, _, err = self.run_cli("item", "set", "--url", res["url"], "--decision", "Option 1")
+        self.assertEqual(code, 2)
+        self.assertIn("only the Director decides", err)
+
+    def test_ask_refuses_more_than_three_options(self):
+        body = self.tmp / "ask.md"
+        body.write_text("q")
+        code, _, err = self.run_cli("item", "ask", "--title", "Q", "--body-file", str(body),
+                                    "--options", "a", "b", "c", "d")
+        self.assertEqual(code, 2)
+        self.assertIn("at most 3 options", err)
+
+    def test_comment_carries_the_marker(self):
+        self.run_cli("item", "add", "--wi", "WI-0001")
+        code, out, err = self.run_cli("item", "comment", "--wi", "WI-0001", stdin="thanks, noted")
+        self.assertEqual(code, 0, err)
+        call = self.gh.calls[-1]
+        self.assertEqual(call["argv"][1:3], ["issue", "comment"])
+        self.assertIn(github.DESK_MARK, call["input"])
+        self.assertEqual([e["type"] for e in self.events()][-1], github.COMMENTED)
+
+    def test_only_the_desk_writes(self):
+        os.environ["DUREH_ACTOR"] = "py-writer"
+        code, _, err = self.run_cli("item", "add", "--wi", "WI-0001")
+        os.environ.pop("DUREH_ACTOR")
+        self.assertEqual(code, 2)
+        self.assertIn("only the desk", err)
+
+    def test_event_add_refuses_github_events(self):
+        with redirect_stdout(io.StringIO()), mock.patch("sys.stderr", io.StringIO()) as err:
+            code = main(["--site", str(self.site_root), "event", "add", "--kind", "github.item.added", "--wi",
+                         "WI-0001", "--payload", "{}", "--actor", "desk"])
+        self.assertEqual(code, 2)
+
+
+class DeskText(GithubBase):
+    def test_rule_when_enabled(self):
+        text = _claude_md(self.site())
+        self.assertIn("12a. GitHub is the company's coordination board (release 69)", text)
+        self.assertIn("github item add --wi <WI>", text)
+        self.assertIn("github watch` as a Monitor", text)
+        self.assertIn("Decision column", text)
+
+    def test_rule_when_off(self):
+        self.set_config({"enabled": False})
+        text = _claude_md(self.site())
+        self.assertIn("12a. GitHub (`", text)
+        self.assertIn("is off", text)
+        self.assertNotIn("github item ask", text)
+
+    def test_slack_too_prefers_github_and_drops_opinions(self):
+        token = self.tmp / "slack-token"
+        token.write_text("xoxb-test\n")
+        slack = {"channel": "C00EXAMPLE1", "username": "desk (example-org)", "director_user": "U00DIRECTOR",
+                 "agents": {"U00EXAMPLE1": "Helper"}, "consult_agent": "Helper", "token_file": str(token)}
+        self.set_config(slack, key="slack")
+        text = _claude_md(self.site())
+        self.assertIn("GitHub is preferred for asks", text)
+        self.assertNotIn("slack opinions --watch", text)
+        self.assertNotIn("Helper is consulted first", text)
+        self.set_config({"enabled": False})
+        text = _claude_md(self.site())
+        self.assertIn("slack opinions --watch", text)
+        self.assertNotIn("GitHub is preferred for asks", text)
+
+
+if __name__ == "__main__":
+    unittest.main()

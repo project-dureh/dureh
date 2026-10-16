@@ -5,7 +5,7 @@ install preset (in that order of precedence: the preset wins, then the package, 
 agents; the desk edits it in a merge window or with the Director's OK (upstream edits a company's config as harness
 work, rule 1 of the workspace). This page lists the keys that matter to `slurm`, `push`, the session job and
 the project guidance, and the startup package interface (schema 2, release 46); the Slack and workday keys are in
-docs/slack.md and docs/workday.md.
+docs/slack.md and docs/workday.md; the GitHub board keys are below and in docs/github.md.
 
 ## Rule: no company or domain names in the harness (UP-0069, Director 2026-10-06; widened in release 46)
 
@@ -76,6 +76,11 @@ Tests prove the mechanism with the neutral example package `tests/fixtures/examp
 | `office_hours.time` | unset | an upper bound for the job's wall time, which otherwise follows the workday clock (the day's end plus the overtime allowance, within the partition's limit) |
 | `office_hours.server` | `{kind: ollama, bin: ollama, models_dir: cache/office-hours/models, port: 11434, start_timeout: 180}` | the model server the job starts; `models_dir` relative to the site |
 | `office_hours.profiles` | `[]` | `[{name, file, base}]`: each model the server creates (`name`) from a package file (`file`, a role's `profile`), pulling `base` when missing. Unknown keys, a missing file, a duplicate name or a bad port are refused (`adapter sync`, `verify --self`; `status` warns). Release 65: `adapter sync --package-rev R` checks the files in R (the package being installed), with R's `config_defaults` merged |
+| `github.enabled` | `false` | release 69 (docs/github.md): the company's GitHub board on/off; while not `true` every `dureh github` command does nothing and the desk text says GitHub is off. Must be a boolean |
+| `github.org`, `github.project` | required when enabled | the company's organization login and its organization Project (v2) number |
+| `github.office_repo` | `office` | the repository for issues not tied to a project (`github item add` and `item ask` default) |
+| `github.token_file` | required when enabled | the fine-grained token's file (`~`, `$VAR` expanded); it must exist and be mode 600. The token goes to `gh` as GH_TOKEN only and is never printed, logged or recorded. Unknown `github` keys, wrong types, missing required keys or a missing or group/other-readable token file are refused (`adapter sync`, `verify --self`; `status` warns) |
+| `github.director_login` | unset | the Director's GitHub login: layer-3 asks (`github item ask --layer 3`) are assigned to it |
 
 ## The startup package: `startup.yaml` schema 2 (release 46)
 
