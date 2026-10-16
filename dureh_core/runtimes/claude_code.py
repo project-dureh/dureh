@@ -632,7 +632,8 @@ def _claude_md(site: Site) -> str:
               _slack_rule(site, dureh),
               f"13. Ending the day, in this order: first stop every Monitor and background task (TaskStop; nothing may still be running or writing);"
               " then write a short handoff to `state/memory/handoff.md` (what is open, what the Director decided, what is next);"
-              f" then run `{dureh} day close`. After it, do nothing: the session job sends `/exit` to this session within about 20 s and ends by itself;"
+              f" then run `{dureh} day close` (with workday mode off it has no end report to wait for, still checks that nothing runs and the handoff is fresh, and releases the session the same way; release 67)."
+              " After it, do nothing: the session job sends `/exit` to this session within about 20 s and ends by itself;"
               " never scancel your own job.", "",
               "Small questions the Director asks may be answered directly." + _research_text(org),
               "Reference paths are read-only. Records are append-only: correct history by appending an event, never by editing a record."

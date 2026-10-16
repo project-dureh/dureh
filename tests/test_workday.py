@@ -822,6 +822,66 @@ class Workday(SiteCase):
         self.assertIsNone(workday.gate(self.s, self.wi))
         self.assertIn("usage today 10.0/10.0", render_status(status(self.s)))
 
+    # ------------------------------------------------------------ workday mode off (release 67, after 10-15)
+    def _closable_off(self, job="777"):
+        """Workday mode off (never switched on): no plan, no end report; a fresh handoff, fake slurm and a recorded
+        session job submitted at the fake now."""
+        self.write_handoff()
+        fake = self.fake_slurm()
+        if job:
+            Ledger(self.s).event("session.started", "desk", None,
+                                 {"job_id": job, "purpose": "desk", "submitted_at": os.environ["DUREH_FAKE_NOW"]})
+        return fake
+
+    def test_close_with_workday_off_records_and_releases(self):
+        self.assertFalse(workday.enabled(self.s))
+        fake = self._closable_off()
+        os.environ.pop("SLURM_JOB_ID", None)
+        rec = workday.close(self.s, "desk", "done")
+        self.assertEqual(rec["type"], "day.closed")
+        self.assertIs(rec["payload"]["workday"], False)
+        self.assertEqual(rec["refs"], [], "no plan to reference")
+        self.assertTrue(rec["payload"]["checked"])
+        self.assert_marker(rec["release"], fake, parent=rec["id"])
+        self.assertEqual(self.released()[-1]["refs"], [rec["id"]])
+
+    def test_close_with_workday_off_and_no_session_needs_only_the_handoff(self):
+        self._closable_off(job=None)
+        h = self.site_root / "state" / "memory" / "handoff.md"
+        old = T0.timestamp() - 86400
+        os.utime(h, (old, old))  # no session start to compare with: existence is enough
+        rec = workday.close(self.s, "desk", "done")
+        self.assertIs(rec["payload"]["workday"], False)
+        self.assertEqual((rec["release"]["released"], rec["release"]["reason"]), (False, "no running session job"))
+
+    def test_close_with_workday_off_still_checks_handoff_and_agents(self):
+        self._closable_off()
+        h = self.site_root / "state" / "memory" / "handoff.md"
+        old = T0.timestamp() - 3600
+        os.utime(h, (old, old))
+        with self.assertRaisesRegex(DurehError, "predates the running session's start .*job 777"):
+            workday.close(self.s, "desk", "x")
+        h.unlink()
+        with self.assertRaisesRegex(DurehError, "write the handoff"):
+            workday.close(self.s, "desk", "x")
+        self.write_handoff()
+        self.assertIsNone(self.spawn())  # workday mode off: no gate
+        hook(self.s, hook_event_name="SubagentStart", agent_type="pm-modules", agent_id="a-pm")
+        with self.assertRaisesRegex(DurehError, "still running"):
+            workday.close(self.s, "desk", "x")
+        self.assertEqual([e for e in Ledger(self.s).events() if e["type"] in ("day.closed", "session.released")], [])
+
+    def test_close_with_workday_on_still_needs_the_end_report(self):
+        self.start_day()
+        self.write_handoff()
+        with self.assertRaisesRegex(DurehError, "after its end report"):
+            workday.close(self.s, "desk", "x")
+        self.at(T0 + timedelta(hours=9))
+        workday.end(self.s, "desk", "done", "", [])
+        rec = workday.close(self.s, "desk", "x")
+        self.assertNotIn("workday", rec["payload"])
+        self.assertEqual(len(rec["refs"]), 1, "the day plan is referenced")
+
     def test_session_off_skips_start_and_close_checks(self):
         self.start_day()
         self.assertIsNone(self.spawn())
@@ -884,6 +944,7 @@ class Workday(SiteCase):
         self.assertIn("day overtime", text)
         self.assertIn("stay on duty", text)
         self.assertIn("day close", text)
+        self.assertIn("with workday mode off it has no end report to wait for", text)  # release 67
         self.assertIn("adapter sync --harness <release checkout>", text)
         # finish the plan (Director, 2026-10-06)
         self.assertIn("finished the same day", text)

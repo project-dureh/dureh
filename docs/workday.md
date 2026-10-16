@@ -161,7 +161,11 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    "Closing the session job" below: the job sends `/exit` to its claude and completes by itself. Release 45:
    scheduler jobs of the site user that no harness record owns (`External jobs` in `dureh status`, docs/slurm.md)
    do not refuse the close; they are recorded in `day.closed` (`external_jobs`) and the result carries a
-   `warning` naming them, since they keep running after the close.
+   `warning` naming them, since they keep running after the close. **Workday mode off (release 67).** After
+   10-15 at a site without workday mode (`day close` was refused, the job was scancelled by hand) the close also
+   runs with the mode off: there is no plan or end report to wait for; the idle and handoff checks still apply
+   (session device on), the handoff must be newer than the running session's `session.started` (when one is
+   recorded), `day.closed` carries `workday: false` and no plan ref, and the job is released the same way.
 
 ### Closing the session job (release 39)
 

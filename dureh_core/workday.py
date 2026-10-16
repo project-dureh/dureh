@@ -1078,15 +1078,20 @@ def close(site: Site, actor: str, note: str, cancel_now: bool = False) -> dict:
     its claude and completes by itself within the grace (Director, 2026-10-06, after the 10-05 close: an
     outside `day close` could not release and the job was scancelled by hand mid-handoff; an inside close
     scancelled the desk mid-turn); `cancel_now` is the old immediate scancel. Config `session.release_on_close`
-    false releases nothing (unless `cancel_now` asks for it explicitly)."""
+    false releases nothing (unless `cancel_now` asks for it explicitly). With workday mode off (release 67,
+    after 10-15 at a site without it: the close was refused and the job was scancelled by hand) there is no
+    plan or end report to wait for: the idle and handoff checks still apply, the handoff must postdate the
+    running session's start (when one is recorded), `day.closed` carries `workday: false` and no plan ref,
+    and the session is released the same way."""
     from .ops import status as site_status
     from .upstream import _live_agents
 
-    _require_on(site)
-    d = day(site)
-    if d["phase"] not in ("overtime", "off-duty") or not d.get("report"):
+    on = enabled(site)  # release 67: workday mode off has no plan or end report; the close still checks and releases
+    d = day(site) if on else None
+    if on and (d["phase"] not in ("overtime", "off-duty") or not d.get("report")):
         fail(f"close a day after its end report (phase {d['phase']})")
     from .ops import external_jobs, render_external
+    from . import sessions
 
     handoff = _handoff_path(site)
     checked = device_on(site, "session")
@@ -1098,19 +1103,28 @@ def close(site: Site, actor: str, note: str, cancel_now: bool = False) -> dict:
             fail(f"agents are still running or starting ({', '.join(live)}); close the day when everything is idle")
         if not handoff.is_file():
             fail(f"write the handoff first: {handoff} does not exist")
-        started = _parse(d["start"]).timestamp()
-        if handoff.stat().st_mtime < started:
-            fail(f"the handoff {handoff} predates today's start ({d['start']}); update it before closing")
+        if on:
+            started = _parse(d["start"]).timestamp()
+            if handoff.stat().st_mtime < started:
+                fail(f"the handoff {handoff} predates today's start ({d['start']}); update it before closing")
+        else:  # no day start: the running session's own start, when one is recorded
+            found, _ = sessions.running_session(site)
+            sess = next((e for e in Ledger(site).events() if e["id"] == found["record"]), None) if found else None
+            if sess is not None:
+                since = (sess.get("payload") or {}).get("submitted_at") or sess["ts"]
+                if handoff.stat().st_mtime < _local(since).timestamp():
+                    fail(f"the handoff {handoff} predates the running session's start ({since}, job "
+                         f"{found['job_id']}); update it before closing")
     led = Ledger(site)
     extra = {}
     if ext and (ext["count"] or ext.get("tool_count")):  # a warning, never a refusal (they may run overnight)
         extra = {"external_jobs": ext}
     rec = led.event("day.closed", actor, None, {"note": note, "idle": checked or None, "checked": checked,
-                                               "handoff": str(handoff), **extra}, [d["plan"]])
+                                               "handoff": str(handoff), **({} if on else {"workday": False}),
+                                               **extra}, [d["plan"]] if on else None)
     if extra:
         rec = {**rec, "warning": f"{render_external(ext)}. They keep running after the close; cancel any that"
                                  " should not (they are not the harness's to end)."}
-    from . import sessions
 
     release_on = (site.config.get("session") or {}).get("release_on_close", True)
     if not release_on and not cancel_now:
