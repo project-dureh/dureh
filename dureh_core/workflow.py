@@ -2465,3 +2465,80 @@ def purge(site: Site, actor: str, wi: str, dry_run: bool = False) -> dict:
     if skipped_logs:
         out["skipped_logs"] = skipped_logs
     return out
+
+
+PATH_PURGE_STATUSES = ("dispatched", "staged")
+
+
+def purge_paths(site: Site, actor: str, wi: str, paths: list[str], dry_run: bool = False) -> dict:
+    """Remove untracked or ignored paths (files or directories) from an active WI's worktree (release 72,
+    project-dureh/dureh#23, option A): a stray output a test wrote under the worktree fails verify's ownership
+    check, and a worker cannot delete it. Only for a dispatched or staged WI; each path is relative to its
+    worktree. Refused: an absolute path or one with `..`, the worktree itself or `.git`, a missing path, a path
+    whose parent or target resolves outside the worktree (symlinks), and any path that is or holds a tracked
+    file. Validate every path first; symlinks are removed as links and their targets are never followed.
+    Records one `purged` event with `paths` (relative) and `removed` (absolute)."""
+    from .exectree import _rmtree
+
+    if site.org.role(actor).kind != "desk":
+        fail("only the desk purges")
+    led = Ledger(site)
+    led.get("work-item", wi)
+    status = led.wi_status(wi)["status"]
+    if status not in PATH_PURGE_STATUSES:
+        fail(f"{wi} is {status}; purge --path only takes a dispatched or staged WI (purge a finished WI whole "
+             f"with `purge --wi {wi}`)")
+    if not paths:
+        fail("purge --path needs at least one path")
+    wt = site.worktrees / wi
+    if not (wt / ".git").exists():
+        fail(f"{wi} has no worktree at {wt}")
+    wt_real = os.path.realpath(wt)
+    planned: list[tuple[str, Path]] = []  # (path relative to the worktree, path to remove)
+    for p in paths:
+        if not p or os.path.isabs(p):
+            fail(f"purge --path takes a path relative to {wi}'s worktree, not {p!r}")
+        if ".." in Path(p).parts:
+            fail(f"refusing a path with `..`: {p}")
+        norm = os.path.normpath(p)
+        if norm == ".":
+            fail(f"{p!r} names the worktree itself; purge a finished WI whole with `purge --wi {wi}`")
+        item = wt / norm
+        if not os.path.lexists(item):
+            fail(f"no such path in {wi}'s worktree: {p}")
+        parent = os.path.realpath(item.parent)  # a symlinked directory on the way may lead out of the tree
+        if parent != wt_real and not parent.startswith(wt_real + os.sep):
+            fail(f"refusing a path that resolves outside {wi}'s worktree: {p} (-> {os.path.join(parent, item.name)})")
+        real = os.path.realpath(item)
+        if not real.startswith(wt_real + os.sep):
+            fail(f"refusing a path that resolves outside {wi}'s worktree: {p} (-> {real})")
+        rel = os.path.relpath(os.path.join(parent, item.name), wt_real)
+        if rel.split(os.sep)[0] == ".git":
+            fail(f"refusing to purge the worktree's git metadata: {p}")
+        tracked = [t for t in git(["--literal-pathspecs", "ls-files", "-z", "--", rel], wt).split("\0") if t]
+        if tracked:
+            more = f" and {len(tracked) - 3} more" if len(tracked) > 3 else ""
+            fail(f"refusing to purge {p}: it is or holds tracked files ({', '.join(tracked[:3])}{more}); purge --path "
+                 "removes only untracked or ignored paths, tracked files change through the WI's own commits")
+        planned.append((rel, Path(wt_real) / rel))
+    # a path inside another planned directory goes with it
+    planned = [(r, x) for r, x in dict(planned).items()
+               if not any(r != o and r.startswith(o + os.sep) for o, _ in planned)]
+    removed: list[str] = []
+    if not dry_run:
+        left = None
+        for _rel, it in planned:
+            if it.is_symlink() or it.is_file():
+                it.unlink()
+            else:
+                _rmtree(it)  # read-only trees: chmod u+w first
+            if os.path.lexists(it):
+                left = it  # a file held open on NFS keeps its directory
+                break
+            removed.append(str(it))
+        led.event("purged", actor, wi, {"paths": [r for r, _ in planned], "removed": removed, "removed_logs": [],
+                                         **({"failed": str(left)} if left else {})})
+        if left:
+            fail(f"could not remove {left} (removed so far: {', '.join(removed) or 'nothing'}); check what is left there")
+    return {"wi": wi, "worktree": str(wt), "planned": [str(x) for _, x in planned], "removed": removed,
+            "dry_run": dry_run}

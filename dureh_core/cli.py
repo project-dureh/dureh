@@ -402,9 +402,12 @@ def cmd_path_refs(a):
 
 
 def cmd_purge(a):
-    from .workflow import purge
+    from .workflow import purge, purge_paths
 
-    _print(purge(_site(a), _actor(a), a.wi, a.dry_run))
+    if a.path:
+        _print(purge_paths(_site(a), _actor(a), a.wi, a.path, a.dry_run))
+    else:
+        _print(purge(_site(a), _actor(a), a.wi, a.dry_run))
 
 
 def cmd_push(a):
@@ -1156,8 +1159,13 @@ def parser() -> argparse.ArgumentParser:
 
     x = add(sub, "path-refs", cmd_path_refs, "find references to a path before moving or deleting it")
     x.add_argument("path")
-    x = add(sub, "purge", cmd_purge, "remove a finished WI's worktree, scratch outputs and its own jobs' scheduler logs")
+    x = add(sub, "purge", cmd_purge, "remove a finished WI's worktree, scratch outputs and its own jobs' scheduler logs; "
+                                     "with --path, only untracked or ignored paths in a dispatched or staged WI's "
+                                     "worktree (release 72)")
     x.add_argument("--wi", required=True)
+    x.add_argument("--path", action="append", help="a path relative to the WI's worktree to remove (repeatable): "
+                                                   "untracked or ignored only, never a tracked file or a path that "
+                                                   "resolves outside the worktree; the WI must be dispatched or staged")
     x.add_argument("--dry-run", action="store_true")
     x.add_argument("--actor")
     x = add(sub, "push", cmd_push, "push an approved revision to an allowlisted remote; without --approval only a "

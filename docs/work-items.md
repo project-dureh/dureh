@@ -103,3 +103,16 @@ A role with `runtime: local` writes only the item's declared `outputs` that lie 
 globs), and `wi approve` refuses one recorded earlier, with the reason `member run` gives ("the item declares no output
 inside the role's write scopes, so the local member would have no file to write"); declare them with
 `wi amend --wi <WI> --memo ... --output <path>`. Other roles are not affected.
+
+## Stray untracked files in an active WI: `purge --path` (release 72, project-dureh/dureh#23)
+
+`dureh purge --wi <WI>` removes a finished WI whole (promoted, stopped or reverted). A dispatched or staged WI whose
+worktree holds stray untracked or ignored files (a test that wrote logs under `runs/`, which then fail verify's
+ownership check) is cleaned without replacing the WI:
+`dureh purge --wi <WI> --path <P> [--path <P2> ...] [--dry-run]`, desk only. Each path is relative to the WI's
+worktree and is a file or a directory. Refused, before anything is removed: a WI that is not dispatched or staged; an
+absolute path, one with `..`, the worktree itself or `.git`; a missing path; a path whose directory or target
+resolves outside the worktree (symlinks are resolved); and any path that is a tracked file or holds one (tracked
+files change through the WI's own commits). A symlink inside the worktree is removed as a link, its target never
+followed. `--dry-run` lists what would be removed and changes nothing. A removal records one `purged` event with
+`paths` (relative to the worktree) and `removed` (absolute paths); the whole-WI purge is unchanged.
