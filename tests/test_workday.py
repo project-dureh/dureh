@@ -1151,6 +1151,8 @@ class Workday(SiteCase):
         text = (self.site_root / "CLAUDE.md").read_text()
         self.assertIn("day plan", text)
         self.assertIn("day overtime", text)
+        self.assertIn("day plan --addendum --file", text)  # release 73
+        self.assertIn("day approve --addendum --by Director|DUREH", text)
         self.assertIn("stay on duty", text)
         self.assertIn("day close", text)
         self.assertIn("with workday mode off it has no end report to wait for", text)  # release 67
@@ -1599,6 +1601,116 @@ class Workday(SiteCase):
         self.assertEqual(slack.end_report_summary(self.s, "요약 (jobs today: 4 runs, 8 tasks, 1 failed)\n\n본문"),
                          "요약 (jobs today: 4 runs, 8 tasks, 1 failed)")
         self.assertEqual(before["payload"]["job_id"], "4000")
+
+    # ------------------------------------------------------------ day plan --addendum (release 73, #26)
+    def addendum(self, text, *extra):
+        f = self.tmp / "addendum.md"
+        f.write_text(text)
+        return self.cli("day", "plan", "--addendum", "--file", str(f), *extra)
+
+    def test_addendum_appends_without_restarting_the_day(self):
+        self.start_day(f"1. {self.wi}")
+        before = workday.day(self.s)
+        other = self.other_wi()
+        self.at(T0 + timedelta(hours=1))
+        rc, out = self.addendum(f"1. {other} (~6 units)", "--goal", "more")
+        self.assertEqual(rc, 0, out)
+        rec = [e for e in Ledger(self.s).events() if e["type"] == "day.planned"][-1]
+        p = rec["payload"]
+        self.assertEqual((p["addendum"], p["addendum_to"], p["goal"], rec["refs"]), (True, before["plan"], "more",
+                                                                                      [before["plan"]]))
+        self.assertEqual(workday.plan_items(rec), [other])
+        d = workday.day(self.s)
+        self.assertEqual((d["plan"], d["approval"], d["start"], d["end"], d["phase"]),
+                         (before["plan"], before["approval"], before["start"], before["end"], "on-duty"))
+        self.assertEqual([(a["record"], a["items"], a["approval"]) for a in d["addenda"]], [(rec["id"], [other], None)])
+        self.assertEqual(d["plan_items"], [self.wi], "an unapproved addendum does not count yet")
+        rc, out = self.cli("day", "status")
+        self.assertIn(f"Addendum {rec['id']} (10:00): more: {other}", out)
+        self.assertIn("waits for approval", out)
+        rc, out = self.cli("day", "approve", "--addendum", "--by", "DUREH", "--memo", "layer 2: addendum ok")
+        self.assertEqual(rc, 0, out)
+        appr = [e for e in Ledger(self.s).events() if e["type"] == "day.approved"][-1]
+        self.assertEqual((appr["payload"]["addendum"], appr["payload"]["by"], appr["refs"]),
+                         (rec["id"], "DUREH", [rec["id"], before["plan"]]))
+        d = workday.day(self.s)
+        self.assertEqual((d["approval"], d["approved_by"], d["start"]), (before["approval"], "Director", before["start"]))
+        self.assertEqual(d["plan_items"], sorted([self.wi, other]))
+        self.assertEqual(d["addenda"][0]["approved_by"], "DUREH")
+        rc, out = self.cli("day", "status")
+        self.assertIn(f"approved {appr['id']} by DUREH", out)
+        self.assertIn(f"approved {before['approval']} by Director", out)
+        with self.assertRaisesRegex(DurehError, "already approved"):
+            workday.approve(self.s, "desk", "again", addendum=True)
+        with self.assertRaisesRegex(DurehError, "still open; write its end report first"):
+            workday.plan(self.s, "desk", "again", "1. W")  # a second plan is refused as before
+
+    def test_addendum_needs_an_approved_open_plan(self):
+        with self.assertRaisesRegex(DurehError, "approved and open"):
+            workday.plan(self.s, "desk", "", "1. X", addendum=True)
+        workday.switch(self.s, True, "trial")
+        workday.plan(self.s, "desk", "finish W", "1. W")
+        with self.assertRaisesRegex(DurehError, "approved and open"):
+            workday.plan(self.s, "desk", "", "1. X", addendum=True)
+        with self.assertRaisesRegex(DurehError, "no addendum to approve"):
+            workday.approve(self.s, "desk", "ok", addendum=True)
+        workday.approve(self.s, "desk", "승인")
+        with self.assertRaisesRegex(DurehError, "no addendum to approve"):
+            workday.approve(self.s, "desk", "ok", addendum=True)
+        with self.assertRaisesRegex(DurehError, "plan text"):
+            workday.plan(self.s, "desk", "", "  ", addendum=True)
+        with self.assertRaises(DurehError):
+            workday.plan(self.s, "desk", "", "1. X", ["WI-9999"], addendum=True)
+        with self.assertRaisesRegex(DurehError, "not via slack"):
+            workday.approve(self.s, "desk", "ok", via="slack", addendum=True)
+        self.at(T0 + timedelta(hours=8, minutes=1))
+        workday.end(self.s, "desk", "x", "", [])
+        with self.assertRaisesRegex(DurehError, "approved and open"):
+            workday.plan(self.s, "desk", "", "1. X", addendum=True)
+        rc, out = self.cli("day", "plan", "--file", str(self.write_plan("1. W")))
+        self.assertNotEqual(rc, 0, "a day plan without --addendum still needs --goal")
+
+    def test_addendum_items_follow_the_finish_plan_rule(self):
+        self.start_day(f"1. {self.wi}")
+        other, third = self.other_wi(), self.other_wi("Y")
+        workday.plan(self.s, "desk", "", f"1. {other}", addendum=True)
+        workday.approve(self.s, "desk", "추가 승인", addendum=True)
+        workday.plan(self.s, "desk", "", f"1. {third}", addendum=True)  # never approved
+        self.at(T0 + timedelta(hours=8, minutes=1))
+        self.assertEqual(workday.allowed_past_end(self.s, other), "plan item")
+        self.assertIsNone(workday.allowed_past_end(self.s, third))
+        st = workday.status(self.s)
+        self.assertTrue(st["finishing"])
+        self.assertEqual(sorted(st["open"]), sorted([self.wi, other]))
+        self.assertEqual(len(st["addenda"]), 2)
+
+    def test_end_report_lists_addenda(self):
+        self.start_day(f"1. {self.wi}")
+        other = self.other_wi()
+        add = workday.plan(self.s, "desk", "more", f"1. {other}", addendum=True)
+        appr = workday.approve(self.s, "desk", "ok", by="DUREH", addendum=True)
+        self.at(T0 + timedelta(hours=8, minutes=1))
+        rec = workday.end(self.s, "desk", "x", "", [], early="그만")
+        a = rec["payload"]["addenda"]
+        self.assertEqual([(x["record"], x["goal"], x["items"], x["approval"], x["approved_by"]) for x in a],
+                         [(add["id"], "more", [other], appr["id"], "DUREH")])
+        self.assertIn(other, rec["payload"]["titles"])
+
+    def test_addendum_with_workday_off(self):
+        workday.plan(self.s, "desk", "finish W", "1. W", [self.wi])
+        workday.approve(self.s, "desk", "layer 2", by="DUREH")
+        other = self.other_wi()
+        rc, out = self.addendum(f"1. {other}", "--wi", other)
+        self.assertEqual(rc, 0, out)
+        add = [e for e in Ledger(self.s).events() if e["type"] == "day.planned"][-1]
+        self.assertEqual((add["payload"]["workday"], add["payload"]["items"]), (False, [other]))
+        appr = workday.approve(self.s, "desk", "ok", by="DUREH", addendum=True)
+        self.assertFalse(appr["payload"]["workday"])
+        d = workday.day(self.s)
+        self.assertEqual((d["phase"], d["plan_items"]), ("on-duty", sorted([self.wi, other])))
+        text = render_status(status(self.s))
+        self.assertIn(f"Addendum {add['id']}", text)
+        self.assertEqual(workday.status(self.s)["day"]["addenda"][0]["approval"], appr["id"])
 
     def write_plan(self, text):
         p = self.tmp / "plan.md"

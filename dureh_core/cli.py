@@ -619,9 +619,16 @@ def cmd_day(a):
             _print(text if st.get("enabled") else "\n".join(filter(None, [text, "Workday: off (the Director switches it on)"])))
     elif c == "plan":
         text = Path(a.file).read_text(encoding="utf-8") if a.file else sys.stdin.read()
-        _print(workday.plan(site, actor, a.goal, text, a.wi or [], a.director_action or []))
+        if a.addendum:
+            if a.director_action:
+                raise DurehError("--director-action belongs to the day plan, not to an addendum")
+            _print(workday.plan(site, actor, a.goal or "", text, a.wi or [], addendum=True))
+        else:
+            if not a.goal:
+                raise DurehError("day plan: --goal is required (except with --addendum)")
+            _print(workday.plan(site, actor, a.goal, text, a.wi or [], a.director_action or []))
     elif c == "approve":
-        _print(workday.approve(site, actor, a.memo, by=a.by))
+        _print(workday.approve(site, actor, a.memo, by=a.by, addendum=a.addendum))
     elif c == "decide":
         typed = None
         if a.option or a.question or a.fact:
@@ -1259,8 +1266,13 @@ def parser() -> argparse.ArgumentParser:
                         ).add_subparsers(dest="day_command", required=True)
     x = add(dy, "status", cmd_day, "phase of the day and today's Claude usage against the daily share")
     x.add_argument("--json", action="store_true")
-    x = add(dy, "plan", cmd_day, "record the day plan for the Director (text from --file or stdin)")
-    x.add_argument("--goal", required=True)
+    x = add(dy, "plan", cmd_day, "record the day plan for the Director (text from --file or stdin); with --addendum, "
+                                 "an addendum to today's approved, open plan")
+    x.add_argument("--goal", help="the day's goal (required for a day plan; optional with --addendum)")
+    x.add_argument("--addendum", action="store_true",
+                   help="release 73: record an addendum to today's approved and open day plan (`day.planned` with "
+                        "addendum: true; the day does not restart); once approved with `day approve --addendum` its "
+                        "WIs count into the day like the plan's own")
     x.add_argument("--file")
     x.add_argument("--wi", nargs="*", help="the plan's work items (default: every WI id the plan text names); after "
                                            "the end time they and their fixes go on until finished (finish-plan rule)")
@@ -1273,6 +1285,8 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--memo", required=True, help="the approver's words")
     x.add_argument("--by", default="Director", help="who approved: Director (default; layer 3) or DUREH (approval "
                                                     "layer 2, CHARTER; valid with workday mode on or off)")
+    x.add_argument("--addendum", action="store_true", help="release 73: approve the day's latest addendum "
+                                                           "(`day plan --addendum`); the day's clock is unchanged")
     x = add(dy, "decide", cmd_day, "record a decision point (own proposal followed) and commit state as a rollback point")
     x.add_argument("--title", required=True)
     x.add_argument("--choice", required=True)

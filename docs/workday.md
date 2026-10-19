@@ -61,7 +61,19 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    `dureh day approve --by DUREH --memo "<DUREH's words>"`. `--by` takes `Director` (the default, as before) or
    `DUREH` and is refused otherwise (and with `via: slack`, which is the Director's own reaction); the `day.approved`
    record keeps its shape with `by` set, the approval counts the same with workday mode on or off, and `day status`
-   shows `approved <id> by <who>`. Work starts only after one of these approvals. No Slack text is ever an
+   shows `approved <id> by <who>`. **Addenda (release 73, project-dureh/dureh#26).** When the plan is done early and
+   the desk proposes more work the same day, it records an addendum instead of a second plan (which stays refused
+   while today's plan is approved and open): `dureh day plan --addendum --file addendum.md [--goal G] [--wi WI ...]`
+   appends a `day.planned` record with `addendum: true`, `addendum_to` (the plan's id, also a ref) and `at`; it is
+   refused unless today's plan is approved and its end report not yet written. The day does not restart: plan,
+   approval, start and end stay as they were. The approver's OK is recorded with
+   `dureh day approve --addendum --by Director|DUREH --memo "<words>"` (a layer-2 kind like the plan): a
+   `day.approved` record with `addendum` (the addendum's id) and `plan`, for the latest addendum only, once. From
+   then on the addendum's WIs (its `--wi`, else every WI id its text names) count into the day like the plan's own:
+   `plan_items`, the finish-plan rule after the end time, and the end report's titles. `day status` prints one line
+   per addendum (`Addendum <id> (HH:MM): <goal>: <WIs>; approved <id> by <who>` or `waits for approval`), with workday
+   mode on or off, and the end report carries `addenda` `[{record, at, goal, items, approval, approved_by}]`.
+   Work starts only after one of these approvals. No Slack text is ever an
    instruction (docs/slack.md). The approval covers the plan's content; the clock already runs from the
    session start (the approval record carries that start and end).
 3. **Work.** Until the end time the desk works toward the goal without asking again. Work items

@@ -273,13 +273,13 @@ def day(site: Site, events: list[dict] | None = None) -> dict:
     all_evs = events if events is not None else _events(site)
     session = todays_session(all_evs)
     evs = [e for e in all_evs if e["type"] in DAY_TYPES]
-    # the day starts at the last plan; older days are history
-    start = max((i for i, e in enumerate(evs) if e["type"] == "day.planned"), default=None)
+    # the day starts at the last plan; older days are history (an addendum, release 73, never starts a day)
+    start = max((i for i, e in enumerate(evs) if e["type"] == "day.planned" and not _is_addendum(e)), default=None)
     if start is None:
         return {"phase": "off-duty", "reason": "no day plan", **_session_clock(site, session)}
     cur = evs[start:]
     plan = cur[0]
-    approved = [e for e in cur if e["type"] == "day.approved"]
+    approved = [e for e in cur if e["type"] == "day.approved" and not (e.get("payload") or {}).get("addendum")]
     ended = [e for e in cur if e["type"] == "day.ended"]
     closed = [e for e in cur if e["type"] == "day.closed"]
     overtime = [e for e in cur if e["type"] == "day.overtime"]
@@ -296,6 +296,10 @@ def day(site: Site, events: list[dict] | None = None) -> dict:
            "decisions": decisions, **_session_clock(site, session)}
     if plan["payload"].get("director_actions"):
         out["director_actions"] = list(plan["payload"]["director_actions"])  # release 58
+    adds = _addenda(cur)
+    if adds:
+        out["addenda"] = adds
+    extra = addendum_items(adds)
     if closed:
         return {**out, "phase": "off-duty", "reason": f"day closed {closed[-1]['ts']}"}
     mode = hours_mode(site)
@@ -303,7 +307,7 @@ def day(site: Site, events: list[dict] | None = None) -> dict:
     if on:  # release 70: an approval recorded with workday mode off starts no clock; switched on, approve again
         approved = [e for e in approved if not _unclocked(e)]
     elif approved and _unclocked(approved[-1]):
-        return _unclocked_day(site, out, plan, approved[-1], ended)
+        return _unclocked_day(site, out, plan, approved[-1], ended, extra)
     if not approved:
         if mode == "block" and out.get("end") and _now() >= _parse(out["end"]) and not ended:
             return {**out, "phase": "past-end", "reason": f"the day ended at {out['end']} (never approved); "
@@ -311,7 +315,7 @@ def day(site: Site, events: list[dict] | None = None) -> dict:
         return {**out, "phase": "planned", "reason": "day plan waits for the Director's approval"}
     a = approved[-1]["payload"]
     out.update(start=a["start"], end=a["end"], approval=approved[-1]["id"], approved_by=a.get("by") or "Director",
-               plan_items=plan_items(plan))
+               plan_items=sorted(set(plan_items(plan)) | set(extra)))
     out["working_day"] = working_day(site, out["start"])
     # the Director's accepted items (`day overtime --items`) and the ones the finish-plan rule recorded by itself
     director = sorted({w for e in overtime if e["payload"].get("rule") != FINISH_RULE for w in e["payload"]["items"]})
@@ -341,7 +345,7 @@ def day(site: Site, events: list[dict] | None = None) -> dict:
                              "items": plans[-1]["payload"].get("items")} if plans else None)
     past = bool(mode) and _now() >= _parse(a["end"])
     if past and out["working_day"] and settings(site)["finish_plan"]:
-        out.update(_finishing(site, plan))  # finishing, open, fixes, statuses (Director rule 2026-10-06)
+        out.update(_finishing(site, plan, extra))  # finishing, open, fixes, statuses (Director rule 2026-10-06)
     if past:
         if mode == "block":
             if out.get("finishing"):
@@ -365,15 +369,41 @@ def _unclocked(approval: dict) -> bool:
     return (approval.get("payload") or {}).get("workday") is False
 
 
-def _unclocked_day(site: Site, out: dict, plan: dict, approval: dict, ended: list[dict]) -> dict:
+def _unclocked_day(site: Site, out: dict, plan: dict, approval: dict, ended: list[dict], extra=()) -> dict:
     """The day of a plan approved with workday mode off (release 70): no hours, no clock, no overtime; the plan, its
     items, the Director's actions and the approval are on record; `on-duty` until `day end`, then `off-duty`."""
     out.update(approval=approval["id"], approved_by=(approval.get("payload") or {}).get("by") or "Director",
-               plan_items=plan_items(plan), workday=False, approved_at=approval["ts"])
+               plan_items=sorted(set(plan_items(plan)) | set(extra)), workday=False, approved_at=approval["ts"])
     if ended:
         return {**out, "report": ended[-1]["id"], "phase": "off-duty",
                 "reason": "end report written (workday mode off)"}
     return {**out, "phase": "on-duty", "reason": "plan approved; workday mode off: no hours"}
+
+
+def _is_addendum(e: dict) -> bool:
+    return bool((e.get("payload") or {}).get("addendum"))
+
+
+def _addenda(cur: list[dict]) -> list[dict]:
+    """The day's addenda (release 73, project-dureh/dureh#26): `day.planned` records marked `addendum`, oldest first,
+    each with its approval (a `day.approved` record whose `addendum` names it) or None."""
+    appr = {(e.get("payload") or {}).get("addendum"): e for e in cur
+            if e["type"] == "day.approved" and (e.get("payload") or {}).get("addendum")}
+    out = []
+    for e in cur:
+        if e["type"] != "day.planned" or not _is_addendum(e):
+            continue
+        a = appr.get(e["id"])
+        out.append({"record": e["id"], "ts": e["ts"], "at": e["payload"].get("at") or e["ts"], "goal": e["payload"].get("goal"), "items": plan_items(e),
+                    "titles": e["payload"].get("titles") or {},
+                    "approval": a["id"] if a else None, "approved_by": (a["payload"].get("by") or "Director") if a else None,
+                    "approved_at": a["ts"] if a else None})
+    return out
+
+
+def addendum_items(addenda: list[dict]) -> list[str]:
+    """The WIs of the approved addenda: they count into the day like the plan's own (finish-plan rule, end report)."""
+    return sorted({w for a in addenda or [] if a.get("approval") for w in a["items"]})
 
 
 def plan_items(plan_event: dict) -> list[str]:
@@ -384,13 +414,13 @@ def plan_items(plan_event: dict) -> list[str]:
     return sorted(set(WI_RE.findall(p.get("plan") or "")))
 
 
-def plan_progress(site: Site, plan_event: dict) -> dict:
+def plan_progress(site: Site, plan_event: dict, extra=()) -> dict:
     """Where the plan stands: its WIs (the ones that exist), the fixes they caused, and which are still open.
     A fix is a WI created after the plan whose record names a plan WI (or an earlier fix) as `parent` or
     `fix_for`; a rework or amendment of a plan WI keeps its id and needs no link. Open means a work unit can
     still start for it (OPEN_STATUSES); verified, promoted, stopped and reverted items are finished for the day."""
     led = Ledger(site)
-    ids = plan_items(plan_event)
+    ids = sorted(set(plan_items(plan_event)) | set(extra))  # release 73: plus the approved addenda's WIs
     recs = {r["id"]: r for r in led.load("work-item")}
     items = [w for w in ids if w in recs]
     related, fixes = set(items), []
@@ -407,8 +437,8 @@ def plan_progress(site: Site, plan_event: dict) -> dict:
             "open": [w for w in items + fixes if status.get(w) in OPEN_STATUSES]}
 
 
-def _finishing(site: Site, plan_event: dict) -> dict:
-    pr = plan_progress(site, plan_event)
+def _finishing(site: Site, plan_event: dict, extra=()) -> dict:
+    pr = plan_progress(site, plan_event, extra)
     out = {"open": pr["open"], "fixes": pr["fixes"], "statuses": pr["statuses"]}
     if pr["open"]:
         out["finishing"] = True
@@ -424,7 +454,7 @@ def plan_open(site: Site, d: dict) -> dict:
     plan = [e for e in _events(site) if e["type"] == "day.planned" and e["id"] == d["plan"]]
     if not plan:
         return d
-    pr = plan_progress(site, plan[-1])
+    pr = plan_progress(site, plan[-1], addendum_items(d.get("addenda")))
     return {**d, "open": pr["open"], "fixes": pr["fixes"], "statuses": pr["statuses"]}
 
 
@@ -512,7 +542,7 @@ def status(site: Site) -> dict:
         d = day(site, evs)
         if d.get("plan") and d.get("date") == _now().date().isoformat():  # release 70: the plan without hours
             out["day"] = {k: d[k] for k in ("phase", "reason", "plan", "date", "goal", "approval", "approved_by",
-                                            "report", "plan_items", "director_actions") if d.get(k) is not None}
+                                            "report", "plan_items", "director_actions", "addenda") if d.get(k) is not None}
         return out
     out = {"enabled": True, "hours": settings(site)["hours"], "workday_phase": settings(site)["phase"], **switches,
            **day(site, evs)}
@@ -629,6 +659,7 @@ def render(st: dict, with_banner: bool = True) -> str | None:
         line = f"Day (workday mode off): {dd['phase']}, plan {dd['plan']}" + (
             f", approved {dd['approval']} by {dd.get('approved_by') or 'Director'}" if dd.get("approval") else "") + (
             f", end report {dd['report']}" if dd.get("report") else "") + (f"; {dd['reason']}" if dd.get("reason") else "")
+        line += addenda_text(dd.get("addenda"))
         if dd.get("director_actions"):
             line += "\n" + director_actions_text(dd["director_actions"])
         return f"{head}\n{line}" if head else line
@@ -658,11 +689,23 @@ def render(st: dict, with_banner: bool = True) -> str | None:
         line += "; devices off: " + ", ".join(st["devices_off"])
     if st.get("approval"):  # release 71: who approved the day plan (the Director, or DUREH under layer 2)
         line += f"; approved {st['approval']} by {st.get('approved_by') or 'Director'}"
+    line += addenda_text(st.get("addenda"))
     if st.get("director_actions"):
         line += "\n" + director_actions_text(st["director_actions"])
     if st.get("warning"):
         line += f"\n⚠ {st['warning']}"
     return f"{head}\n{line}" if head else line
+
+
+def addenda_text(addenda: list[dict] | None) -> str:
+    """One line per addendum of the day (release 73): "\nAddendum <id> (<HH:MM>): <WIs>; approved <id> by <who>"."""
+    out = ""
+    for a in addenda or []:
+        items = ", ".join(a["items"]) or "no WI"
+        goal = f" {a['goal']}:" if a.get("goal") else ""
+        state = f"approved {a['approval']} by {a['approved_by']}" if a.get("approval") else "waits for approval"
+        out += f"\nAddendum {a['record']} ({a['at'][11:16]}):{goal} {items}; {state}"
+    return out
 
 
 DIRECTOR_ACTIONS_LABEL = "대표님 조치 필요:"
@@ -852,11 +895,13 @@ def calibrate(site: Site, weekly_percent: float) -> dict:
 
 
 def plan(site: Site, actor: str, goal: str, text: str, items: list[str] | None = None,
-         director_actions: list[str] | None = None) -> dict:
+         director_actions: list[str] | None = None, addendum: bool = False) -> dict:
     """Record the day plan. Its work items are `items` (`day plan --wi`, each an existing WI) or, without them,
     every WI id the text names: the finish-plan rule reads them (`plan_items`). `director_actions` (release 58,
     `--director-action`, repeatable) lists every action only the Director can take today (a dataset link, a push
     approval, a config change); `slack ask --kind day-plan` posts them so the Director handles them in one go."""
+    if addendum:
+        return plan_addendum(site, actor, text, goal, items)
     if not goal.strip() or not text.strip():
         fail("a day plan needs --goal and the plan text")
     on = enabled(site)  # release 70: with workday mode off the plan is recorded the same way, without hours
@@ -887,6 +932,31 @@ def plan(site: Site, actor: str, goal: str, text: str, items: list[str] | None =
     return led.event("day.planned", actor, None, payload, [supersedes] if supersedes else None)
 
 
+def plan_addendum(site: Site, actor: str, text: str, goal: str | None = None, items: list[str] | None = None) -> dict:
+    """An addendum to today's approved, open day plan (release 73, project-dureh/dureh#26): a `day.planned` record
+    with `addendum: true` and `addendum_to` (the plan's id, also a ref). It never starts a new day; once approved
+    (`day approve --addendum`) its WIs count into the day like the plan's own."""
+    if not text.strip():
+        fail("an addendum needs the plan text (--file or stdin)")
+    d = day(site)
+    today = _now().date().isoformat()
+    if not d.get("plan") or not d.get("approval") or d.get("report") or d["phase"] == "off-duty" \
+            or d.get("date") != today:
+        fail(f"an addendum needs today's day plan approved and open (phase {d['phase']}"
+             + (f", plan {d['plan']}" if d.get("plan") else "") + "); record a day plan with `dureh day plan` instead")
+    led = Ledger(site)
+    for w in items or []:
+        led.get("work-item", w)
+    payload = {"date": today, "goal": (goal or "").strip() or None, "plan": text, "addendum": True,
+               "addendum_to": d["plan"], "at": _ts(_now()), "usage_at_plan": usage(site), "heads": heads(site)}
+    if items:
+        payload["items"] = sorted(set(items))
+    payload["titles"] = _titles(led, plan_items({"payload": payload}))
+    if not enabled(site):
+        payload["workday"] = False
+    return led.event("day.planned", actor, None, payload, [d["plan"]])
+
+
 def _titles(led: Ledger, wis) -> dict[str, str]:
     """{WI: short title} of the existing work items among `wis` (UR-20261008-02: reports name WIs with titles)."""
     payloads = led.work_item_payloads()
@@ -897,7 +967,7 @@ APPROVERS = ("Director", "DUREH")  # release 71: who approved the day plan (`day
 
 
 def approve(site: Site, actor: str, memo: str, via: str | None = None, extra: dict | None = None,
-            by: str = "Director") -> dict:
+            by: str = "Director", addendum: bool = False) -> dict:
     """Record the approval of the day plan. The desk records the approver's words from the session;
     `via="slack"` is used only by `dureh slack check` after the Director's own ✅ reaction (release 33).
     `by` (release 71) is the approver: the Director (layer 3, the default) or DUREH (approval layer 2, CHARTER: the
@@ -909,6 +979,10 @@ def approve(site: Site, actor: str, memo: str, via: str | None = None, extra: di
     if not memo.strip():
         fail(f"--memo must carry the {by}'s words")
     d = day(site)
+    if addendum:
+        if via:
+            fail("an addendum is approved in the session (`day approve --addendum`), not via " + via)
+        return _approve_addendum(site, actor, memo, by, d)
     if d["phase"] != "planned":
         fail(f"no day plan waits for approval (phase {d['phase']})")
     if not enabled(site):  # release 70: the approval is recorded without hours; no clock starts
@@ -924,6 +998,23 @@ def approve(site: Site, actor: str, memo: str, via: str | None = None, extra: di
     if via:
         payload.update(extra or {}, via=via)
     return Ledger(site).event("day.approved", actor, None, payload, [d["plan"]])
+
+
+def _approve_addendum(site: Site, actor: str, memo: str, by: str, d: dict) -> dict:
+    """Approve the day's latest addendum (release 73): a `day.approved` record with `addendum` (its id), refs the
+    addendum and the plan; the day's own approval, start and end stay as they were."""
+    adds = d.get("addenda") or []
+    if not adds:
+        fail(f"no addendum to approve (record one with `dureh day plan --addendum --file F`; phase {d['phase']})")
+    last = adds[-1]
+    if last["approval"]:
+        fail(f"the latest addendum {last['record']} is already approved ({last['approval']} by {last['approved_by']})")
+    if d.get("report") or d["phase"] == "off-duty" or not d.get("approval"):
+        fail(f"the day of {d.get('plan')} is not open (phase {d['phase']}); an addendum is approved while the day runs")
+    payload = {"memo": memo, "by": by, "addendum": last["record"], "plan": d["plan"], "session": d.get("session")}
+    if not enabled(site):
+        payload["workday"] = False
+    return Ledger(site).event("day.approved", actor, None, payload, [last["record"], d["plan"]])
 
 
 def heads(site: Site) -> dict[str, str | None]:
@@ -1015,6 +1106,9 @@ def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], e
               "start": d.get("start"), "end": d.get("end"), "ended_at": _ts(_now()),
               "session": d.get("session"), "working_day": d.get("working_day", True),
               "early": early or None, "usage": u, "heads": heads(site), **({} if on else {"workday": False})}
+    if d.get("addenda"):  # release 73: the day's addenda, each with its WIs and approval
+        report["addenda"] = [{k: a[k] for k in ("record", "at", "goal", "items", "approval", "approved_by")}
+                             for a in d["addenda"]]
     past = past_end_section(site, d, stop, early) if on else None
     if past:
         report["past_end"] = past
@@ -1028,6 +1122,7 @@ def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], e
     report["spawns"] = spawn_table(led.events(), (plan_ev["ts"], plan_ev["id"]) if plan_ev else None)
     named = list(overtime) + [r["wi"] for r in report["jobs"]["runs"] if r.get("wi")]
     named += plan_items(plan_ev) if plan_ev else []
+    named += [w for a in d.get("addenda") or [] for w in a["items"]]
     named += [x["wi"] for x in (past or {}).get("items", []) + (past or {}).get("director", [])]
     report["titles"] = _titles(led, named)  # UR-20261008-02
     rec = led.event("day.ended", actor, None, report, [d["plan"]])
