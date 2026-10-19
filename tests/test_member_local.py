@@ -446,13 +446,39 @@ class OfficeHours(MemberCase):
 
     def test_wall_time_follows_the_workday_and_caps(self):
         hours, notes = office_hours.wall_hours(self.s)
-        self.assertGreater(hours, 8)  # no running day: the working day plus the overtime allowance
+        self.assertEqual(hours, 8)  # no running day: the working day (release 74: no overtime allowance)
         self.config(office_hours={**self.s.config["office_hours"], "time": "04:00:00"})
         hours, notes = office_hours.wall_hours(self.s)
         self.assertEqual(hours, 4)
         self.assertIn("capped by office_hours.time 04:00:00", notes)
         self.config(cluster={"scheduler": "slurm", "partitions": {"gpu": {"time_limit": "2:00:00"}}})
         self.assertEqual(office_hours.wall_hours(self.s)[0], 2)
+
+    def test_wall_time_ends_with_the_day(self):
+        """Release 74 (#8, #33): office hours never outlive the day: the wall time ends at today's session clock end
+        (workday mode off here), and past the end they do not start."""
+        from dureh_core import workday
+
+        os.environ["DUREH_FAKE_NOW"] = "2026-10-19T11:35:00-04:00"
+        self.addCleanup(os.environ.pop, "DUREH_FAKE_NOW", None)
+        self.led.event("session.started", "desk", None, {"job_id": "777", "purpose": "desk",
+                                                         "submitted_at": "2026-10-19T07:39:00-04:00"})
+        hours, notes = office_hours.wall_hours(self.s)
+        self.assertAlmostEqual(hours, 4 + 4 / 60, places=3)  # to 15:39 local
+        self.assertIn("ends with the day at 2026-10-19T15:39:00-04:00 (2026-10-19T19:39:00Z)", notes)
+        self.assertIn("#SBATCH --time=04:04:00", office_hours.plan(self.s)["text"])
+        saved = {k: os.environ.pop(k) for k in ("DUREH_ACTOR", "CLAUDECODE") if k in os.environ}
+        try:  # the Director's switch, from outside an agent session
+            workday.set_device(self.s, "hours", False, "밤샘")  # no clock: the overtime allowance again
+            self.assertGreater(office_hours.wall_hours(self.s)[0], 8)
+            workday.set_device(self.s, "hours", True, "x")
+        finally:
+            os.environ.update(saved)
+        os.environ["DUREH_FAKE_NOW"] = "2026-10-19T15:40:00-04:00"
+        with self.assertRaisesRegex(DurehError, "office hours end with the day"):
+            office_hours.wall_hours(self.s)
+        self.config(office_hours={**self.s.config["office_hours"], "enabled": True})
+        self.assertIn("office hours end with the day", office_hours.start_quietly(self.s, "desk")["error"])
 
     def test_start_status_stop_with_a_fake_scheduler(self):
         rec = office_hours.start(self.s, "desk")

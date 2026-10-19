@@ -174,8 +174,10 @@ bundle read and the sandbox helper's own paths read (no write entry, so nothing 
 `office_hours`. The job starts the server (kind `ollama`) bound to its node (`OLLAMA_HOST=<host>:<port>`, models in
 `server.models_dir`), pulls each profile's `base` when missing, runs `create <name> -f <package file>` for each
 profile, then writes `logs/office-hours/server.json` `{kind, host, port, models, profiles: {name: {file, sha256,
-base}}, started, job}`; it removes the file when it ends. The wall time is the day's end plus the overtime allowance
-(or the working day plus the allowance when no day runs), capped by `office_hours.time` and the partition's limit.
+base}}, started, job}`; it removes the file when it ends. The wall time ends with the day (release 74, #8): it runs to
+the day's end (the approved end, else today's session clock; workday mode on or off), or the working day when no day
+runs, and office hours do not start once the day's end has passed; only with the hours device off (the Director's
+switch) the overtime allowance is added. It is capped by `office_hours.time` and the partition's limit.
 `day close` and `site session release` stop it (`office-hours.stopped`); `stop` and `status` are the desk's commands.
 `plan` prints the script and submits nothing.
 

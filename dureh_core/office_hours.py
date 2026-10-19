@@ -5,8 +5,9 @@
 when `office_hours.enabled`, and `day close` and `site session release` stop it (`office-hours.stopped`). The job
 starts the server bound to its node, creates each profile of `office_hours.profiles` from its package file (pulling
 the base model into `server.models_dir` when missing), then writes `{host, port, models, profiles, started, job}` to
-`logs/office-hours/server.json`; it removes the file when it ends. Its wall time follows the workday clock (the day's
-end plus the overtime allowance, within the partition's limit and `office_hours.time`).
+`logs/office-hours/server.json`; it removes the file when it ends. Its wall time ends with the day (release 74, #8:
+the day's end, workday mode on or off; the overtime allowance only with the hours device off), within the
+partition's limit and `office_hours.time`.
 """
 from __future__ import annotations
 
@@ -107,8 +108,10 @@ def _server(site: Site) -> dict:
 
 
 def wall_hours(site: Site) -> tuple[float, list[str]]:
-    """The job's wall time: from now to the day's end plus the overtime allowance when the day runs, else the
-    working day plus the allowance; never over `office_hours.time` or the partition's time limit."""
+    """The job's wall time: from now to the day's end (release 74, #8/#33: office hours never outlive the day; the
+    approved end, else today's session clock, workday mode on or off), else the working day; refused once the day's
+    end has passed. With the hours device off (the Director's switch: no clock) the day's end plus the overtime
+    allowance, as before. Never over `office_hours.time` or the partition's time limit."""
     from datetime import timedelta
 
     from . import cluster, workday
@@ -116,13 +119,27 @@ def wall_hours(site: Site) -> tuple[float, list[str]]:
     wd = workday.settings(site)
     notes = []
     d = workday.day(site)
-    if d.get("end"):
-        left = (workday._parse(d["end"]) - workday._now()).total_seconds() / 3600
-        hours = max(0.5, left + max(0.0, wd["overtime_hours"]))
-        notes.append(f"day ends {d['end']}; + overtime allowance {wd['overtime_hours']:g} h")
+    sess = workday._session_clock(site, workday.todays_session(workday._events(site))).get("end")
+    ends = [e for e in (d.get("end"), sess) if e]
+    now = workday._now()
+    if not workday.device_on(site, "hours"):
+        extra = max(0.0, wd["overtime_hours"])
+        if ends:
+            hours = max(0.5, (workday._parse(ends[0]) - now).total_seconds() / 3600 + extra)
+            notes.append(f"day ends {ends[0]}; + overtime allowance {extra:g} h (hours device off)")
+        else:
+            hours = wd["hours"] + extra
+            notes.append(f"no running day: workday {wd['hours']:g} h + overtime allowance {extra:g} h (hours device off)")
+    elif ends:
+        future = [e for e in ends if workday._parse(e) > now]
+        if not future:
+            fail(f"the day ended at {workday.local_utc(ends[0])}: office hours end with the day (they start again with "
+                 "the next day's session)")
+        hours = (workday._parse(future[0]) - now).total_seconds() / 3600
+        notes.append(f"ends with the day at {future[0]} ({workday.utc_of(future[0])})")
     else:
-        hours = wd["hours"] + max(0.0, wd["overtime_hours"])
-        notes.append(f"no running day: workday {wd['hours']:g} h + overtime allowance {wd['overtime_hours']:g} h")
+        hours = wd["hours"]
+        notes.append(f"no running day: the working day, {wd['hours']:g} h")
     cap = cluster.parse_time(config(site).get("time"))
     if cap is not None and cap < timedelta(hours=hours):
         hours = cap.total_seconds() / 3600
