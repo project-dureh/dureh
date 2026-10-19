@@ -72,6 +72,47 @@ class Usage(unittest.TestCase):
         with self.assertRaises(ValueError):
             claude_usage.calibrate(0, roots=[str(self.tmp / "projects")])
 
+    def test_week_window_rolling_without_weekly_reset(self):
+        """Release 72 (#24): no weekly_reset keeps the rolling seven local days ending today."""
+        at = datetime(2026, 10, 19, 14, 30, tzinfo=timezone(timedelta(hours=-4)))
+        self.assertEqual(claude_usage.week_window({}, at), {"kind": "rolling", "start": "2026-10-13T00:00:00-04:00",
+                                                            "end": "2026-10-19T14:30:00-04:00"})
+
+    def test_week_window_from_a_past_or_future_reset(self):
+        """Release 72 (#24): the provider resets every 7 days from weekly_reset; the window starts at the latest
+        reset at or before now, whether the instant given is in the past or in the future."""
+        at = datetime(2026, 10, 19, 14, 30, tzinfo=timezone(timedelta(hours=-4)))
+        for reset, start in (("2026-10-02T13:00:00-04:00", "2026-10-16T13:00:00-04:00"),  # two weeks back
+                             ("2026-10-23T13:00:00-04:00", "2026-10-16T13:00:00-04:00"),  # in the future
+                             ("2026-10-16T17:00:00+00:00", "2026-10-16T17:00:00+00:00"),  # another offset
+                             ("2026-10-19T14:30:00-04:00", "2026-10-19T14:30:00-04:00")):  # exactly now
+            w = claude_usage.week_window({"weekly_reset": reset}, at)
+            self.assertEqual((w["kind"], w["start"], w["end"]), ("reset", start, "2026-10-19T14:30:00-04:00"), reset)
+
+    def test_week_units_count_from_the_latest_reset(self):
+        """Release 72 (#24): with weekly_reset the week sums usage since the latest reset, the reset day cut at
+        the instant; summary names the window. Without it, the rolling seven days as before."""
+        now = datetime.now().astimezone().replace(microsecond=0)
+        (self.root / "s.jsonl").write_text(
+            transcript_line(now - timedelta(days=6), "a", inp=1_000_000)
+            + transcript_line(now - timedelta(days=2, hours=2), "b", inp=4_000_000)  # before the reset
+            + transcript_line(now - timedelta(days=2), "c", inp=2_000_000)
+            + transcript_line(now - timedelta(hours=1), "d", inp=1_000_000))
+        roots = [str(self.tmp / "projects")]
+        rolling = claude_usage.summary({"weekly_units": 80}, roots, at=now)
+        self.assertAlmostEqual(rolling["week_units"], 8.0)
+        self.assertEqual(rolling["window_kind"], "rolling")
+        start = now - timedelta(days=2, hours=1)
+        for reset in (start, start + timedelta(days=7), start - timedelta(days=14)):  # now, future, past
+            s = claude_usage.summary({"weekly_units": 80, "weekly_reset": reset.isoformat()}, roots, at=now)
+            self.assertAlmostEqual(s["week_units"], 3.0, msg=reset.isoformat())
+            self.assertAlmostEqual(s["week_percent"], 3.8)
+            self.assertEqual((s["window_kind"], s["window_start"], s["window_end"]),
+                             ("reset", start.isoformat(timespec="seconds"), now.isoformat(timespec="seconds")))
+        cal = claude_usage.calibrate(10, roots=roots, weekly_reset=start.isoformat(), at=now)
+        self.assertAlmostEqual(cal["weekly_units"], 30.0)
+        self.assertEqual(cal["window"]["kind"], "reset")
+
 
 class Workday(SiteCase):
     def setUp(self):
@@ -241,6 +282,35 @@ class Workday(SiteCase):
         self.assertAlmostEqual(data["weekly_units"], 10.0)
         self.assertEqual(workday.budget(self.s)["source"], str(ex / "usage-budget.json"))
         self.assertEqual(data["site"], self.site_root.name)  # default label: the folder name
+
+    def test_day_status_week_from_the_shared_weekly_reset(self):
+        """Release 72 (#24): the week usage follows `weekly_reset` in <exchange>/usage-budget.json, `day status
+        --json` names the window, and calibrate keeps weekly_reset when it rewrites the file."""
+        ex = self.tmp / "exchange"
+        ex.mkdir()
+        self.config(upstream={"exchange": str(ex)})
+        workday.switch(self.s, True, "trial")
+        reset = T0 - timedelta(hours=1)
+        f = ex / "usage-budget.json"
+        f.write_text(json.dumps({"weekly_units": 100, "weekly_reset": (reset - timedelta(days=21)).isoformat()}))
+        self.at(T0 - timedelta(hours=2))
+        self.spend(4)  # before the reset
+        self.at(T0)
+        self.spend(1)
+        rc, out = self.cli("day", "status", "--json")
+        u = json.loads(out)["usage"]
+        self.assertEqual(rc, 0)
+        self.assertAlmostEqual(u["week_units"], 1.0)
+        self.assertEqual((u["window_kind"], u["window_start"], u["window_end"]),
+                         ("reset", reset.isoformat(), T0.isoformat()))
+        workday.calibrate(self.s, 10)
+        data = json.loads(f.read_text())
+        self.assertAlmostEqual(data["weekly_units"], 10.0)
+        self.assertEqual(data["weekly_reset"], (reset - timedelta(days=21)).isoformat())
+        f.write_text(json.dumps({"weekly_units": 100}))
+        u = workday.status(self.s)["usage"]
+        self.assertAlmostEqual(u["week_units"], 5.0)
+        self.assertEqual(u["window_kind"], "rolling")
 
     def test_shared_budget_label_is_the_pinned_mailbox(self):
         ex = self.tmp / "exchange"

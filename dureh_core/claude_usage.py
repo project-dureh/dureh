@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import os
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time as dtime, timedelta
 from pathlib import Path
 
 # Relative cost of token kinds (cache reads are cheap, output is dear). Calibration absorbs the scale.
@@ -180,13 +180,106 @@ def units(tokens: dict, model: str, model_weights: dict | None = None) -> float:
     return _model_weight(model, model_weights or {}) * sum(TOKEN_WEIGHTS[k] * tokens.get(k, 0) for k in TOKEN_WEIGHTS) / 1e6
 
 
-def summary(budget: dict | None = None, roots: list[str] | None = None, today: date | None = None) -> dict:
-    """Today's and the rolling week's units against the calibrated allowance.
+def week_window(budget: dict | None, at: datetime) -> dict:
+    """The week window as of `at`: {"kind": "reset"|"rolling", "start": ISO, "end": ISO} (release 72,
+    project-dureh/dureh#24; the rule of upstream tools/workday.py week_window()).
 
-    budget: {"weekly_units": float|None, "daily_share": float (default 1/7), "model_weights": {...}}
-    """
+    reset: the budget has `weekly_reset`, one reset instant; the provider resets every 7 days from it, so the
+    window starts at the latest reset <= at (a reset given in the future counts back by whole weeks).
+    rolling: no `weekly_reset`, the 7 local days ending at's day."""
+    reset = (budget or {}).get("weekly_reset")
+    if reset:
+        r = datetime.fromisoformat(reset)
+        r = r if r.tzinfo else r.astimezone()
+        k = (at - r) // timedelta(days=7)
+        start = r + k * timedelta(days=7)
+        return {"kind": "reset", "start": start.isoformat(timespec="seconds"), "end": at.isoformat(timespec="seconds")}
+    start = datetime.combine(at.date() - timedelta(days=6), dtime.min, tzinfo=at.tzinfo)
+    return {"kind": "rolling", "start": start.isoformat(timespec="seconds"), "end": at.isoformat(timespec="seconds")}
+
+
+def _exact_day_tokens(day: str, lo: datetime | None, hi: datetime | None) -> dict:
+    """{model: {token kind: count}} for one local day restricted to [lo, hi], read from the transcripts
+    themselves (the scan cache keeps days, not instants). Only files the cache lists for that day are read."""
+    try:
+        cache = json.loads(_cache_path().read_text())
+        files = [k for k, e in cache.get("files", {}).items() if day in e.get("days", {})]
+    except (OSError, ValueError):
+        files = []
+    out: dict = {}
+    for name in files:
+        last = None
+        try:
+            lines = Path(name).read_bytes().split(b"\n")
+        except OSError:
+            continue
+        for raw in lines:
+            if b'"usage"' not in raw:
+                continue
+            try:
+                d = json.loads(raw)
+            except ValueError:
+                continue
+            msg = d.get("message") if isinstance(d, dict) else None
+            if d.get("type") != "assistant" or not isinstance(msg, dict) or not isinstance(msg.get("usage"), dict):
+                continue
+            mid = d.get("requestId") or msg.get("id")
+            if mid and mid == last:  # one response is written as several lines carrying the same usage
+                continue
+            last = mid
+            try:
+                when = datetime.fromisoformat((d.get("timestamp") or "").replace("Z", "+00:00")).astimezone()
+            except ValueError:
+                continue
+            model = msg.get("model") or "unknown"
+            if model.startswith("<") or when.date().isoformat() != day:
+                continue
+            if (lo and when < lo) or (hi and when > hi):
+                continue
+            tot = out.setdefault(model, {k: 0 for k in TOKEN_WEIGHTS})
+            for k in TOKEN_WEIGHTS:
+                v = msg["usage"].get(k)
+                if isinstance(v, int):
+                    tot[k] += v
+    return out
+
+
+def window_tokens(win: dict, roots: list[str] | None = None) -> dict:
+    """{model: {token kind: count}} summed over the window; the boundary days are cut at the window's start
+    instant (when not midnight) and at its end instant (when in the past) by re-reading only the transcripts
+    the scan cache lists for those days."""
+    # local instants: the scan's days are local days, a reset instant may carry another offset
+    lo, hi = datetime.fromisoformat(win["start"]).astimezone(), datetime.fromisoformat(win["end"]).astimezone()
+    data = scan(roots, hi.date())
+    now = datetime.now().astimezone()
+    out: dict = {}
+    d = lo.date()
+    while d <= hi.date():
+        cut_lo = lo if (d == lo.date() and lo.time() != dtime.min) else None
+        cut_hi = hi if (d == hi.date() and hi < now) else None
+        models = _exact_day_tokens(d.isoformat(), cut_lo, cut_hi) if (cut_lo or cut_hi) else data.get(d.isoformat(), {})
+        for m, tok in models.items():
+            acc = out.setdefault(m, {k: 0 for k in TOKEN_WEIGHTS})
+            for k in TOKEN_WEIGHTS:
+                acc[k] += tok.get(k, 0)
+        d += timedelta(days=1)
+    return out
+
+
+def summary(budget: dict | None = None, roots: list[str] | None = None, today: date | None = None,
+            at: datetime | None = None) -> dict:
+    """Today's and the week's units against the calibrated allowance.
+
+    budget: {"weekly_units": float|None, "daily_share": float (default 1/7), "model_weights": {...},
+    "weekly_reset": ISO instant|None}. The week is week_window() as of `at` (default now, or the end of
+    `today` when that is another day): from the latest weekly reset with `weekly_reset`, else the rolling
+    7 local days (whole days, as before release 72). window_kind/window_start/window_end name it."""
     budget = budget or {}
-    today = today or date.today()
+    if at is None:
+        now = datetime.now().astimezone()
+        at = now if today is None or today == now.date() else \
+            datetime.combine(today, dtime(23, 59, 59), tzinfo=now.tzinfo)
+    today = today or at.date()
     data = scan(roots, today)
     mw = budget.get("model_weights") or {}
     per_day = {d: sum(units(t, m, mw) for m, t in models.items()) for d, models in data.items()}
@@ -200,6 +293,10 @@ def summary(budget: dict | None = None, roots: list[str] | None = None, today: d
     out = {"today": t, "today_units": round(per_day.get(t, 0.0), 3), "today_by_model": by_model,
            "week_units": round(sum(per_day.get(d, 0.0) for d in week_days), 3),
            "weekly_units": weekly, "daily_share": round(share, 4)}
+    win = week_window(budget, at)
+    if win["kind"] == "reset":
+        out["week_units"] = round(sum(units(t, m, mw) for m, t in window_tokens(win, roots).items()), 3)
+    out.update(window_kind=win["kind"], window_start=win["start"], window_end=win["end"])
     if weekly:
         allowance = float(weekly) * share
         out.update(daily_allowance=round(allowance, 3),
@@ -211,12 +308,14 @@ def summary(budget: dict | None = None, roots: list[str] | None = None, today: d
 
 
 def calibrate(weekly_percent: float, model_weights: dict | None = None, roots: list[str] | None = None,
-              today: date | None = None) -> dict:
-    """Weekly allowance in units from the percentage Claude Code reports for the current week."""
+              today: date | None = None, weekly_reset: str | None = None, at: datetime | None = None) -> dict:
+    """Weekly allowance in units from the percentage Claude Code reports for the current week (the window
+    from `weekly_reset` when given, else the rolling seven days)."""
     if not 0 < weekly_percent <= 100:
         raise ValueError("weekly percent must be in (0, 100]")
-    s = summary({"model_weights": model_weights}, roots, today)
+    s = summary({"model_weights": model_weights, "weekly_reset": weekly_reset}, roots, today, at)
     if s["week_units"] <= 0:
-        raise ValueError("no usage recorded in the last seven days; calibrate after some work")
+        raise ValueError("no usage recorded in the current week window; calibrate after some work")
     return {"weekly_percent": weekly_percent, "week_units": s["week_units"],
-            "weekly_units": round(s["week_units"] * 100 / weekly_percent, 3)}
+            "weekly_units": round(s["week_units"] * 100 / weekly_percent, 3),
+            "window": {"kind": s["window_kind"], "start": s["window_start"], "end": s["window_end"]}}

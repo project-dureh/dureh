@@ -240,13 +240,14 @@ def _exchange_budget_file(site: Site) -> Path | None:
 
 def budget(site: Site, events: list[dict] | None = None) -> dict:
     st = settings(site)
-    out = {"weekly_units": None, "calibrated": None, "source": None,
+    out = {"weekly_units": None, "calibrated": None, "source": None, "weekly_reset": None,
            "daily_share": st["daily_share"], "model_weights": st["model_weights"]}
     f = _exchange_budget_file(site)
     if f and f.is_file():
         try:
             data = json.loads(f.read_text())
-            out.update(weekly_units=data.get("weekly_units"), calibrated=data.get("calibrated"), source=str(f))
+            out.update(weekly_units=data.get("weekly_units"), calibrated=data.get("calibrated"), source=str(f),
+                       weekly_reset=data.get("weekly_reset"))  # release 72 (#24): the provider's reset instant
             out["model_weights"] = data.get("model_weights") or out["model_weights"]
             return out
         except (OSError, ValueError):
@@ -261,7 +262,7 @@ def budget(site: Site, events: list[dict] | None = None) -> dict:
 def usage(site: Site, events: list[dict] | None = None) -> dict:
     b = budget(site, events)
     roots = settings(site)["transcripts"]
-    s = claude_usage.summary(b, roots, _now().date())
+    s = claude_usage.summary(b, roots, _now().date(), _now())  # the week: week_window() of the budget
     s.update(budget_source=b["source"], calibrated=b["calibrated"])
     s["this_site_units"] = claude_usage.by_place({"site": str(site.root)}, b, roots, _now().date())["site"]
     return s
@@ -647,7 +648,8 @@ def render(st: dict, with_banner: bool = True) -> str | None:
     if u.get("daily_allowance"):
         line += (f"; usage today {u['today_units']}/{u['daily_allowance']} units"
                  f" ({round(100 * (u['today_fraction'] or 0))}% of the daily share, this site {u.get('this_site_units', 0)}),"
-                 f" week {u['week_percent']}%")
+                 f" week {u['week_percent']}%" + (f" since reset {u['window_start'][:16]}"
+                                                   if u.get("window_kind") == "reset" else ""))
     elif "today_units" in u:
         line += f"; usage today {u['today_units']} units, this site {u.get('this_site_units', 0)} (budget not calibrated)"
     if st.get("urgent"):
@@ -825,17 +827,25 @@ def black_company(site: Site, on: bool, memo: str) -> dict:
 def calibrate(site: Site, weekly_percent: float) -> dict:
     _director_only()
     st = settings(site)
+    f = _exchange_budget_file(site)
+    reset = None  # release 72 (#24): the shared file's weekly_reset sets the window and is kept on rewrite
+    if f and f.is_file():
+        try:
+            reset = json.loads(f.read_text()).get("weekly_reset")
+        except (OSError, ValueError):
+            reset = None
     try:
-        cal = claude_usage.calibrate(weekly_percent, st["model_weights"], st["transcripts"], _now().date())
+        cal = claude_usage.calibrate(weekly_percent, st["model_weights"], st["transcripts"], _now().date(),
+                                     weekly_reset=reset, at=_now())
     except ValueError as exc:
         fail(str(exc))
     cal["calibrated"] = _ts(_now())
     cal["model_weights"] = st["model_weights"]
     rec = Ledger(site).event("workday.calibrated", "desk", None, {**cal, "by": "Director", "via": "dureh site workday"})
-    f = _exchange_budget_file(site)
     if f:
         tmp = f.with_suffix(".tmp")
-        tmp.write_text(json.dumps({**cal, "by": "Director", "site": site.mailbox_name}, indent=2) + "\n")
+        tmp.write_text(json.dumps({**cal, "by": "Director", "site": site.mailbox_name,
+                                   **({"weekly_reset": reset} if reset else {})}, indent=2) + "\n")
         os.replace(tmp, f)
         cal["shared"] = str(f)
     return {**cal, "record": rec["id"]}

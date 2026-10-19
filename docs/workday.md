@@ -308,8 +308,15 @@ usage against the daily share, by default 1/7 of the weekly allowance (`workday.
 - The allowance is calibrated by the Director against the weekly percentage Claude Code shows in
   `/usage`: `dureh site workday calibrate --weekly-percent P`. With `upstream.exchange` set, the
   calibration is written to `<exchange>/usage-budget.json` and every site and upstream read it.
+- The week (release 72, project-dureh/dureh#24): when `<exchange>/usage-budget.json` has `weekly_reset` (one
+  instant of the provider's weekly reset, set upstream by `tools/workday.py`), the week runs from the latest reset
+  at or before now (every 7 days from that instant; one given in the future counts back by whole weeks) to now,
+  the boundary day cut at the reset instant; without it, the rolling seven local days ending today. `day status
+  --json` names it in `usage`: `window_kind` (`reset` or `rolling`), `window_start`, `window_end`; the text line
+  adds `since reset <start>`. `site workday calibrate` measures the same window and keeps `weekly_reset` when it
+  rewrites the shared file.
 - Limits: sessions on other machines (web, app) leave no local transcript and are not counted;
-  the rolling seven days differ from the provider's weekly reset. Recalibrate now and then.
+  without `weekly_reset` the rolling seven days differ from the provider's weekly reset. Recalibrate now and then.
 - Overtime items the Director accepted (`day overtime`, before or after the end report) are not held back by the
   budget; plan items finished past the end time under the finish-plan rule are (the usage share is a stop). The
   end report shows the usage.
