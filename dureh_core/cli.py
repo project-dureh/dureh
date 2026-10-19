@@ -603,6 +603,19 @@ def cmd_site_office_hours(a):
         _print(st if a.json else office_hours.render_status(st))
 
 
+def _early_reason(a) -> str:
+    """`--early --reason R` (release 74, #33); a value given to --early itself (the old `--early "<words>"`) is the
+    reason when --reason is absent. --reason or --approval without --early is refused."""
+    if a.early is None:
+        if a.reason or a.approval:
+            raise DurehError("--reason and --approval go with --early (ending before the day's end)")
+        return ""
+    reason = a.reason or (a.early if isinstance(a.early, str) else "")
+    if not reason.strip():
+        raise DurehError("--early needs --reason \"<why>\" (and, before the day's end, --approval <id>)")
+    return reason
+
+
 def cmd_day(a):
     from . import workday
 
@@ -638,7 +651,7 @@ def cmd_day(a):
                                 dict(parse_fact(f) for f in a.fact or []), a.by or "", actor)
         _print(workday.decide(site, actor, a.title, a.choice, a.why, a.rev or [], typed=typed, by=a.by or actor))
     elif c == "end":
-        _print(workday.end(site, actor, a.done, a.problems or "", a.overtime or [], a.early or ""))
+        _print(workday.end(site, actor, a.done, a.problems or "", a.overtime or [], _early_reason(a), a.approval))
     elif c == "overtime":
         text = Path(a.plan).read_text(encoding="utf-8") if a.plan else None
         _print(workday.overtime(site, actor, a.items, a.memo, plan_text=text, goal=a.goal))
@@ -647,7 +660,8 @@ def cmd_day(a):
     elif c == "close":
         from . import sessions
 
-        rec = workday.close(site, actor, a.note or "", cancel_now=a.cancel_now)
+        rec = workday.close(site, actor, a.note or "", cancel_now=a.cancel_now, early=_early_reason(a),
+                            approval=a.approval)
         _print(rec)
         print(sessions.render_release(rec["release"]))
     elif c == "urgent":
@@ -910,6 +924,18 @@ def cmd_artifact_write(a):
 
 
 # ------------------------------------------------------------------- parser
+def _early_args(x, what: str) -> None:
+    """`day end` / `day close`: --early --approval <id> --reason R (release 74, #33)."""
+    x.add_argument("--early", nargs="?", const=True, default=None, metavar="WORDS",
+                   help=f"{what} before the day's planned end (needs --approval and --reason; `day status` shows the end "
+                        "in local time and UTC)" + (", or past it with plan items still open (--reason alone)"
+                                                   if what == "end" else ""))
+    x.add_argument("--approval", help="with --early: the recorded approval (a Director/DUREH `approve` decision id, or "
+                                      "a board Decision = Approved: its github.decision.changed event id, issue URL or "
+                                      "org/repo#N)")
+    x.add_argument("--reason", help="with --early: why the day ends early (the Director's words)")
+
+
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="dureh", description="DUREH harness tools: wi, dispatch, verify, ledger, event, status, "
                                 "slurm, path-refs, purge, push, usage, site, day, upstream, slack, github, report, "
@@ -1305,7 +1331,7 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--done", required=True)
     x.add_argument("--problems")
     x.add_argument("--overtime", nargs="*", help="WIs proposed for overtime (fixes and normalization tests only)")
-    x.add_argument("--early", help="end before the end time, or with plan items still open: the Director's words")
+    _early_args(x, "end")
     x = add(dy, "overtime", cmd_day, "record the overtime items the Director accepted (after the end report, or while "
                                      "on-duty as soon as the Director approves: it takes effect at once)")
     x.add_argument("--items", nargs="+", required=True)
@@ -1326,6 +1352,7 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--cancel-now", action="store_true",
                    help="scancel the recorded session job at once instead of writing the close marker (fallback "
                         "when a marker was ignored)")
+    _early_args(x, "close")
     for sp in dy.choices.values():
         sp.add_argument("--actor")
 

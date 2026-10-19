@@ -1115,9 +1115,12 @@ def decide(site: Site, actor: str, title: str, choice: str, why: str, revs: list
                                         "and reflect every change made since this point"}
 
 
-def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], early: str = "") -> dict:
-    """The end report. With workday mode off (release 70) it ends a plan approved without hours: no clock, so
-    no early-end or finish-plan refusal; the report carries `workday: false` and no start or end."""
+def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], early: str = "",
+        approval: str | None = None) -> dict:
+    """The end report. With workday mode off (release 70) it ends a plan approved without hours: no finish-plan
+    refusal; the report carries `workday: false`. `early` is the reason of `--early --reason R`: before the planned
+    end (release 74, #33) the report also needs `approval`, a recorded approval (`early_check`); past the end
+    with plan items open the reason alone ends the day anyway, as before."""
     d = day(site)
     if d.get("report") or d["phase"] not in ("on-duty", "past-end", "overtime"):
         fail(f"no open day to end (phase {d['phase']})")
@@ -1126,10 +1129,7 @@ def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], e
         _require_on(site)  # a clocked day of a site switched off since: as before
     if not on and overtime:
         fail("workday mode is off: there is no overtime to propose (--overtime needs workday mode)")
-    if on and d["phase"] in ("on-duty", "overtime") and not d.get("hours_exceeded") and hours_mode(site) \
-            and not early.strip():
-        fail(f"the day runs to {d['end']}; stay on duty even when idle (propose next work, watch upstream messages)."
-             " End early only on the Director's word: --early \"<Director's words>\"")
+    early_close = early_check(site, d, "end", bool(early.strip()), approval, early) if on else None
     evs = _events(site)
     stop = hard_stop(site, d, evs) if d.get("finishing") else None
     if d.get("finishing") and not stop and not early.strip():
@@ -1139,7 +1139,7 @@ def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], e
              "records the overtime. The end report is written when the plan is done or a stop hits (today's usage at "
              "the daily share, data at risk, the session job's wall time). An item that cannot proceed today: stop it "
              "at a safe point (`dureh dispatch stop --wi <WI> --reason ...`) so the report says why; to end anyway: "
-             "--early \"<Director's words>\"")
+             "--early --reason \"<Director's words>\"")
     if not done.strip():
         fail("--done is required")
     led = Ledger(site)
@@ -1151,6 +1151,8 @@ def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], e
               "start": d.get("start"), "end": d.get("end"), "ended_at": _ts(_now()),
               "session": d.get("session"), "working_day": d.get("working_day", True),
               "early": early or None, "usage": u, "heads": heads(site), **({} if on else {"workday": False})}
+    if early_close:
+        report["early_close"] = early_close  # release 74 (#33): the planned end, the time left, the approval
     if d.get("addenda"):  # release 73: the day's addenda, each with its WIs and approval
         report["addenda"] = [{k: a[k] for k in ("record", "at", "goal", "items", "approval", "approved_by")}
                              for a in d["addenda"]]
@@ -1170,11 +1172,92 @@ def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], e
     named += [w for a in d.get("addenda") or [] for w in a["items"]]
     named += [x["wi"] for x in (past or {}).get("items", []) + (past or {}).get("director", [])]
     report["titles"] = _titles(led, named)  # UR-20261008-02
-    rec = led.event("day.ended", actor, None, report, [d["plan"]])
+    rec = led.event("day.ended", actor, None, report, [d["plan"]] + ([early_close["approval"]["id"]] if early_close else []))
     if not on:
         return {**rec, "next": "give the Director this report, then `dureh day close`"}
     return {**rec, "next": "give the Director this report; record accepted overtime with "
                            "`dureh day overtime --items ... --memo \"<Director's words>\"`, else `dureh day close`"}
+
+
+# Release 74 (#33, incident 2026-10-19: a desk closed its day at 11:35 EDT, four hours before its 15:39 EDT end, reading
+# the local end time as UTC; Director: "무단퇴근입니다"): `day end` and `day close` before the day's planned end are
+# refused unless `--early --approval <id> --reason R` names a recorded approval. An approval is a decision record
+# with disposition `approve` by the Director or DUREH (approval layer 2), not one bound to another action, or a
+# GitHub board Decision recorded as Approved (`github.decision.changed`, by its event id or the issue's URL or
+# `org/repo#N`), recorded within EARLY_APPROVAL_AGE.
+EARLY_APPROVAL_AGE = timedelta(hours=24)
+BOUND_DECISIONS = ("gate1", "gate2", "push-approval", DAY_CHOICE)  # decisions that approve something else
+EARLY_HINT = ("record the Director's approval first (a board Decision = Approved seen by `dureh github watch`, or "
+              "`dureh ledger add decision --disposition approve --by Director --summary \"early close\" --memo "
+              "\"<the Director's words>\"`), then `--early --approval <id> --reason \"<why>\"`")
+
+
+def planned_end(site: Site, d: dict) -> str | None:
+    """The day's planned end the early guard holds to: the approved end (workday mode on), else today's session clock
+    (workday mode off: the session start plus `workday.hours`), else the config window's `workday.end`; None when
+    the hours device is off (the Director's switch: no clock) or no end is known."""
+    if not device_on(site, "hours"):
+        return None
+    if d.get("end"):
+        return d["end"]
+    st = settings(site)
+    return _ts(_at(_now(), st["end"])) if st["end"] else None
+
+
+def early_approval(site: Site, ident: str) -> dict:
+    """The recorded approval `ident` names, as {id, kind, type, by, ts, url?}; refused when it is none."""
+    ident = (ident or "").strip()
+    if not ident:
+        fail(f"--approval <id> is required; {EARLY_HINT}")
+    led = Ledger(site)
+    rec = None
+    if ident.startswith("dec-"):
+        path = site.record_dir("decision") / f"{ident}.json"
+        if path.is_file():
+            rec = led.get("decision", ident)
+            p = rec["payload"]
+            if p.get("disposition") != "approve" or p.get("by") not in APPROVERS or rec["type"] in BOUND_DECISIONS:
+                fail(f"decision {ident} ({rec['type']}, {p.get('disposition')} by {p.get('by')}) is not an approval "
+                     f"of the Director or DUREH for this; {EARLY_HINT}")
+            found = {"id": ident, "kind": "decision", "type": rec["type"], "by": p["by"], "ts": rec["ts"]}
+    else:
+        m = re.fullmatch(r"([\w.-]+)/([\w.-]+)#(\d+)", ident)
+        want = f"github.com/{m.group(1)}/{m.group(2)}/issues/{m.group(3)}" if m else None
+        board = [e for e in led.events() if e["type"] == "github.decision.changed"
+                 and (e["id"] == ident or (e["payload"].get("url") or "").rstrip("/") == ident.rstrip("/")
+                      or (want and (e["payload"].get("url") or "").rstrip("/").endswith(want)))]
+        if board:
+            rec = board[-1]
+            if rec["payload"].get("to") != "Approved":
+                fail(f"the board Decision {ident} is {rec['payload'].get('to') or 'empty'} ({rec['id']}), not Approved; "
+                     f"{EARLY_HINT}")
+            found = {"id": rec["id"], "kind": "github", "type": rec["type"], "by": "Director", "ts": rec["ts"],
+                     "url": rec["payload"].get("url")}
+    if rec is None:
+        fail(f"no recorded approval {ident}; {EARLY_HINT}")
+    if _now() - _local(rec["ts"]) > EARLY_APPROVAL_AGE:
+        fail(f"approval {ident} was recorded {rec['ts']}, more than 24 h ago; {EARLY_HINT}")
+    return found
+
+
+def early_check(site: Site, d: dict, what: str, early: bool, approval: str | None, reason: str) -> dict | None:
+    """The early guard of `day end` / `day close` (release 74, #33): before the planned end, refused unless `early`
+    with a recorded approval and a reason. Returns the record's `early_close` block ({planned_end, planned_end_utc,
+    left, approval, reason}), or None when the end has passed or no end is known."""
+    end = planned_end(site, d)
+    if not end or _now() >= _parse(end):
+        return None
+    left = _parse(end) - _now()
+    where = (f"the day ends at {local_utc(end)}, {left_text(left)} from now (now {local_utc(_ts(_now()))}; "
+             "times are local, UTC in brackets)")
+    if not early:
+        fail(f"`day {what}` refused: {where}; stay on duty even when idle (propose next work, watch upstream messages; "
+             f"check `dureh day status` first). Ending before the end needs the Director's recorded approval: {EARLY_HINT}")
+    if not (reason or "").strip():
+        fail(f"--early needs --reason \"<why>\" ({where})")
+    ok = early_approval(site, approval or "")
+    return {"planned_end": end, "planned_end_utc": utc_of(end), "left": left_text(left), "approval": ok,
+            "reason": reason.strip()}
 
 
 def provisional(decisions: list[dict]) -> list[dict]:
@@ -1295,7 +1378,22 @@ def _handoff_path(site: Site) -> Path:
     return p if p.is_absolute() else site.root / p
 
 
-def close(site: Site, actor: str, note: str, cancel_now: bool = False) -> dict:
+def _close_guard(site: Site, d: dict, early: str, approval: str | None) -> dict | None:
+    """`day close` before the planned end (release 74, #33): covered by the day's end report when that recorded an
+    early approval (`early_close`), else `early_check` with the close's own --early --approval --reason."""
+    end = planned_end(site, d)
+    if not end or _now() >= _parse(end):
+        return None
+    if d.get("report") and not early.strip():
+        rep = next((e for e in Ledger(site).events() if e["id"] == d["report"]), None)
+        prior = ((rep or {}).get("payload") or {}).get("early_close")
+        if prior and prior.get("approval"):
+            return {**prior, "left": left_text(_parse(end) - _now()), "covered_by": d["report"]}
+    return early_check(site, d, "close", bool(early.strip()), approval, early)
+
+
+def close(site: Site, actor: str, note: str, cancel_now: bool = False, early: str = "",
+          approval: str | None = None) -> dict:
     """Close the day: everything idle, the handoff written after today's approval, then leave. Then the site's
     running session job (the newest `session.started` record still in squeue; never any other job, whoever
     calls) is released through `sessions.release`: by default the close marker, so the job sends `/exit` to
@@ -1307,7 +1405,8 @@ def close(site: Site, actor: str, note: str, cancel_now: bool = False) -> dict:
     plan or end report to wait for: the idle and handoff checks still apply, the handoff must postdate the
     running session's start (when one is recorded), `day.closed` carries `workday: false`, and the session is
     released the same way; it references today's plan (release 70: `day plan` with the mode off) when one is
-    recorded and the day is not closed yet, else nothing."""
+    recorded and the day is not closed yet, else nothing. Release 74 (#33): before the day's planned end the close
+    is refused unless the end report recorded an early approval or `early` (the reason) comes with `approval`."""
     from .ops import status as site_status
     from .upstream import _live_agents
 
@@ -1319,6 +1418,7 @@ def close(site: Site, actor: str, note: str, cancel_now: bool = False) -> dict:
                                       and not str(d.get("reason", "")).startswith("day closed") else None)
     if on and (d["phase"] not in ("overtime", "off-duty") or not d.get("report")):
         fail(f"close a day after its end report (phase {d['phase']})")
+    early_close = _close_guard(site, d, early, approval) if on else None
     from .ops import external_jobs, render_external
     from . import sessions
 
@@ -1351,7 +1451,9 @@ def close(site: Site, actor: str, note: str, cancel_now: bool = False) -> dict:
     rec = led.event("day.closed", actor, None, {"note": note, "idle": checked or None, "checked": checked,
                                                "handoff": str(handoff), **({} if on else {"workday": False}),
                                                **({"plan": plan_ref} if plan_ref and not on else {}),
-                                               **extra}, [plan_ref] if plan_ref else None)
+                                               **({"early_close": early_close} if early_close else {}),
+                                               **extra}, ([plan_ref] if plan_ref else [])
+                    + ([early_close["approval"]["id"]] if early_close else []) or None)
     if extra:
         rec = {**rec, "warning": f"{render_external(ext)}. They keep running after the close; cancel any that"
                                  " should not (they are not the harness's to end)."}

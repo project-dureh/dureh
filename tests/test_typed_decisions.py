@@ -262,7 +262,8 @@ class NeverStall(SiteCase):
         self.assertIn("대표님 조치 필요:", out.getvalue())
         # without the flag: no key, no line
         workday.approve(self.s, "desk", "ok")
-        workday.end(self.s, "desk", "done", "", [], "Director: 오늘은 여기까지")
+        workday.end(self.s, "desk", "done", "", [], "Director: 오늘은 여기까지",  # release 74: a recorded approval
+                    approval=Ledger(self.s).append("decision", "record", "desk", None, {"subject": "early", "disposition": "approve", "by": "Director"})["id"])
         workday.plan(self.s, "desk", "next", "1. W", None)
         st = workday.status(self.s)
         self.assertNotIn("director_actions", st)

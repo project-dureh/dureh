@@ -286,7 +286,8 @@ class SlackApproval(ApprovalBase):
         # the list is appended to a --file text too
         self.react("white_check_mark", DIRECTOR)
         self.assertEqual(self.run_cli("check")[0], 0)
-        workday.end(self.site(), "desk", "done", "", [], "Director: 오늘은 여기까지")
+        workday.end(self.site(), "desk", "done", "", [], "Director: 오늘은 여기까지",  # release 74: a recorded approval
+                    approval=Ledger(self.site()).append("decision", "record", "desk", None, {"subject": "early", "disposition": "approve", "by": "Director"})["id"])
         workday.plan(self.site(), "desk", "next", "2. WI-0001 again", None, ["approve the push of modules/m main"])
         f = self.tmp / "plan.md"
         f.write_text("짧은 계획")

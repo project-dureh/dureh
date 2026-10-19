@@ -395,10 +395,18 @@ class Workday(SiteCase):
         with self.assertRaises(DurehError) as cm:
             workday.end(self.s, "desk", "plan done", "", [])
         self.assertIn("stay on duty", str(cm.exception))
-        rec = workday.end(self.s, "desk", "plan done", "", [], early="오늘은 일찍 마칩시다")
+        with self.assertRaisesRegex(DurehError, "--approval <id> is required"):
+            workday.end(self.s, "desk", "plan done", "", [], early="오늘은 일찍 마칩시다")
+        dec = self.director_ok()
+        rec = workday.end(self.s, "desk", "plan done", "", [], early="오늘은 일찍 마칩시다", approval=dec)
         self.assertEqual(rec["payload"]["early"], "오늘은 일찍 마칩시다")
 
-    # ------------------------------------------------------------ the day's end in local time and UTC (release 74, #33)
+    # ------------------------------------------------------------ early end and close (release 74, #33)
+    def director_ok(self, by="Director", disposition="approve", type_="record"):
+        """A recorded approval for an early end (`ledger add decision --disposition approve --by Director`)."""
+        return Ledger(self.s).append("decision", type_, "desk", None, {"subject": "early close", "disposition": disposition,
+                                                                       "by": by, "memo": "오늘은 일찍"})["id"]
+
     def test_status_shows_the_end_in_local_time_and_utc(self):
         self.start_day()
         self.at(T0 + timedelta(hours=3, minutes=56))
@@ -415,6 +423,99 @@ class Workday(SiteCase):
         self.at(T0 + timedelta(hours=9))
         self.assertIn("end passed", render_status(status(self.s)))
         self.assertNotIn("end_in", workday.status(self.s))
+
+    def test_end_before_the_end_says_local_utc_and_time_left(self):
+        self.start_day()
+        self.at(T0 + timedelta(hours=4, minutes=30))
+        with self.assertRaises(DurehError) as cm:
+            workday.end(self.s, "desk", "done", "", [])
+        msg = str(cm.exception)
+        self.assertIn("17:00 UTC-04:00 (21:00 UTC)", msg)
+        self.assertIn("3 h 30 min from now", msg)
+        self.assertIn("--early --approval <id> --reason", msg)
+        with self.assertRaisesRegex(DurehError, "no recorded approval dec-nope"):
+            workday.end(self.s, "desk", "done", "", [], early="일찍", approval="dec-nope")
+        for bad in (self.director_ok(by="desk"), self.director_ok(disposition="defer"),
+                    self.director_ok(type_="push-approval")):
+            with self.assertRaisesRegex(DurehError, "is not an approval"):
+                workday.end(self.s, "desk", "done", "", [], early="일찍", approval=bad)
+        self.assertEqual([e for e in Ledger(self.s).events() if e["type"] == "day.ended"], [])
+        dec = self.director_ok(by="DUREH")  # approval layer 2
+        rec = workday.end(self.s, "desk", "done", "", [], early="대표님 승인: 일찍", approval=dec)
+        ec = rec["payload"]["early_close"]
+        self.assertEqual((ec["planned_end_utc"], ec["left"], ec["approval"]["id"], ec["approval"]["by"], ec["reason"]),
+                         ("2026-10-03T21:00:00Z", "3 h 30 min", dec, "DUREH", "대표님 승인: 일찍"))
+        self.assertIn(dec, rec["refs"])
+
+    def test_early_approval_from_the_board_decision(self):
+        self.start_day()
+        self.at(T0 + timedelta(hours=2))
+        url = "https://github.com/project-dureh/office/issues/40"
+        led = Ledger(self.s)
+        later = led.event("github.decision.changed", "desk", None, {"item_id": "I1", "url": url, "from": None,
+                                                                    "to": "Later", "layer": 3, "first_poll": False})
+        with self.assertRaisesRegex(DurehError, "is Later"):
+            workday.end(self.s, "desk", "done", "", [], early="x", approval="project-dureh/office#40")
+        ok = led.event("github.decision.changed", "desk", None, {"item_id": "I1", "url": url, "from": "Later",
+                                                                 "to": "Approved", "layer": 3, "first_poll": False})
+        with self.assertRaisesRegex(DurehError, "is Later"):
+            workday.end(self.s, "desk", "done", "", [], early="x", approval=later["id"])
+        rec = workday.end(self.s, "desk", "done", "", [], early="board", approval="project-dureh/office#40")
+        self.assertEqual((rec["payload"]["early_close"]["approval"]["id"],
+                          rec["payload"]["early_close"]["approval"]["kind"]), (ok["id"], "github"))
+
+    def test_early_approval_older_than_a_day_is_refused(self):
+        now = datetime.now().astimezone() + timedelta(days=2)
+        dec = self.director_ok()  # recorded now (real time): two days before the fake now
+        self.at(now)
+        self.start_day()
+        self.at(now + timedelta(hours=1))
+        with self.assertRaisesRegex(DurehError, "more than 24 h ago"):
+            workday.end(self.s, "desk", "done", "", [], early="x", approval=dec)
+
+    def test_close_before_the_end_needs_the_approval(self):
+        self.start_day()
+        self.write_handoff()
+        self.fake_slurm()
+        self.at(T0 + timedelta(hours=2))
+        dec = self.director_ok()
+        rep = workday.end(self.s, "desk", "done", "", [], early="일찍", approval=dec)
+        rec = workday.close(self.s, "desk", "x")  # the end report's approval covers the close
+        self.assertEqual((rec["payload"]["early_close"]["covered_by"], rec["payload"]["early_close"]["approval"]["id"]),
+                         (rep["id"], dec))
+        self.assertIn(dec, rec["refs"])
+
+    def test_close_before_the_end_without_an_early_report_is_refused(self):
+        self.start_day()
+        self.write_handoff()
+        self.fake_slurm()
+        self.at(T0 + timedelta(hours=8))
+        workday.set_device(self.s, "hours", False, "x")  # the report goes in with the clock off ...
+        workday.end(self.s, "desk", "done", "", [])
+        workday.set_device(self.s, "hours", True, "x")  # ... and the clock is back for the close
+        self.at(T0 + timedelta(hours=7))
+        with self.assertRaisesRegex(DurehError, r"`day close` refused: the day ends at 17:00 UTC-04:00 \(21:00 UTC\), "
+                                                r"1 h 00 min from now"):
+            workday.close(self.s, "desk", "x")
+        self.assertEqual([e for e in Ledger(self.s).events() if e["type"] == "day.closed"], [])
+        rec = workday.close(self.s, "desk", "x", early="대표님 OK", approval=self.director_ok())
+        self.assertEqual(rec["payload"]["early_close"]["reason"], "대표님 OK")
+
+    def test_cli_early_flags(self):
+        self.start_day()
+        self.at(T0 + timedelta(hours=1))
+        rc, out = self.cli("day", "end", "--done", "x", "--reason", "r")
+        self.assertEqual(rc, 2)
+        rc, out = self.cli("day", "end", "--done", "x", "--early")
+        self.assertEqual(rc, 2)
+        rc, out = self.cli("day", "end", "--done", "x")
+        self.assertEqual(rc, 2)
+        dec = self.director_ok()
+        rc, out = self.cli("day", "end", "--done", "x", "--early", "--approval", dec, "--reason", "대표님: 오늘은 여기까지")
+        self.assertEqual(rc, 0, out)
+        rep = [e for e in Ledger(self.s).events() if e["type"] == "day.ended"][-1]
+        self.assertEqual((rep["payload"]["early"], rep["payload"]["early_close"]["approval"]["id"]),
+                         ("대표님: 오늘은 여기까지", dec))
 
     def test_plan_and_end_record_rollback_heads(self):
         workday.switch(self.s, True, "trial")
@@ -813,7 +914,7 @@ class Workday(SiteCase):
         self.assertTrue(denied(self.spawn(other)))
         with self.assertRaisesRegex(DurehError, "stay on duty"):
             workday.end(self.s, "desk", "done", "", [])
-        workday.end(self.s, "desk", "done", "", [], early="그만")
+        workday.end(self.s, "desk", "done", "", [], early="그만", approval=self.director_ok())
         self.assertEqual(workday.status(self.s)["phase"], "overtime")
         self.assertIn("not a working day", render_status(status(self.s)))
 
