@@ -447,6 +447,20 @@ class Workday(SiteCase):
                          ("2026-10-03T21:00:00Z", "3 h 30 min", dec, "DUREH", "대표님 승인: 일찍"))
         self.assertIn(dec, rec["refs"])
 
+    def test_desk_rule_names_the_early_guard(self):
+        from dureh_core.runtimes.claude_code import _claude_md
+
+        text = " ".join(_claude_md(self.s).split())
+        for words in ("Never end or close the day before its end without the Director's recorded approval",
+                      "day status` first; it shows the end in local time with UTC beside it",
+                      "every time the harness prints is local unless marked UTC",
+                      "day end|close --early --approval <id> --reason",
+                      "`day end` and `day close` still keep to today's session clock"):
+            self.assertIn(words, text)
+        doc = (Path(__file__).resolve().parents[1] / "docs" / "workday.md").read_text()
+        self.assertIn("never end or close the day before its end without the\nDirector's recorded approval; check "
+                      "`day status` first; times are local.", doc)
+
     def test_early_approval_from_the_board_decision(self):
         self.start_day()
         self.at(T0 + timedelta(hours=2))

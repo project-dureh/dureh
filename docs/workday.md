@@ -161,8 +161,8 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    duration notion for a spawn). At a stop the desk finishes running work and writes the end report.
 6. **End report.** `dureh day end --done ... --problems ... --overtime <WI>...` is written when the plan is done or a
    stop hit, not at the end time: with plan items still open and no stop it is refused (an item that cannot proceed
-   today is stopped at a safe point with `dispatch stop` so the report says why; `--early "<Director's words>"` ends
-   anyway). At the end time with the plan done it is written as before. The report gains a `past_end` section
+   today is stopped at a safe point with `dispatch stop` so the report says why; `--early --reason "<Director's
+   words>"` ends anyway). At the end time with the plan done it is written as before. The report gains a `past_end` section
    ("finished past the end time"): the items the rule carried past the end time with their outcomes, the stop if
    one hit. Overtime beyond the plan is only for fixing errors from the day's work and normalization tests, and only
    for the items the Director accepts: `dureh day overtime --items <WI>... --memo "..."` (recorded while on duty as
@@ -205,8 +205,9 @@ recorded plan, items or Director actions. Now, with the mode off:
   `day.approved` with the approver's words (`--by DUREH` for a layer-2 approval) and `workday: false`, and no start or end: no clock starts, nothing is
   gated, there is no overtime and no finish-plan rule. `day status` and `dureh status` show a
   `Day (workday mode off): <phase>, plan <id>[, approved <id> by <who>]` line and the Director actions.
-- `day end` writes the end report without any hours check (`--early` is not needed; `--overtime` is refused):
-  `day.ended` with `workday: false` and no start or end. `day close` does not need it.
+- `day end` writes the end report without the finish-plan check (`--overtime` is refused): `day.ended` with
+  `workday: false`. `day close` does not need it. Both keep to today's session clock (the session start plus
+  `workday.hours`): before that end they need the Director's recorded approval, as below (release 74).
 - `day decide`, `day overtime`, `day overtime-plan` and `day urgent` stay workday-mode commands.
 - When the Director switches the mode on later that day, an approval recorded with the mode off does not count:
   the day is `planned` again and `day approve` starts the clock as usual.
@@ -244,7 +245,34 @@ The desk talks to the Director at the start and at the end of the day; in betwee
 
 The day runs to its end time even when the plan is done: the desk stays on duty while idle. When everything is
 idle it proposes the next work; if that fits the goals the Director set, it proceeds on its own recommendation
-(`day decide`) and reports it at the end. `day end` before the end time needs `--early "<Director's words>"`.
+(`day decide`) and reports it at the end.
+
+### Ending before the end (release 74, project-dureh/dureh#33)
+
+Incident 2026-10-19: a desk closed its day at 11:35 EDT, four hours before its 15:39 EDT end, because it read the
+local end time as UTC (Director: "무단퇴근입니다"). The rule: **never end or close the day before its end without the
+Director's recorded approval; check `day status` first; times are local.**
+
+- `day status` shows the end in local time with UTC beside it and the time left: text `ends 15:39 EDT (19:39 UTC),
+  4 h 04 min left`; `--json` `end_local`, `end_utc`, `start_utc`, `end_in`. With workday mode off it shows today's
+  session clock the same way (`Day clock (workday mode off): session start ..., ends ...`).
+- `day end` and `day close` before the planned end are refused unless `--early --approval <id> --reason R` is
+  given. The planned end is the approved end (workday mode on), else today's session clock (the session start plus
+  `workday.hours`; workday mode off), else the config window's `workday.end`; with the hours device off (the
+  Director's switch) there is none. The refusal names the end in local time and UTC, the time now and how long is
+  left.
+- `<id>` is a recorded approval, at most 24 h old: a `decision` record with disposition `approve` by `Director` or
+  `DUREH` (approval layer 2), not one bound to another action (`gate1`, `gate2`, `push-approval`, `day-choice`),
+  e.g. `dureh ledger add decision --disposition approve --by Director --summary "early close" --memo "<words>"`;
+  or a board Decision = Approved recorded by `dureh github watch` (`github.decision.changed`), named by its event
+  id, the issue URL or `org/repo#N`.
+- The end report and `day.closed` carry `early_close` (`planned_end`, `planned_end_utc`, `left`, `approval`,
+  `reason`) and reference the approval. A close after an end report that recorded an early approval is covered by
+  it (`covered_by`). `--early "<words>"` (the old form) still reads as the reason; past the end with plan items
+  open the reason alone ends the day, as before.
+- Office hours end with the day: their wall time runs to the day's end (workday mode on or off) and they do not
+  start after it (project-dureh/dureh#8).
+
 Where the Director would decide, the desk picks something easy to change, records it as provisional, and keeps
 going. `day plan` and `day end` record the heads of state and of every module and project: rollback points.
 
@@ -296,7 +324,7 @@ Every attendance device can be switched off and on by the Director only, from th
 
 | device | what it does when on | when off |
 |---|---|---|
-| `hours` | the 8-hour clock (blocks in production, warns in development) | no clock; `day end` needs no `--early` |
+| `hours` | the 8-hour clock (blocks in production, warns in development) | no clock; `day end`/`day close` need no `--early` |
 | `weekday` | `workday.weekdays` rule (production) | every day is ordinary |
 | `usage` | the daily usage gate at each work unit | usage is counted and shown, not gated |
 | `session` | session checks: the runtime must be able to start; `day close` needs idle agents and a fresh handoff | only notes; close skips the checks |

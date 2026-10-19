@@ -655,6 +655,9 @@ def _claude_md(site: Site) -> str:
               " Never held by the plan or the clock: stopping an agent (`dispatch stop`) or a scheduler job, merge-window handling (idle, adapter sync, verify --self), recording upstream replies."
               f" Data at risk: tell the Director at once; on the Director's word run `{dureh} day urgent --wi <WI>... --memo \"<Director's words>\"` (releases those WIs from the plan, the clock and the budget until tomorrow)."
               " The day runs to its end time even when the plan is done: stay on duty (idle is fine), keep upstream messages and running work in view."
+              f" Never end or close the day before its end without the Director's recorded approval (release 74, 2026-10-19: a desk closed four hours early reading the local end as UTC):"
+              f" check `{dureh} day status` first; it shows the end in local time with UTC beside it, and every time the harness prints is local unless marked UTC."
+              f" An early end needs `{dureh} day end|close --early --approval <id> --reason \"<Director's words>\"`, <id> a recorded approval (an `approve` decision by the Director or DUREH, or a board Decision = Approved); otherwise both are refused."
               " When everything is idle, propose the next work: if it fits the goals the Director set (the plan's goal, the package's purpose, the Director's standing priorities),"
               f" proceed on your own recommendation, record it with `{dureh} day decide`, and report it at the end; otherwise list it for the end report."
               " Where the Director would decide, choose something easy to change, call it provisional in the record, and keep going."
@@ -676,12 +679,12 @@ def _claude_md(site: Site) -> str:
               " Talk to the Director at the start and the end of the day; between them only for data at risk. `dureh day status` shows the phase and usage (account total and this site's part);"
               " the usage budget is shared by every company and upstream, so check it before each work item."
               f" With workday mode off (no `Workday:` line) `{dureh} day plan`, `day approve` and `day end` still record the plan, its items, the Director actions,"
-              " the approval and the report, without hours: no clock, no gate, no overtime (release 70).",
+              " the approval and the report, without hours: no clock, no gate, no overtime (release 70); `day end` and `day close` still keep to today's session clock (session start plus the workday hours; release 74).",
               _slack_rule(site, dureh),
               _github_rule(site, dureh),
               f"13. Ending the day, in this order: first stop every Monitor and background task (TaskStop; nothing may still be running or writing);"
               " then write a short handoff to `state/memory/handoff.md` (what is open, what the Director decided, what is next);"
-              f" then run `{dureh} day close` (with workday mode off it has no end report to wait for, still checks that nothing runs and the handoff is fresh, references today's day plan when one was recorded, and releases the session the same way; release 67, 70)."
+              f" then run `{dureh} day close` (before the day's end, shown by `day status` in local time and UTC, only with the Director's recorded approval: `--early --approval <id> --reason ...`; with workday mode off it has no end report to wait for, still checks that nothing runs and the handoff is fresh, references today's day plan when one was recorded, and releases the session the same way; release 67, 70)."
               " After it, do nothing: the session job sends `/exit` to this session within about 20 s and ends by itself;"
               " never scancel your own job.", "",
               "Small questions the Director asks may be answered directly." + _research_text(org),
