@@ -1413,8 +1413,10 @@ def parser() -> argparse.ArgumentParser:
     x = add(gp, "watch", cmd_github, "desk: poll the board and the organization's open issues; print one line per "
                                      "Decision change, per new comment and per newly opened issue (a kind:request one "
                                      "is a work request) not marked as the desk's, nothing else (for Monitor); a failed "
-                                     "poll is skipped; records github.decision.changed and github.issue.opened")
-    x.add_argument("--interval", type=float, default=30, help="seconds between polls (default 30, at least 5)")
+                                     "poll is skipped, a rate-limited one backs off (one line, then one \"resumed\" "
+                                     "line); records github.decision.changed and github.issue.opened")
+    x.add_argument("--interval", type=float, default=120,
+                   help="seconds between polls (default 120, at least 5; the team and the desks share one GitHub user)")
     x.add_argument("--once", action="store_true", help="one poll, then exit")
     x.add_argument("--actor")
     gi = add(gp, "item", cmd_github, "desk: board items for work items and decision asks").add_subparsers(

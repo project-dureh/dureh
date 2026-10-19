@@ -279,6 +279,49 @@ class Watch(GithubBase):
         self.assertEqual(len(got), 1)
         self.assertEqual(slept, [5.0])
 
+    def test_rate_limit_backs_off_once_and_resumes(self):
+        self.gh.items = [node("I1", 1, "first", "Today", "Approved")]
+        fails = ["GraphQL: API rate limit already exceeded for user ID 7221078.",
+                 "You have exceeded a secondary rate limit. Please wait a few minutes before you try again.",
+                 "API rate limit already exceeded", "API rate limit already exceeded",
+                 "API rate limit already exceeded"]
+        orig = self.gh.__call__
+
+        def runner(argv, env, input_text, timeout):
+            if fails:
+                self.gh.fail_next = fails.pop(0)
+            return orig(argv, env, input_text, timeout)
+
+        with mock.patch.object(github, "_exec", runner):
+            slept, got = [], []
+            github.watch(self.site(), "desk", 120, emit=got.append, sleep=slept.append, polls=7)
+        self.assertEqual(slept, [120.0, 240.0, 480.0, 900.0, 900.0, 120.0])
+        self.assertEqual(len([g for g in got if "rate limited" in g]), 1, got)
+        self.assertTrue(got[0].startswith("github watch: rate limited by GitHub; backing off (next poll in 120 s"), got)
+        self.assertEqual(got[1], "github watch: resumed after 5 rate-limited polls")
+        self.assertTrue(got[2].startswith("decision: office#1 first -> Approved"), got)
+        self.assertEqual(len(got), 3, got)
+
+    def test_rate_limit_honours_retry_after(self):
+        self.gh.fail_next = "HTTP 403: secondary rate limit (Retry-After: 600)"
+        slept, got = [], []
+        github.watch(self.site(), "desk", 120, emit=got.append, sleep=slept.append, polls=2)
+        self.assertEqual(slept, [600.0])
+        self.assertEqual(got[-1], "github watch: resumed after 1 rate-limited poll")
+
+    def test_other_errors_stay_silent_without_backoff(self):
+        self.gh.fail_next = "HTTP 502: Bad Gateway"
+        slept, got = [], []
+        github.watch(self.site(), "desk", 120, emit=got.append, sleep=slept.append, polls=2)
+        self.assertEqual((slept, got), ([120.0], []))
+
+    def test_default_interval_is_120(self):
+        self.assertEqual(github.WATCH_INTERVAL, 120)
+        with mock.patch.object(github, "watch") as w:
+            code, _, _ = self.run_cli("watch", "--once")
+        self.assertEqual(code, 0)
+        self.assertEqual(w.call_args.args[2], 120)
+
     def test_new_issues_are_reported_once(self):
         self.gh.repos["office"] = [issue("IS1", 1, "old issue", created="2026-01-01T00:00:00Z")]
         self.gh.repos["example-project"] = [issue("IS2", 4, "old project issue", created="2026-01-01T00:00:00Z",
@@ -444,6 +487,7 @@ class DeskText(GithubBase):
         self.assertIn("12a. GitHub is the company's coordination board (release 69)", text)
         self.assertIn("github item add --wi <WI>", text)
         self.assertIn("github watch` as a Monitor", text)
+        self.assertIn("every 120 s by default", text)
         self.assertIn("Decision column", text)
         self.assertIn("A `work request` line", text)
         self.assertIn("github item add --wi <WI> --url <issue url>", text)

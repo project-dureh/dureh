@@ -456,22 +456,55 @@ def poll(site: Site, actor: str, cfg: dict) -> list[str]:
     return lines + issue_lines
 
 
-def watch(site: Site, actor: str, interval: float = 30, emit=print, sleep=time.sleep, polls: int | None = None) -> None:
-    """Poll until stopped (or `polls` times); emit only the lines of `poll`. A failed gh call skips that poll."""
+WATCH_INTERVAL = 120.0  # release 73: the team and the desks poll as one GitHub user; 30 s hit the secondary limit
+BACKOFF_CAP = 900.0
+RATE_LIMIT_MARKS = ("api rate limit already exceeded", "api rate limit exceeded", "secondary rate limit")
+
+
+def rate_limited(err: Exception) -> bool:
+    """True when a gh failure is GitHub's primary or secondary rate limit."""
+    low = str(err).lower()
+    return any(m in low for m in RATE_LIMIT_MARKS)
+
+
+def _retry_after(err: Exception) -> float | None:
+    m = re.search(r"retry[- ]after[:= ]*(\d+)", str(err), re.I)
+    return float(m.group(1)) if m else None
+
+
+def watch(site: Site, actor: str, interval: float = WATCH_INTERVAL, emit=print, sleep=time.sleep,
+          polls: int | None = None) -> None:
+    """Poll until stopped (or `polls` times); emit only the lines of `poll`. A failed gh call skips that poll. On a
+    rate-limit failure one line is emitted and the wait doubles from `interval` (capped at BACKOFF_CAP, at least a
+    Retry-After the error names) until a poll succeeds, which emits one "resumed" line."""
     _require_desk(site, actor)
     cfg = config(site)
     interval = max(5.0, float(interval))
-    n = 0
+    n, backoff, limited = 0, None, 0
     while True:
+        wait = interval
         try:
-            for line in poll(site, actor, cfg):
+            lines = poll(site, actor, cfg)
+        except GhError as e:
+            if rate_limited(e):
+                limited += 1
+                backoff = interval if backoff is None else min(BACKOFF_CAP, backoff * 2)
+                backoff = min(BACKOFF_CAP, max(backoff, _retry_after(e) or 0))
+                wait = backoff
+                if limited == 1:
+                    emit(f"github watch: rate limited by GitHub; backing off (next poll in {wait:g} s, doubling up "
+                         f"to {BACKOFF_CAP:g} s) until a poll succeeds")
+            # any other failure is transient (network, API hiccup); the next poll sees the same changes
+        else:
+            if limited:
+                emit(f"github watch: resumed after {limited} rate-limited poll{'s' if limited != 1 else ''}")
+            limited, backoff = 0, None
+            for line in lines:
                 emit(line)
-        except GhError:
-            pass  # transient: network, rate limit, API hiccup; the next poll sees the same changes
         n += 1
         if polls is not None and n >= polls:
             return
-        sleep(interval)
+        sleep(wait)
 
 
 # ------------------------------------------------------------------ items

@@ -66,7 +66,7 @@ Every `gh` call goes through one runner that reads the token at call time and pa
 | command | who | what |
 |---|---|---|
 | `github status [--json]` | anyone; allowed with `--observe` | the board's items grouped by Status, each with its Decision, Project and Layer |
-| `github watch [--interval 30] [--once]` | desk, as a Monitor in working hours | one line per Decision change, per new comment and per newly opened issue not marked as the desk's; nothing else |
+| `github watch [--interval 120] [--once]` | desk, as a Monitor in working hours | one line per Decision change, per new comment and per newly opened issue not marked as the desk's; nothing else |
 | `github item add --wi WI [--status S] [--project P] [--layer 1-3] [--units N] [--repo R \| --url U]` | desk | an issue for the work item (its title and goal only) in `office_repo` or `--repo` (or the existing issue `--url`), added to the board with its fields |
 | `github item set (--wi WI \| --url U) [--status] [--project] [--layer] [--units] [--decision]` | desk | change a linked item's fields; `--decision` only on a layer 1-2 item |
 | `github item ask --title T --body-file F [--options O1 O2 O3] [--layer 3] [--wi WI] [--project P]` | desk | a decision ask: a `kind:decision` issue with the options and the Decision line; layer 3: assigned to `director_login`, Status Waiting for Director |
@@ -77,7 +77,7 @@ carry it.
 
 ### Watch
 
-`watch` polls the board every `--interval` seconds (at least 5) with one GraphQL query (paged by 100 items), then the
+`watch` polls the board every `--interval` seconds (default 120 since release 73, at least 5) with one GraphQL query (paged by 100 items), then the
 open issues of the organization's repositories (release 71: `office_repo` always; every unarchived repository the
 token can list, up to 100 repositories and the newest 50 open issues each, when it can), and prints
 
@@ -99,8 +99,22 @@ site (a runtime cache, not a record; deleting it only makes the next poll a firs
 Decisions already set and takes the existing comments as seen. The ids of the issues already seen and the repositories
 already scanned are kept there too: a restart does not report an issue again; a first poll (or a repository scanned
 for the first time) takes its open issues as seen, except those opened after the last saved poll time, so an issue
-opened while no watch ran is still reported once. A failed `gh` call (network, rate limit) skips that
-poll; the next one sees the same changes. Each Decision change is recorded as `github.decision.changed`
+opened while no watch ran is still reported once. A failed `gh` call (network, API error) skips that
+poll silently; the next one sees the same changes.
+
+Rate limits (release 73, project-dureh/dureh#25): the team's watch and every desk's `github watch` poll as the same
+GitHub user, so GitHub's per-minute secondary limit is shared; on 2026-10-19 three watches at 30 s made every board
+read fail with "API rate limit already exceeded" while the hourly quota was far from spent. The default interval is
+therefore 120 s; do not lower it. When a poll fails with a rate-limit error ("API rate limit already exceeded",
+"API rate limit exceeded", "secondary rate limit"), `watch` prints one line
+
+```
+github watch: rate limited by GitHub; backing off (next poll in 120 s, doubling up to 900 s) until a poll succeeds
+```
+
+and waits `--interval`, then twice that after each further rate-limited poll (240, 480, ... at most 900 s; at least a
+Retry-After the error names), printing nothing more; the first poll that succeeds prints
+`github watch: resumed after N rate-limited polls` and the normal interval returns. Each Decision change is recorded as `github.decision.changed`
 `{item_id, url, from, to, layer, first_poll}` (with the WI when the item is linked).
 
 GitHub does not report who changed a field value; the Decision column's authority rests on the board's permissions
