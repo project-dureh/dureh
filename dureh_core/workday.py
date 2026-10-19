@@ -1118,7 +1118,7 @@ def decide(site: Site, actor: str, title: str, choice: str, why: str, revs: list
 def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], early: str = "",
         approval: str | None = None) -> dict:
     """The end report. With workday mode off (release 70) it ends a plan approved without hours: no finish-plan
-    refusal; the report carries `workday: false`. `early` is the reason of `--early --reason R`: before the planned
+    refusal; the report carries `workday: false`; the early guard holds to today's session clock (release 74). `early` is the reason of `--early --reason R`: before the planned
     end (release 74, #33) the report also needs `approval`, a recorded approval (`early_check`); past the end
     with plan items open the reason alone ends the day anyway, as before."""
     d = day(site)
@@ -1129,7 +1129,8 @@ def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], e
         _require_on(site)  # a clocked day of a site switched off since: as before
     if not on and overtime:
         fail("workday mode is off: there is no overtime to propose (--overtime needs workday mode)")
-    early_close = early_check(site, d, "end", bool(early.strip()), approval, early) if on else None
+    # release 74 (#33): with workday mode off too, the planned end is today's session clock
+    early_close = early_check(site, d, "end", bool(early.strip()), approval, early)
     evs = _events(site)
     stop = hard_stop(site, d, evs) if d.get("finishing") else None
     if d.get("finishing") and not stop and not early.strip():
@@ -1406,7 +1407,8 @@ def close(site: Site, actor: str, note: str, cancel_now: bool = False, early: st
     running session's start (when one is recorded), `day.closed` carries `workday: false`, and the session is
     released the same way; it references today's plan (release 70: `day plan` with the mode off) when one is
     recorded and the day is not closed yet, else nothing. Release 74 (#33): before the day's planned end the close
-    is refused unless the end report recorded an early approval or `early` (the reason) comes with `approval`."""
+    is refused unless the end report recorded an early approval or `early` (the reason) comes with `approval`; with
+    workday mode off the planned end is today's session start plus `workday.hours` (`planned_end`)."""
     from .ops import status as site_status
     from .upstream import _live_agents
 
@@ -1418,7 +1420,7 @@ def close(site: Site, actor: str, note: str, cancel_now: bool = False, early: st
                                       and not str(d.get("reason", "")).startswith("day closed") else None)
     if on and (d["phase"] not in ("overtime", "off-duty") or not d.get("report")):
         fail(f"close a day after its end report (phase {d['phase']})")
-    early_close = _close_guard(site, d, early, approval) if on else None
+    early_close = _close_guard(site, d, early, approval)  # release 74 (#33): workday mode off too (session clock)
     from .ops import external_jobs, render_external
     from . import sessions
 

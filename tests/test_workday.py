@@ -1012,15 +1012,49 @@ class Workday(SiteCase):
         self.assertIn("usage today 10.0/10.0", render_status(status(self.s)))
 
     # ------------------------------------------------------------ workday mode off (release 67, after 10-15)
-    def _closable_off(self, job="777"):
+    def _closable_off(self, job="777", ago=timedelta(hours=9)):
         """Workday mode off (never switched on): no plan, no end report; a fresh handoff, fake slurm and a recorded
-        session job submitted at the fake now."""
+        session job submitted `ago` before the fake now (release 74: by default the day's 8 hours have passed)."""
         self.write_handoff()
         fake = self.fake_slurm()
         if job:
+            at = datetime.fromisoformat(os.environ["DUREH_FAKE_NOW"]) - ago
             Ledger(self.s).event("session.started", "desk", None,
-                                 {"job_id": job, "purpose": "desk", "submitted_at": os.environ["DUREH_FAKE_NOW"]})
+                                 {"job_id": job, "purpose": "desk", "submitted_at": at.isoformat()})
         return fake
+
+    def test_workday_off_close_before_the_session_clock_end_is_refused(self):
+        """Release 74 (#33, mokoji 2026-10-19, workday mode off): closed at 11:35 local, four hours before the end."""
+        self.assertFalse(workday.enabled(self.s))
+        self._closable_off(ago=timedelta(hours=4, minutes=4))  # session 04:56 local: the day ends 12:56
+        st = workday.status(self.s)
+        self.assertEqual((st["end_utc"], st["end_in"]), ("2026-10-03T16:56:00Z", "3 h 56 min"))
+        self.assertIn("Day clock (workday mode off): session start 04:56 UTC-04:00 (08:56 UTC), ends 12:56 UTC-04:00 "
+                      "(16:56 UTC), 3 h 56 min left", render_status(status(self.s)))
+        with self.assertRaisesRegex(DurehError, r"`day close` refused: the day ends at 12:56 UTC-04:00 \(16:56 UTC\), "
+                                                r"3 h 56 min from now"):
+            workday.close(self.s, "desk", "x")
+        rc, out = self.cli("day", "close", "--early", "--reason", "끝")
+        self.assertEqual(rc, 2)
+        self.assertEqual([e for e in Ledger(self.s).events() if e["type"] in ("day.closed", "session.released")], [])
+        dec = self.director_ok()
+        rc, out = self.cli("day", "close", "--early", "--approval", dec, "--reason", "대표님: 일찍 퇴근")
+        self.assertEqual(rc, 0, out)
+        rec = [e for e in Ledger(self.s).events() if e["type"] == "day.closed"][-1]
+        self.assertEqual((rec["payload"]["workday"], rec["payload"]["early_close"]["approval"]["id"]), (False, dec))
+        self.assertEqual(rec["refs"], [dec])
+
+    def test_workday_off_end_before_the_session_clock_end_is_refused(self):
+        plan, _ = self._plan_off()
+        self._closable_off(ago=timedelta(hours=1))
+        with self.assertRaisesRegex(DurehError, "`day end` refused: the day ends at"):
+            workday.end(self.s, "desk", "W done", "", [])
+        rep = workday.end(self.s, "desk", "W done", "", [], early="일찍", approval=self.director_ok())
+        self.assertIs(rep["payload"]["workday"], False)
+        rec = workday.close(self.s, "desk", "done")  # covered by the report's approval
+        self.assertEqual(rec["payload"]["early_close"]["covered_by"], rep["id"])
+        workday.set_device(self.s, "hours", False, "밤샘")  # the Director's switch: no clock, no guard
+        self.assertIsNone(workday.planned_end(self.s, workday.day(self.s)))
 
     def test_close_with_workday_off_records_and_releases(self):
         self.assertFalse(workday.enabled(self.s))
@@ -1046,7 +1080,7 @@ class Workday(SiteCase):
     def test_close_with_workday_off_still_checks_handoff_and_agents(self):
         self._closable_off()
         h = self.site_root / "state" / "memory" / "handoff.md"
-        old = T0.timestamp() - 3600
+        old = T0.timestamp() - 10 * 3600  # before the session start (9 h ago)
         os.utime(h, (old, old))
         with self.assertRaisesRegex(DurehError, "predates the running session's start .*job 777"):
             workday.close(self.s, "desk", "x")
