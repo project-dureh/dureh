@@ -33,7 +33,7 @@ import json
 import os
 import re
 import subprocess
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import claude_usage
@@ -88,6 +88,27 @@ def _ts(dt: datetime) -> str:
 
 def _parse(ts: str) -> datetime:
     return datetime.fromisoformat(ts)
+
+
+def utc_of(ts: str) -> str:
+    """The UTC form of a recorded time ("2026-10-19T19:39:00Z"); release 74 (#33): the desk read a local end as UTC."""
+    return _parse(ts).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def local_utc(ts: str) -> str:
+    """A recorded time as the desk reads it: local with its zone, and UTC ("15:39 EDT (19:39 UTC)"); the date is
+    added when it is not today's."""
+    dt = _parse(ts).astimezone(_now().tzinfo)
+    u = dt.astimezone(timezone.utc)
+    zone = dt.tzname() or dt.strftime("%z")
+    day = "" if dt.date() == _now().date() else f"{dt.date().isoformat()} "
+    return f"{day}{dt.strftime('%H:%M')} {zone} ({u.strftime('%H:%M')} UTC)"
+
+
+def left_text(delta: timedelta) -> str:
+    """A duration as "4 h 04 min" (never negative)."""
+    mins = max(0, int(delta.total_seconds() // 60))
+    return f"{mins // 60} h {mins % 60:02d} min"
 
 
 def settings(site: Site) -> dict:
@@ -543,9 +564,13 @@ def status(site: Site) -> dict:
         if d.get("plan") and d.get("date") == _now().date().isoformat():  # release 70: the plan without hours
             out["day"] = {k: d[k] for k in ("phase", "reason", "plan", "date", "goal", "approval", "approved_by",
                                             "report", "plan_items", "director_actions", "addenda") if d.get(k) is not None}
+        if d.get("end") and device_on(site, "hours", evs):  # release 74 (#33): today's session clock, local and UTC
+            out.update(start=d["start"], end=d["end"], **clock_fields(d))
         return out
     out = {"enabled": True, "hours": settings(site)["hours"], "workday_phase": settings(site)["phase"], **switches,
            **day(site, evs)}
+    if out.get("end"):
+        out.update(clock_fields(out))  # release 74 (#33): the end in local time and UTC, and the time left
     out["urgent"] = _urgent(evs)
     if out.get("hours_exceeded") and not site.observe:
         note_hours_exceeded(site, out, evs)
@@ -564,6 +589,22 @@ def status(site: Site) -> dict:
         out["overtime_plan_missing"] = True
         out["warning"] = f"{out['warning']}\n⚠ {PLAN_MISSING}" if out.get("warning") else PLAN_MISSING
     return out
+
+
+def clock_fields(d: dict) -> dict:
+    """`start_utc`, `end_utc`, `end_local` ("15:39 EDT (19:39 UTC)") and, before the end, `end_in` (release 74, #33)."""
+    out = {"end_utc": utc_of(d["end"]), "end_local": local_utc(d["end"])}
+    if d.get("start"):
+        out["start_utc"] = utc_of(d["start"])
+    left = _parse(d["end"]) - _now()
+    if left > timedelta(0):
+        out["end_in"] = left_text(left)
+    return out
+
+
+def _clock_text(st: dict) -> str:
+    """"ends 15:39 EDT (19:39 UTC), 4 h 04 min left" (release 74, #33)."""
+    return f"ends {st['end_local']}" + (f", {st['end_in']} left" if st.get("end_in") else ", end passed")
 
 
 def overtime_items(d: dict) -> list[str]:
@@ -653,8 +694,10 @@ def render(st: dict, with_banner: bool = True) -> str | None:
     head = banner(st) if with_banner else None
     if not st.get("enabled"):
         dd = st.get("day")
+        clk = (f"Day clock (workday mode off): session start {local_utc(st['start'])}, {_clock_text(st)}"
+               if st.get("end_local") else None)
         if not dd:
-            return head
+            return "\n".join(filter(None, [head, clk])) or None
         # release 70: today's plan recorded with workday mode off (no hours, no clock)
         line = f"Day (workday mode off): {dd['phase']}, plan {dd['plan']}" + (
             f", approved {dd['approval']} by {dd.get('approved_by') or 'Director'}" if dd.get("approval") else "") + (
@@ -662,7 +705,7 @@ def render(st: dict, with_banner: bool = True) -> str | None:
         line += addenda_text(dd.get("addenda"))
         if dd.get("director_actions"):
             line += "\n" + director_actions_text(dd["director_actions"])
-        return f"{head}\n{line}" if head else line
+        return "\n".join(filter(None, [head, line, clk]))
     line = f"Workday: {st['phase']}"
     if st.get("workday_phase") and st["workday_phase"] != "production":
         line += f" [{st['workday_phase']} phase]"
@@ -675,6 +718,8 @@ def render(st: dict, with_banner: bool = True) -> str | None:
         line += f", plan recorded {st['overtime_plan']['at'][11:16]}" if st.get("overtime_plan") else ", plan missing"
     if st.get("reason"):
         line += f"; {st['reason']}"
+    if st.get("end_local"):  # release 74 (#33): times are local; the UTC form beside them
+        line += f"; {_clock_text(st)}"
     u = st.get("usage") or {}
     if u.get("daily_allowance"):
         line += (f"; usage today {u['today_units']}/{u['daily_allowance']} units"

@@ -398,6 +398,24 @@ class Workday(SiteCase):
         rec = workday.end(self.s, "desk", "plan done", "", [], early="오늘은 일찍 마칩시다")
         self.assertEqual(rec["payload"]["early"], "오늘은 일찍 마칩시다")
 
+    # ------------------------------------------------------------ the day's end in local time and UTC (release 74, #33)
+    def test_status_shows_the_end_in_local_time_and_utc(self):
+        self.start_day()
+        self.at(T0 + timedelta(hours=3, minutes=56))
+        st = workday.status(self.s)
+        self.assertEqual((st["end_utc"], st["start_utc"]), ("2026-10-03T21:00:00Z", "2026-10-03T13:00:00Z"))
+        self.assertEqual(st["end_local"], "17:00 UTC-04:00 (21:00 UTC)")
+        self.assertEqual(st["end_in"], "4 h 04 min")
+        text = render_status(status(self.s))
+        self.assertIn("ends 17:00 UTC-04:00 (21:00 UTC), 4 h 04 min left", text)
+        rc, out = self.cli("day", "status", "--json")
+        self.assertEqual((rc, json.loads(out)["end_utc"]), (0, "2026-10-03T21:00:00Z"))
+        rc, out = self.cli("day", "status")
+        self.assertIn("(21:00 UTC)", out)
+        self.at(T0 + timedelta(hours=9))
+        self.assertIn("end passed", render_status(status(self.s)))
+        self.assertNotIn("end_in", workday.status(self.s))
+
     def test_plan_and_end_record_rollback_heads(self):
         workday.switch(self.s, True, "trial")
         rec = workday.plan(self.s, "desk", "g", "p")
