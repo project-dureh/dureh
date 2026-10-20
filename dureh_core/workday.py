@@ -1091,10 +1091,10 @@ def decide(site: Site, actor: str, title: str, choice: str, why: str, revs: list
            typed: dict | None = None, by: str | None = None) -> dict:
     """Record a decision point (following the desk's own proposal) and commit state as a rollback point.
     With a typed block (release 52) a `day-choice` decision record is appended too, referencing the event; the
-    event keeps its shape and stays the rollback point."""
+    event keeps its shape and stays the rollback point. With workday mode off (#27) it records against today's plan
+    approved without hours, as `day plan` and `day close` do; no plan approved means no decision."""
     from .state import save_state
 
-    _require_on(site)
     d = day(site)
     if d["phase"] not in ("on-duty", "overtime") and not d.get("finishing"):
         fail(f"decisions are recorded during the working day (phase {d['phase']})")

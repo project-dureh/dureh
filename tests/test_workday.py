@@ -1124,6 +1124,16 @@ class Workday(SiteCase):
         rec = workday.plan(self.s, "desk", "finish W", "1. W", [self.wi], ["link the dataset"])
         return rec, (workday.approve(self.s, "desk", "승인") if approve else None)
 
+    def test_decide_with_workday_off_records_against_the_plan(self):
+        """#27 (2026-10-19, workday mode off): `day decide` was refused, so decisions lived only in the end report."""
+        self.assertFalse(workday.enabled(self.s))
+        with self.assertRaisesRegex(DurehError, "decisions are recorded during the working day"):
+            workday.decide(self.s, "desk", "t", "c", "w", [])
+        plan, _ = self._plan_off()
+        out = workday.decide(self.s, "desk", "dataset", "Option 2", "fallback after 30 min", [])
+        rec = [e for e in Ledger(self.s).events() if e["type"] == "day.decision"][-1]
+        self.assertEqual((rec["id"], rec["refs"]), (out["record"], [plan["id"]]))
+
     def test_plan_with_workday_off_records_items_actions_and_approval(self):
         self.assertFalse(workday.enabled(self.s))
         plan, appr = self._plan_off()

@@ -208,7 +208,8 @@ recorded plan, items or Director actions. Now, with the mode off:
 - `day end` writes the end report without the finish-plan check (`--overtime` is refused): `day.ended` with
   `workday: false`. `day close` does not need it. Both keep to today's session clock (the session start plus
   `workday.hours`): before that end they need the Director's recorded approval, as below (release 74).
-- `day decide`, `day overtime`, `day overtime-plan` and `day urgent` stay workday-mode commands.
+- `day decide` records `day.decision` against today's approved plan, as with the mode on (#27); without an
+  approved plan it is refused. `day overtime`, `day overtime-plan` and `day urgent` stay workday-mode commands.
 - When the Director switches the mode on later that day, an approval recorded with the mode off does not count:
   the day is `planned` again and `day approve` starts the clock as usual.
 
