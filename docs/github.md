@@ -67,8 +67,8 @@ Every `gh` call goes through one runner that reads the token at call time and pa
 |---|---|---|
 | `github status [--json]` | anyone; allowed with `--observe` | the board's items grouped by Status, each with its Decision, Project and Layer |
 | `github watch [--interval 120] [--once]` | desk, as a Monitor in working hours | one line per Decision change, per new comment and per newly opened issue not marked as the desk's; nothing else |
-| `github item add --wi WI [--status S] [--project P] [--layer 1-3] [--units N] [--repo R \| --url U]` | desk | an issue for the work item (its title and goal only) in `office_repo` or `--repo` (or the existing issue `--url`), added to the board with its fields |
-| `github item set (--wi WI \| --url U) [--status] [--project] [--layer] [--units] [--decision]` | desk | change a linked item's fields; `--decision` only on a layer 1-2 item |
+| `github item add --wi WI [--status S] [--project P] [--layer 1-3] [--units N] [--priority P0-P3] [--start D] [--target D] [--repo R \| --url U]` | desk | an issue for the work item (its title and goal only) in `office_repo` or `--repo` (or the existing issue `--url`), added to the board with its fields; desk rule: Priority P2 unless asked |
+| `github item set (--wi WI \| --url U) [--status] [--project] [--layer] [--units] [--decision] [--priority] [--start] [--target]` | desk | change a linked item's fields; `--decision` only on a layer 1-2 item; `--priority P0..P3` matches the board option `P1 ...`; `--start`/`--target` YYYY-MM-DD set the `Start date`/`Target date` fields (#31) |
 | `github item ask --title T --body-file F [--options O1 O2 O3] [--layer 3] [--wi WI] [--project P]` | desk | a decision ask: a `kind:decision` issue with the options and the Decision line; layer 3: assigned to `director_login`, Status Waiting for Director |
 | `github item comment (--wi WI \| --url U) [--file F]` | desk | the desk's comment, carrying the marker `<!-- dureh-desk -->` |
 

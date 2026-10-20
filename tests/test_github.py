@@ -30,6 +30,11 @@ FIELDS = [
     {"id": "F_DECISION", "name": "Decision", "dataType": "SINGLE_SELECT",
      "options": [{"id": f"O_D{i}", "name": n} for i, n in enumerate(github.DECISIONS)]},
     {"id": "F_UNITS", "name": "Units", "dataType": "NUMBER"},
+    {"id": "F_PRIORITY", "name": "Priority", "dataType": "SINGLE_SELECT",
+     "options": [{"id": "O_PR0", "name": "P0 now"}, {"id": "O_PR1", "name": "P1 next"}, {"id": "O_PR2", "name": "P2 later"},
+                 {"id": "O_PR3", "name": "P3 someday"}]},
+    {"id": "F_START", "name": "Start date", "dataType": "DATE"},
+    {"id": "F_TARGET", "name": "Target date", "dataType": "DATE"},
     {"id": "F_TITLE", "name": "Title", "dataType": "TITLE"},
 ]
 
@@ -421,6 +426,25 @@ class Items(GithubBase):
         code, out, err = self.run_cli("item", "set", "--wi", "WI-0001", "--layer", "2", "--decision", "approved")
         self.assertEqual(code, 0, err)
         self.assertEqual([e["type"] for e in self.events()].count(github.UPDATED), 2)
+
+    def test_item_priority_and_roadmap_dates(self):
+        """#31: the desk sets Priority (P0-P3) and the roadmap's Start/Target dates through the harness."""
+        code, _, err = self.run_cli("item", "add", "--wi", "WI-0001", "--priority", "p2")
+        self.assertEqual(code, 0, err)
+        self.gh.calls.clear()
+        code, out, err = self.run_cli("item", "set", "--wi", "WI-0001", "--priority", "P1", "--start", "2026-10-21",
+                                      "--target", "2026-10-23")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["fields"], {"Priority": "P1", "Start date": "2026-10-21",
+                                                     "Target date": "2026-10-23"})
+        edits = [c["argv"] for c in self.gh.calls if c["argv"][1:3] == ["project", "item-edit"]]
+        got = {e[e.index("--field-id") + 1]: e[-2:] for e in edits}
+        self.assertEqual(got, {"F_PRIORITY": ["--single-select-option-id", "O_PR1"], "F_START": ["--date", "2026-10-21"],
+                               "F_TARGET": ["--date", "2026-10-23"]})
+        for args, msg in ((["--priority", "P5"], "--priority must be one of"), (["--start", "21/10"], "--start must be a date")):
+            code, _, err = self.run_cli("item", "set", "--wi", "WI-0001", *args)
+            self.assertEqual(code, 2)
+            self.assertIn(msg, err)
 
     def test_ask_assigns_the_director_and_marks(self):
         body = self.tmp / "ask.md"

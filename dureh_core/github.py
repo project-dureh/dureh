@@ -22,6 +22,7 @@ import re
 import stat
 import subprocess
 import time
+from datetime import date
 from pathlib import Path
 
 from .records import Ledger, short_title
@@ -37,6 +38,9 @@ STATUSES = ("Backlog", "Today", "In progress", "Waiting for Director", "Done")
 DECISIONS = ("Approved", "Option 1", "Option 2", "Option 3", "Rejected", "Later")
 LAYERS = {1: "company", 2: "DUREH", 3: "Director"}
 FIELD_STATUS, FIELD_PROJECT, FIELD_LAYER, FIELD_DECISION, FIELD_UNITS = "Status", "Project", "Layer", "Decision", "Units"
+# #31: roadmap fields; a Priority of P1 matches an option named "P1" or "P1 ..."; dates are YYYY-MM-DD
+FIELD_PRIORITY, FIELD_START, FIELD_TARGET = "Priority", "Start date", "Target date"
+PRIORITIES = ("P0", "P1", "P2", "P3")
 SECRET_MARKS = ("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_")
 MAX_BODY = 60000
 _LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
@@ -533,7 +537,7 @@ def _option(meta: dict, field: str, value) -> tuple[str, str]:
     want = str(value).strip().lower()
     for name, oid in f["options"].items():
         n = name.strip().lower()
-        if n == want or (field == FIELD_LAYER and re.match(rf"^{re.escape(want)}\b", n)):
+        if n == want or (field in (FIELD_LAYER, FIELD_PRIORITY) and re.match(rf"^{re.escape(want)}\b", n)):
             return f["id"], oid
     fail(f"the board's {field} has no option {value!r} (options: {', '.join(f['options']) or 'none'})")
 
@@ -549,13 +553,19 @@ def _edits(meta: dict, fields: dict) -> list[list[str]]:
             if not f:
                 fail(f"the board has no field {FIELD_UNITS!r}")
             out.append(["--field-id", f["id"], "--number", f"{float(value):g}"])
+        elif name in (FIELD_START, FIELD_TARGET):
+            f = meta["fields"].get(name)
+            if not f:
+                fail(f"the board has no field {name!r}")
+            out.append(["--field-id", f["id"], "--date", value])
         else:
             fid, oid = _option(meta, name, value)
             out.append(["--field-id", fid, "--single-select-option-id", oid])
     return out
 
 
-def _fields(status=None, project=None, layer=None, units=None, decision=None) -> dict:
+def _fields(status=None, project=None, layer=None, units=None, decision=None, priority=None, start=None,
+            target=None) -> dict:
     out = {}
     if status is not None:
         match = [s for s in STATUSES if s.lower() == str(status).strip().lower()]
@@ -575,6 +585,17 @@ def _fields(status=None, project=None, layer=None, units=None, decision=None) ->
         if not match:
             fail(f"--decision must be one of {', '.join(DECISIONS)}, not {decision!r}")
         out[FIELD_DECISION] = match[0]
+    if priority is not None:
+        want = str(priority).strip().upper()
+        if want not in PRIORITIES:
+            fail(f"--priority must be one of {', '.join(PRIORITIES)}, not {priority!r}")
+        out[FIELD_PRIORITY] = want
+    for name, opt, value in ((FIELD_START, "--start", start), (FIELD_TARGET, "--target", target)):
+        if value is not None:
+            try:
+                out[name] = date.fromisoformat(str(value).strip()).isoformat()
+            except ValueError:
+                fail(f"{opt} must be a date YYYY-MM-DD, not {value!r}")
     return out
 
 
@@ -647,7 +668,7 @@ def linked_item(site: Site, wi: str | None = None, url: str | None = None) -> di
 
 
 def item_add(site: Site, actor: str, wi: str, status: str | None = "Backlog", project=None, layer=None, units=None,
-             repo: str | None = None, url: str | None = None) -> dict:
+             repo: str | None = None, url: str | None = None, priority=None, start=None, target=None) -> dict:
     """Create an issue for a work item (title and goal only) in the office repository or `repo` (or link the
     existing issue `url`), add it to the board, set its fields; records github.item.added."""
     _require_desk(site, actor)
@@ -656,7 +677,7 @@ def item_add(site: Site, actor: str, wi: str, status: str | None = "Backlog", pr
     payload = led.get("work-item", wi)["payload"]
     if any(e["type"] == ADDED and e["wi"] == wi for e in led.events(wi)):
         fail(f"{wi} already has a board item; change it with `dureh github item set --wi {wi} ...`")
-    fields = _fields(status, project, layer, units)
+    fields = _fields(status, project, layer, units, priority=priority, start=start, target=target)
     meta = _meta(cfg)
     _edits(meta, fields)  # every field and option exists before anything is created
     if url:
@@ -676,7 +697,7 @@ def item_add(site: Site, actor: str, wi: str, status: str | None = "Backlog", pr
 
 
 def item_set(site: Site, actor: str, wi: str | None = None, url: str | None = None, status=None, project=None,
-             layer=None, units=None, decision=None) -> dict:
+             layer=None, units=None, decision=None, priority=None, start=None, target=None) -> dict:
     """Change fields of a linked item. The desk records a Decision only on a layer 1-2 item: on a layer-3 item the
     Decision column is the Director's alone."""
     _require_desk(site, actor)
@@ -684,9 +705,9 @@ def item_set(site: Site, actor: str, wi: str | None = None, url: str | None = No
         fail("name the item with --wi or --url")
     cfg = config(site)
     item = linked_item(site, wi, url)
-    fields = _fields(status, project, layer, units, decision)
+    fields = _fields(status, project, layer, units, decision, priority, start, target)
     if not fields:
-        fail("nothing to set: give --status, --project, --layer, --units or --decision")
+        fail("nothing to set: give --status, --project, --layer, --units, --decision, --priority, --start or --target")
     if FIELD_DECISION in fields and str(fields.get(FIELD_LAYER) or item.get("layer") or "") not in ("1", "2"):
         fail("refused: the desk records a Decision only on a layer 1 or 2 item (set --layer 1|2 with it); on a layer-3 "
              "item only the Director decides, in the board's Decision column")

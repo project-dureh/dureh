@@ -793,9 +793,11 @@ def cmd_github(a):
     elif c == "watch":
         github.watch(site, _actor(a), a.interval, emit=lambda line: print(line, flush=True), polls=1 if a.once else None)
     elif a.item_command == "add":
-        _print(github.item_add(site, _actor(a), a.wi, a.status, a.project, a.layer, a.units, a.repo, a.url))
+        _print(github.item_add(site, _actor(a), a.wi, a.status, a.project, a.layer, a.units, a.repo, a.url,
+                               a.priority, a.start, a.target))
     elif a.item_command == "set":
-        _print(github.item_set(site, _actor(a), a.wi, a.url, a.status, a.project, a.layer, a.units, a.decision))
+        _print(github.item_set(site, _actor(a), a.wi, a.url, a.status, a.project, a.layer, a.units, a.decision,
+                               a.priority, a.start, a.target))
     elif a.item_command == "ask":
         body = Path(a.body_file).read_text(encoding="utf-8")
         _print(github.item_ask(site, _actor(a), a.title, body, a.options, a.layer, a.wi, a.project, a.repo, a.units))
@@ -1494,6 +1496,9 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--units", type=float, help="expected work units")
     x.add_argument("--repo", help="a repository of the company's organization (default: config github.office_repo)")
     x.add_argument("--url", help="link this existing issue instead of creating one")
+    x.add_argument("--priority", help="P0..P3 (the board's Priority; desk rule: P2 on new items unless asked)")
+    x.add_argument("--start", help="Start date, YYYY-MM-DD (from DUREH's roadmap)")
+    x.add_argument("--target", help="Target date, YYYY-MM-DD (from DUREH's roadmap)")
     x.add_argument("--actor")
     x = add(gi, "set", cmd_github, "change a linked item's fields (by --wi or --url); a Decision only on a layer 1-2 "
                                    "item; records github.item.updated")
@@ -1504,6 +1509,9 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--layer", type=int, choices=[1, 2, 3])
     x.add_argument("--units", type=float)
     x.add_argument("--decision", help="layer 1-2 only: Approved, Option 1..3, Rejected, Later")
+    x.add_argument("--priority", help="P0..P3 (the board's Priority; desk rule: P2 on new items unless asked)")
+    x.add_argument("--start", help="Start date, YYYY-MM-DD (from DUREH's roadmap)")
+    x.add_argument("--target", help="Target date, YYYY-MM-DD (from DUREH's roadmap)")
     x.add_argument("--actor")
     x = add(gi, "ask", cmd_github, "a decision ask: a kind:decision issue on the board (layer 3: assigned to config "
                                    "github.director_login, Status Waiting for Director); the answer is the Decision "
