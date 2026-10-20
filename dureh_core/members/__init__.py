@@ -201,6 +201,12 @@ def minimal_env(extra_path: list[str] | None = None, passed: list[str] | None = 
     return env
 
 
+def identity_env(ctx: dict) -> dict:
+    """project-dureh/dureh#35: a member's processes carry its role and agent id, so a `bin/dureh` it runs is that
+    member, never the desk (the job itself unsets both; `member exec` binds the run and records `agent.started`)."""
+    return {"DUREH_ACTOR": ctx["role"].name, "DUREH_AGENT_ID": ctx["agent_id"]}
+
+
 # ---------------------------------------------------------------- records
 def member_runs(led: Ledger, wi: str) -> list[dict]:
     return [r for r in led.load("run") if r["wi"] == wi and r["payload"].get("run_type") == RUN_TYPE]

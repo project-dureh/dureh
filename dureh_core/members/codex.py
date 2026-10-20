@@ -420,7 +420,7 @@ def execute(ctx: dict, runner=subprocess.run) -> dict:
     """The job side of a codex checker: canary on this host (run now when this host and codex version have none),
     the declared checks (in this job), the evidence bundle, then `codex exec` under the profile with the wait limit.
     Returns {outcome, reason, verdict, findings, checks, head, changed, usage, ...}."""
-    from . import minimal_env
+    from . import identity_env, minimal_env
     from .. import workflow as wf
 
     site, led, cfg, role, wi = ctx["site"], ctx["led"], ctx["cfg"], ctx["role"], ctx["wi"]
@@ -428,7 +428,7 @@ def execute(ctx: dict, runner=subprocess.run) -> dict:
     binary = find_bin(site, cfg)
     if not binary:
         return {"outcome": "not_run", "reason": f"codex command {c['bin']!r} not found on this node"}
-    env = _env(site, cfg, binary, minimal_env)
+    env = {**_env(site, cfg, binary, minimal_env), **identity_env(ctx)}
     host, ver = socket.gethostname(), version(binary, env)
     if not passed_canary(led, host, ver):
         can = canary(site, role.name, cfg)

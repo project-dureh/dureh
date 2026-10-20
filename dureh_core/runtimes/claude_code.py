@@ -871,8 +871,18 @@ def _scheduler_only(site: Site) -> list[str]:
     return DEFAULT_SCHEDULER_ONLY + list(guards.get("scheduler_only_commands") or [])
 
 
-def _is_dureh(word: str, site: Site) -> bool:
-    return word in ("dureh", str(site.root / "bin" / "dureh"), "bin/dureh", "./bin/dureh", str(HARNESS_ROOT / "dureh"))
+def _is_dureh(word: str, site: Site, cwd: Path | None = None) -> bool:
+    if word in ("dureh", str(site.root / "bin" / "dureh"), "bin/dureh", "./bin/dureh", str(HARNESS_ROOT / "dureh")):
+        return True
+    if "/" not in word:
+        return False
+    # project-dureh/dureh#35: any spelling of the same file (absolute through a symlink, `../bin/dureh` from a
+    # worktree) is the harness too, so the hook sets the caller's identity instead of leaving the call unrewritten
+    path = Path(os.path.expanduser(word))
+    if not path.is_absolute():
+        path = (cwd or Path.cwd()) / path
+    real = os.path.realpath(path)
+    return real in (os.path.realpath(site.root / "bin" / "dureh"), os.path.realpath(HARNESS_ROOT / "dureh"))
 
 
 _SEPARATORS = {";", "&&", "||", "|", "&", "\n", "|&", ";;"}
@@ -1358,7 +1368,7 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
                 name, _, value = w.partition("=")
                 literals[name] = value
         m = re.match(r"^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$", words[0]) if words else None
-        if m and m.group(1) in literals and _is_dureh(literals[m.group(1)], site):
+        if m and m.group(1) in literals and _is_dureh(literals[m.group(1)], site, cwd):
             words[0] = literals[m.group(1)]  # `B=bin/dureh; $B ...` is a written-out dureh call
         env_assign = []
         while words and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", words[0]):
@@ -1378,7 +1388,7 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
             if words[0].startswith("$"):
                 return _deny("a command named by a variable cannot be checked; write the command out"
                              " (for several work items: `bin/dureh wi show --wi A --wi B`)")
-            if not _is_dureh(words[0], site) and any(_names_harness(w) for w in words):
+            if not _is_dureh(words[0], site, cwd) and any(_names_harness(w) for w in words):
                 return _deny("call the harness only as `bin/dureh <command>`, written out (not through an interpreter "
                              "or another path), so the hook can set your identity")
         if role != "desk" and (first in _INTERPRETERS or re.match(r"python3?\.\d+$", first)) \
@@ -1415,7 +1425,7 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
         if first == "cd" and len(words) > 1:
             cwd = (cwd / os.path.expanduser(words[1])).resolve()
             continue
-        if _is_dureh(words[0], site):
+        if _is_dureh(words[0], site, cwd):
             if "--actor" in words and words[words.index("--actor") + 1: words.index("--actor") + 2] != [role]:
                 return _deny("--actor must be your own role; the hook sets identity")
             if "--site" in words and words[words.index("--site") + 1: words.index("--site") + 2] != [str(site.root)]:

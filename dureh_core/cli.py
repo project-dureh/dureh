@@ -32,7 +32,29 @@ def _actor(args) -> str:
     given = getattr(args, "actor", None)
     if env and given and env != given:
         fail(f"--actor {given} conflicts with the harness-assigned identity {env}")
+    if not env and os.environ.get("DUREH_AGENT_ID"):
+        # project-dureh/dureh#35: a process an agent started (a script, an absolute or relative path the hook did not
+        # rewrite) carries the agent id but no identity; it is that agent, never the desk
+        env = _agent_role(args, os.environ["DUREH_AGENT_ID"])
+        if given and env != given:
+            fail(f"--actor {given} conflicts with the identity of agent {os.environ['DUREH_AGENT_ID']} ({env})")
     return env or given or "desk"
+
+
+def _agent_role(args, agent_id: str) -> str:
+    """The role an agent id was started as (its `agent.started` record); refuse when it has none."""
+    from .records import Ledger
+
+    try:
+        led = Ledger(_site(args))
+        roles = [ev["actor"] for ev in led.events() if ev["type"] == "agent.started"
+                 and ev["payload"].get("agent_id") == agent_id]
+    except DurehError:
+        roles = []
+    if not roles or roles[-1] == "desk":
+        fail(f"this process belongs to agent {agent_id}, which has no recorded role; run the harness as"
+             " `bin/dureh <command>` written out in your own command so the hook sets your identity")
+    return roles[-1]
 
 
 def _print(value) -> None:

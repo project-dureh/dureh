@@ -459,7 +459,7 @@ def converse(base: str, model: str, prompt: str, tools: Tools, limits: dict, opt
 def execute(ctx: dict, converse_fn=converse) -> dict:
     """The job side of a local worker: the office-hours server and the role's profile, the allowlist from the brief,
     the tool loop (one retry on a harness error). Returns {outcome, reason, output, writes, tests, usage, ...}."""
-    from . import minimal_env, write_allowlist
+    from . import identity_env, minimal_env, write_allowlist
     from .. import office_hours
     from ..paths import target_root
     from ..workflow import _checks_env, checks_env_plan
@@ -495,7 +495,7 @@ def execute(ctx: dict, converse_fn=converse) -> dict:
     env = {**minimal_env(), **{k: v for k, v in _checks_env(site, wi, wt, troot, plan).items()
                                if k in ("PATH", "VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT", "UV_NO_SYNC", "PYTHONPATH",
                                         "DUREH_WORK_ROOT", "DUREH_TARGET_ROOT", "DUREH_WI", "PYTHONDONTWRITEBYTECODE",
-                                        "DUREH_SITE")}}
+                                        "DUREH_SITE")}, **identity_env(ctx)}
     tools = Tools(site, wt, allow, int(lim["write_cap"]), list(payload.get("checks") or []), env,
                   float(lim["test_timeout"]))
     options = {**parse_profile(profile), **(lim.get("options") or {})}
