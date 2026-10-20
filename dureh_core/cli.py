@@ -792,6 +792,8 @@ def cmd_github(a):
             print("\n".join(github.status_lines(res)))
     elif c == "watch":
         github.watch(site, _actor(a), a.interval, emit=lambda line: print(line, flush=True), polls=1 if a.once else None)
+    elif c == "sweep":
+        _print(github.sweep(site, _actor(a), a.dry_run))
     elif a.item_command == "add":
         _print(github.item_add(site, _actor(a), a.wi, a.status, a.project, a.layer, a.units, a.repo, a.url,
                                a.priority, a.start, a.target))
@@ -801,6 +803,8 @@ def cmd_github(a):
     elif a.item_command == "ask":
         body = Path(a.body_file).read_text(encoding="utf-8")
         _print(github.item_ask(site, _actor(a), a.title, body, a.options, a.layer, a.wi, a.project, a.repo, a.units))
+    elif a.item_command == "close":
+        _print(github.item_close(site, _actor(a), a.wi, a.url, a.comment))
     else:
         text = Path(a.file).read_text(encoding="utf-8") if a.file else sys.stdin.read()
         _print(github.comment(site, _actor(a), text, a.wi, a.url))
@@ -1484,6 +1488,11 @@ def parser() -> argparse.ArgumentParser:
                    help="seconds between polls (default 120, at least 5; the team and the desks share one GitHub user)")
     x.add_argument("--once", action="store_true", help="one poll, then exit")
     x.add_argument("--actor")
+    x = add(gp, "sweep", cmd_github, "desk: close every open issue of the organization whose Status is Done and that "
+                                     "carries no waiting-director, needs-review or needs-approval label (day close runs "
+                                     "it); records github.sweep.done")
+    x.add_argument("--dry-run", action="store_true", help="list what would close; close nothing")
+    x.add_argument("--actor")
     gi = add(gp, "item", cmd_github, "desk: board items for work items and decision asks").add_subparsers(
         dest="item_command", required=True)
     x = add(gi, "add", cmd_github, "create an issue for a work item (title and goal) in config github.office_repo or "
@@ -1530,6 +1539,12 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--wi")
     x.add_argument("--url")
     x.add_argument("--file")
+    x.add_argument("--actor")
+    x = add(gi, "close", cmd_github, "close a linked item's issue (desk rule: at promote), with an optional closing "
+                                     "comment; records github.item.closed")
+    x.add_argument("--wi")
+    x.add_argument("--url")
+    x.add_argument("--comment", help="closing comment (marked as the desk's)")
     x.add_argument("--actor")
 
     x = add(sub, "report", cmd_report, "desk only: report by kind; one routing table decides where (Slack day thread, "

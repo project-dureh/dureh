@@ -51,6 +51,9 @@ NO_CONFIG = ("GitHub is not configured for this site: the Director/DUREH set `gi
 ADDED, UPDATED, ASKED, COMMENTED, DECIDED = ("github.item.added", "github.item.updated", "github.ask.created",
                                             "github.comment.posted", "github.decision.changed")
 OPENED = "github.issue.opened"
+CLOSED, SWEPT = "github.item.closed", "github.sweep.done"
+# #34: a Done item that still waits for the Director (an answer or a review) stays open for the sweep
+HOLD_LABELS = ("waiting-director", "needs-review", "needs-approval")
 
 
 class GhError(DurehError):
@@ -212,7 +215,7 @@ BOARD_QUERY = """query($org: String!, $number: Int!, $after: String) {
           content {
             __typename
             ... on Issue { number title url state repository { nameWithOwner }
-              assignees(first: 5) { nodes { login } }
+              assignees(first: 5) { nodes { login } } labels(first: 20) { nodes { name } }
               comments(last: 30) { nodes { id url author { login } body } } }
             ... on PullRequest { number title url state repository { nameWithOwner }
               comments(last: 30) { nodes { id url author { login } body } } }
@@ -241,6 +244,7 @@ def _parse_item(node: dict) -> dict:
     return {"id": node.get("id"), "type": c.get("__typename"), "number": c.get("number"), "title": c.get("title"),
             "url": c.get("url"), "state": c.get("state"), "repo": (c.get("repository") or {}).get("nameWithOwner"),
             "assignees": [a.get("login") for a in (c.get("assignees") or {}).get("nodes") or [] if a],
+            "labels": [n.get("name") for n in (c.get("labels") or {}).get("nodes") or [] if n],
             "status": values.get(FIELD_STATUS), "decision": values.get(FIELD_DECISION),
             "project": values.get(FIELD_PROJECT), "layer": values.get(FIELD_LAYER), "units": values.get(FIELD_UNITS),
             "comments": comments}
@@ -769,3 +773,38 @@ def comment(site: Site, actor: str, text: str, wi: str | None = None, url: str |
     gh(cfg, ["issue", "comment", target, "--body-file", "-"], input_text=body)
     Ledger(site).event(COMMENTED, actor, wi, {"url": target, "chars": len(body)}, [wi] if wi else None)
     return {"commented": True, "url": target, "chars": len(body)}
+
+
+def item_close(site: Site, actor: str, wi: str | None = None, url: str | None = None, text: str | None = None) -> dict:
+    """#34: close a linked item's issue (the desk's rule: at promote), with an optional closing comment carrying the
+    desk marker; records github.item.closed {url}."""
+    _require_desk(site, actor)
+    if not wi and not url:
+        fail("name the item with --wi or --url")
+    cfg = config(site)
+    target = linked_item(site, wi, url)["url"] if wi else url.strip()
+    _issue_number(cfg, target)
+    args = ["issue", "close", target]
+    if text and text.strip():
+        args += ["--comment", _clean(text, "the comment") + f"\n\n{DESK_MARK}"]
+    gh(cfg, args)
+    Ledger(site).event(CLOSED, actor, wi, {"url": target}, [wi] if wi else None)
+    return {"closed": True, "wi": wi, "url": target}
+
+
+def sweep(site: Site, actor: str, dry_run: bool = False) -> dict:
+    """#34: close every open issue of the company's organization whose board Status is Done and that carries none of
+    HOLD_LABELS (day close runs it); records github.sweep.done {closed, kept}."""
+    _require_desk(site, actor)
+    cfg = config(site)
+    done = [it for it in board(cfg)["items"] if it["type"] == "Issue" and it["state"] == "OPEN"
+            and it["status"] == "Done" and str(it.get("repo") or "").startswith(cfg["org"] + "/")]
+    kept = [it["url"] for it in done if set(it.get("labels") or []) & set(HOLD_LABELS)]
+    todo = [it["url"] for it in done if it["url"] not in kept]
+    if not dry_run:
+        for url in todo:
+            gh(cfg, ["issue", "close", url, "--comment", f"Done on the board; closed by the desk's sweep.\n\n{DESK_MARK}"])
+        if todo or kept:
+            Ledger(site).event(SWEPT, actor, None, {"closed": todo, "kept": kept})
+    return {"dry_run": dry_run, "closed" if not dry_run else "would_close": todo, "kept": kept}
+

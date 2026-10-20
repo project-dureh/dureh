@@ -39,15 +39,17 @@ FIELDS = [
 ]
 
 
-def node(item_id, number, title, status=None, decision=None, layer=None, comments=()):
+def node(item_id, number, title, status=None, decision=None, layer=None, comments=(), labels=(), state="OPEN",
+         repo=None):
     values = []
     for field, v in (("Status", status), ("Decision", decision), ("Layer", layer)):
         if v is not None:
             values.append({"name": v, "field": {"name": field}})
     return {"id": item_id, "fieldValues": {"nodes": values},
-            "content": {"__typename": "Issue", "number": number, "title": title, "state": "OPEN",
-                        "url": f"https://github.com/{ORG}/office/issues/{number}",
-                        "repository": {"nameWithOwner": f"{ORG}/office"}, "assignees": {"nodes": []},
+            "content": {"__typename": "Issue", "number": number, "title": title, "state": state,
+                        "url": f"https://github.com/{repo or ORG + '/office'}/issues/{number}",
+                        "repository": {"nameWithOwner": repo or f"{ORG}/office"}, "assignees": {"nodes": []},
+                        "labels": {"nodes": [{"name": n} for n in labels]},
                         "comments": {"nodes": [{"id": cid, "url": f"https://github.com/{ORG}/office/issues/{number}#{cid}",
                                                 "author": {"login": who}, "body": body}
                                                for cid, who, body in comments]}}}
@@ -445,6 +447,37 @@ class Items(GithubBase):
             code, _, err = self.run_cli("item", "set", "--wi", "WI-0001", *args)
             self.assertEqual(code, 2)
             self.assertIn(msg, err)
+
+    def test_item_close_and_sweep(self):
+        """#34: the desk closes an item at promote, and the sweep closes Done items that wait for nobody."""
+        self.run_cli("item", "add", "--wi", "WI-0001")
+        self.gh.calls.clear()
+        code, out, err = self.run_cli("item", "close", "--wi", "WI-0001", "--comment", "promoted")
+        self.assertEqual(code, 0, err)
+        close = [c["argv"] for c in self.gh.calls if c["argv"][1:3] == ["issue", "close"]]
+        self.assertEqual(close[0][3], f"https://github.com/{ORG}/office/issues/11")
+        self.assertIn(github.DESK_MARK, close[0][close[0].index("--comment") + 1])
+        self.assertEqual([e["type"] for e in self.events()][-1], github.CLOSED)
+        self.gh.items = [node("I1", 1, "done", status="Done"), node("I2", 2, "review", status="Done", labels=["needs-review"]),
+                         node("I3", 3, "open work", status="In progress"), node("I4", 4, "closed", status="Done", state="CLOSED"),
+                         node("I5", 5, "elsewhere", status="Done", repo="other-org/x")]
+        self.gh.calls.clear()
+        code, out, err = self.run_cli("sweep", "--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["would_close"], [f"https://github.com/{ORG}/office/issues/1"])
+        self.assertNotIn(["issue", "close"], self.gh.commands())
+        code, out, err = self.run_cli("sweep")
+        self.assertEqual(code, 0, err)
+        res = json.loads(out)
+        self.assertEqual((res["closed"], res["kept"]), ([f"https://github.com/{ORG}/office/issues/1"],
+                                                        [f"https://github.com/{ORG}/office/issues/2"]))
+        self.assertEqual(self.gh.commands().count(["issue", "close"]), 1)
+        self.assertEqual([e["type"] for e in self.events()][-1], github.SWEPT)
+        os.environ["DUREH_ACTOR"] = "py-writer"
+        code, _, err = self.run_cli("sweep")
+        os.environ.pop("DUREH_ACTOR")
+        self.assertEqual(code, 2)
+        self.assertIn("only the desk", err)
 
     def test_ask_assigns_the_director_and_marks(self):
         body = self.tmp / "ask.md"
