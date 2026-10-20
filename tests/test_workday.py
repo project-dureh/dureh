@@ -1124,6 +1124,26 @@ class Workday(SiteCase):
         rec = workday.plan(self.s, "desk", "finish W", "1. W", [self.wi], ["link the dataset"])
         return rec, (workday.approve(self.s, "desk", "승인") if approve else None)
 
+    def test_director_action_done_leaves_the_status_list(self):
+        """#32: a done Director action stayed in `dureh status` until a new `day plan` re-recorded the plan."""
+        workday.plan(self.s, "desk", "finish W", "1. W", [self.wi], ["link the dataset", "save camri-test"])
+        workday.approve(self.s, "desk", "승인")
+        out = workday.action_done(self.s, "desk", "2", ref="6d31fed")
+        self.assertEqual((out["done"], out["open"]), ("save camri-test", ["link the dataset"]))
+        d = workday.day(self.s)
+        self.assertEqual(d["director_actions"], ["link the dataset"])
+        self.assertEqual([x["ref"] for x in d["director_actions_done"]], ["6d31fed"])
+        with self.assertRaisesRegex(DurehError, "already marked done"):
+            workday.action_done(self.s, "desk", "camri-test")
+        with self.assertRaisesRegex(DurehError, "name one of today's Director actions"):
+            workday.action_done(self.s, "desk", "nothing like this")
+        rc, out = self.cli("day", "action", "done", "dataset")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(workday.day(self.s)["director_actions"], [])
+        self.assertNotIn("대표님 조치 필요", render_status(status(self.s)))
+        with self.assertRaises(DurehError):
+            workday.action_done(self.s, "py-writer", "1")
+
     def test_decide_with_workday_off_records_against_the_plan(self):
         """#27 (2026-10-19, workday mode off): `day decide` was refused, so decisions lived only in the end report."""
         self.assertFalse(workday.enabled(self.s))

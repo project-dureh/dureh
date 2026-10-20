@@ -48,6 +48,8 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    to the approval request, so the Director handles them in one go at approval instead of being asked one by one
    during the day. (Director, 2026-10-12: "꼭 필요할때는 기다릴수 있지만, 이를 예방하기 위한 제안을 제게 하고 제가 선택적으로
    해결해주기로 합니다"; the Director adopted this and the standing fast-forward push below: "1번과 2번 복수 선택".)
+   When one is done, `dureh day action done <n|text> [--ref <commit, issue URL or record>]` (desk, #32) appends
+   `day.action.done`: `day status` stops listing it and the end report shows `director_actions` {open, done}.
 2. **Approval.** When the Director approves in the session, the desk records the Director's words:
    `dureh day approve --memo "..."`. With Slack configured (`slack.director_user` set), the desk also runs
    `dureh slack ask --kind day-plan` right after `day plan` and `dureh slack watch` as a Monitor; the Director's

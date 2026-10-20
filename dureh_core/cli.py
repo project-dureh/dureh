@@ -664,6 +664,8 @@ def cmd_day(a):
             _print(workday.plan(site, actor, a.goal, text, a.wi or [], a.director_action or []))
     elif c == "approve":
         _print(workday.approve(site, actor, a.memo, by=a.by, addendum=a.addendum))
+    elif c == "action":
+        _print(workday.action_done(site, actor, a.which, a.ref))
     elif c == "decide":
         typed = None
         if a.option or a.question or a.fact:
@@ -1341,6 +1343,11 @@ def parser() -> argparse.ArgumentParser:
                                                     "layer 2, CHARTER; valid with workday mode on or off)")
     x.add_argument("--addendum", action="store_true", help="release 73: approve the day's latest addendum "
                                                            "(`day plan --addendum`); the day's clock is unchanged")
+    x = add(dy, "action", cmd_day, "#32: `day action done <n|text> [--ref R]`: mark one of today's Director actions "
+                                   "done; `dureh status` stops listing it and the end report names it as done")
+    x.add_argument("verb", choices=["done"])
+    x.add_argument("which", help="the action's number in the plan (from 1) or a unique part of its text")
+    x.add_argument("--ref", help="what shows it done (a commit, an issue URL, a record id)")
     x = add(dy, "decide", cmd_day, "record a decision point (own proposal followed) and commit state as a rollback point")
     x.add_argument("--title", required=True)
     x.add_argument("--choice", required=True)

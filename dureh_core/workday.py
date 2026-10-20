@@ -47,7 +47,7 @@ OVERTIME_PLAN = "day.overtime-plan"  # the overtime portion's own plan (Director
 OVERTIME_BEGAN = "day.overtime-started"  # written by the gate at the first work unit it admits in overtime
 DAY_CHOICE = "day-choice"  # decision record type written by `day decide --option ...` (release 52)
 DAY_TYPES = ("day.planned", "day.approved", "day.decision", "day.ended", "day.overtime", OVERTIME_PLAN, OVERTIME_BEGAN,
-             "day.closed")
+             "day.closed", "day.action.done")  # #32: ACTION_DONE
 UNIT_TYPES = ("wi.dispatched", "checker.dispatched")  # a work unit: an agent spawn the gate admitted
 # Overtime plan (Director, 2026-10-06: 회사는 새로 오늘 초과근무분의 근무계획을 새로 작성하고, 초과근무를 수행하라고 하세요): once
 # overtime started, the first work unit is in flight; the next waits for the overtime portion's plan.
@@ -316,7 +316,11 @@ def day(site: Site, events: list[dict] | None = None) -> dict:
     out = {"plan": plan["id"], "date": plan["payload"].get("date"), "goal": plan["payload"].get("goal"),
            "decisions": decisions, **_session_clock(site, session)}
     if plan["payload"].get("director_actions"):
-        out["director_actions"] = list(plan["payload"]["director_actions"])  # release 58
+        done = {e["payload"]["action"]: e for e in cur if e["type"] == ACTION_DONE}  # #32
+        out["director_actions"] = [a for a in plan["payload"]["director_actions"] if a not in done]  # release 58
+        if done:
+            out["director_actions_done"] = [{"action": a, "record": e["id"], "ref": e["payload"].get("ref")}
+                                            for a, e in done.items()]
     adds = _addenda(cur)
     if adds:
         out["addenda"] = adds
@@ -754,6 +758,29 @@ def addenda_text(addenda: list[dict] | None) -> str:
 
 
 DIRECTOR_ACTIONS_LABEL = "대표님 조치 필요:"
+ACTION_DONE = "day.action.done"
+
+
+def action_done(site: Site, actor: str, which: str, ref: str | None = None) -> dict:
+    """#32: mark one of today's Director actions done (by its number in the plan, from 1, or its text), so `dureh
+    status` stops listing it and the end report names it as done; appends day.action.done {action, ref}."""
+    d = day(site)
+    if not d.get("plan") or str(d.get("reason") or "").startswith("day closed"):
+        fail("no open day plan: Director actions belong to today's plan")
+    actions = next(e for e in Ledger(site).events() if e["id"] == d["plan"])["payload"].get("director_actions") or []
+    w = which.strip()
+    if w.isdigit() and 1 <= int(w) <= len(actions):
+        action = actions[int(w) - 1]
+    else:
+        hits = [a for a in actions if a == w] or [a for a in actions if w.lower() in a.lower()]
+        if len(hits) != 1:
+            listing = "; ".join(f"{i}. {a}" for i, a in enumerate(actions, 1)) or "none"
+            fail(f"name one of today's Director actions by number or text (actions: {listing})")
+        action = hits[0]
+    if action not in (d.get("director_actions") or []):
+        fail(f"already marked done: {action}")
+    rec = Ledger(site).event(ACTION_DONE, actor, None, {"action": action, "ref": ref}, [d["plan"]])
+    return {"done": action, "record": rec["id"], "ref": ref, "open": [a for a in d["director_actions"] if a != action]}
 
 
 def director_actions_text(actions: list[str]) -> str:
@@ -1154,6 +1181,9 @@ def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], e
               "early": early or None, "usage": u, "heads": heads(site), **({} if on else {"workday": False})}
     if early_close:
         report["early_close"] = early_close  # release 74 (#33): the planned end, the time left, the approval
+    if d.get("director_actions") or d.get("director_actions_done"):  # #32: open and done Director actions
+        report["director_actions"] = {"open": d.get("director_actions") or [],
+                                      "done": d.get("director_actions_done") or []}
     if d.get("addenda"):  # release 73: the day's addenda, each with its WIs and approval
         report["addenda"] = [{k: a[k] for k in ("record", "at", "goal", "items", "approval", "approved_by")}
                              for a in d["addenda"]]
