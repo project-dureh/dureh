@@ -8,7 +8,7 @@ Releases are annotated tags `rYYYY.MM.DD-N` (for example `r2026.10.07-1`) on the
 `tools/release.py`; the repository's default branch `main` is not kept current, so install from a release tag.
 
 ```sh
-git clone git@github.com:dvm-shlee/dureh.git dureh && cd dureh
+git clone git@github.com:project-dureh/dureh.git dureh && cd dureh
 git tag --list 'r*' --sort=-v:refname | head -1   # the newest release, e.g. r2026.10.07-1
 git checkout --detach r2026.10.07-1               # the release to install
 ./install.sh --startup /path/to/<package> --site /path/to/new-site --preset presets/example.json
