@@ -1770,14 +1770,25 @@ class Workday(SiteCase):
             "command": "sbatch --parsable --time=00:30:00 /x/checks.sh"})
         led.append("run", "slurm", "desk", self.wi, {"run_type": "slurm", "status": "not-run", "command": ["sbatch", "dry.sh"]})
         led.append("run", "agent", "desk", self.wi, {"run_type": "agent", "status": "completed"})
+        # #29: codex/local member runs are Slurm jobs of the day; their state is the member's outcome
+        m_ok = led.append("run", "member", "desk", self.wi, {"run_type": "member", "status": "submitted", "job_id": "5100",
+                                                              "role": "checker", "runtime": "codex",
+                                                              "command": ["sbatch", "--parsable", "/x/member.sbatch"]})
+        led.event("agent.finished", "desk", self.wi, {"agent_id": "member-x", "run": m_ok["id"], "outcome": "completed"})
+        m_nr = led.append("run", "member", "desk", self.wi, {"run_type": "member", "status": "submitted", "job_id": "5101",
+                                                              "role": "checker", "runtime": "codex"})
+        led.event("agent.finished", "desk", self.wi, {"agent_id": "member-y", "run": m_nr["id"], "outcome": "not_run"})
         self.at(T0 + timedelta(hours=8, minutes=1))
         rec = workday.end(self.s, "desk", "ran the pipeline", "", [])
         jobs = rec["payload"]["jobs"]
         self.assertEqual((jobs["count"], jobs["tasks"], jobs["jobs"], jobs["failed"], jobs["line"]),
-                         (4, 8, 5, 1, "jobs today: 4 runs, 8 tasks, 1 failed"))
-        self.assertEqual([j["run"] for j in jobs["runs"]], [arr["id"], single["id"], via["id"], verify["id"]],
+                         (6, 10, 7, 2, "jobs today: 6 runs, 10 tasks, 2 failed"))
+        self.assertEqual([j["run"] for j in jobs["runs"]], [arr["id"], single["id"], via["id"], verify["id"], m_ok["id"],
+                                                            m_nr["id"]],
                          "runs before the plan, dry runs and agent runs are not jobs of the day")
-        a, s, v, c = jobs["runs"]
+        a, s, v, c, mo, mn = jobs["runs"]
+        self.assertEqual((mo["kind"], mo["step"], mo["job_ids"], mo["state"], mn["state"], mn["states"]["failed"]),
+                         ("member", "checker (codex)", ["5100"], "COMPLETED", "NOT_RUN", 1))
         self.assertEqual((a["wi"], a["kind"], a["step"], a["level"], a["tasks"], a["jobs"], a["logs"]),
                          (self.wi, "slurm", "step1.sh", "file", 3, 1, "/x/logs/WI"))
         self.assertEqual(a["job_ids"], ["4300_[0-2]", "4300_0", "4300_1", "4300_2"])
@@ -1792,9 +1803,9 @@ class Workday(SiteCase):
         self.assertEqual((c["kind"], c["step"], c["command"], c["level"]),
                          ("verify", "checks.sh", "sbatch --parsable --time=00:30:00 /x/checks.sh", "single"))
         # the Slack end-report summary (first paragraph) carries the jobs line, once
-        self.assertEqual(slack.jobs_line(self.s), "jobs today: 4 runs, 8 tasks, 1 failed")
+        self.assertEqual(slack.jobs_line(self.s), "jobs today: 6 runs, 10 tasks, 2 failed")
         self.assertEqual(slack.end_report_summary(self.s, "오늘 요약 한 문단\n\n자세한 내용"),
-                         "오늘 요약 한 문단\njobs today: 4 runs, 8 tasks, 1 failed")
+                         "오늘 요약 한 문단\njobs today: 6 runs, 10 tasks, 2 failed")
         self.assertEqual(slack.end_report_summary(self.s, "요약 (jobs today: 4 runs, 8 tasks, 1 failed)\n\n본문"),
                          "요약 (jobs today: 4 runs, 8 tasks, 1 failed)")
         self.assertEqual(before["payload"]["job_id"], "4000")

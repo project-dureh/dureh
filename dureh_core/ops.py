@@ -1838,25 +1838,34 @@ def _day_check(site: Site, cmd: list[str], script: Path, extra: list[str], cfg: 
 def day_jobs(site: Site, since: tuple[str, str] | None = None) -> dict:
     """The end report's `jobs` section (Director 2026-10-06: 각 job에 대해 몇 개의 job으로 수행했는지, 각 job ID와 수행 command):
     every scheduler run recorded for the day (after the day plan's record `since` = (ts, id), in ledger order; all
-    runs without it): `slurm submit` jobs and arrays, `--via` submissions, `verify --submit` jobs. Per run: WI,
+    runs without it): `slurm submit` jobs and arrays, `--via` submissions, `verify --submit` jobs, member runs (#29). Per run: WI,
     kind, step (script) or via command, level, tasks and jobs, every job id (an array as its id with the task range
     plus each task id), the exact command recorded at submit time, the state summary from the recorded states
     (`slurm watch|status|wait`; the scheduler is not asked here), log dir. `line` is the Slack summary line."""
     import shlex
 
     led = Ledger(site)
-    runs = [r for r in led.load("run") if r["payload"].get("run_type") in ("slurm", "verify") and r["payload"].get("job_id")
-            and (since is None or (r["ts"], r["id"]) > tuple(since))]
+    # #29: member runs (codex, local) are Slurm jobs too; their state is the member's recorded outcome
+    runs = [r for r in led.load("run") if r["payload"].get("run_type") in ("slurm", "verify", "member")
+            and r["payload"].get("job_id") and (since is None or (r["ts"], r["id"]) > tuple(since))]
     latest: dict[str, dict] = {}
+    finished: dict[str, dict] = {}
     for e in led.events():
         if e["type"] == "run.status" and e["payload"].get("run"):
             latest[e["payload"]["run"]] = e["payload"]
+        elif e["type"] == "agent.finished" and e["payload"].get("run"):
+            finished[e["payload"]["run"]] = e["payload"]
     out, t_tasks, t_jobs, t_failed = [], 0, 0, 0
     for r in runs:
         p, st = r["payload"], latest.get(r["id"]) or {}
         via, arr, jobs = p.get("via"), p.get("array"), p.get("jobs") or []
         if via:
             kind, step = "via", via.get("text") or " ".join(via.get("command") or [])
+        elif p["run_type"] == "member":
+            kind, step = "member", f"{p.get('role')} ({p.get('runtime')})"
+            if not st and r["id"] in finished:
+                out_ = finished[r["id"]].get("outcome")
+                st = {"scheduler_state": "COMPLETED" if out_ == "completed" else "NOT_RUN"}
         else:
             kind = "verify" if p["run_type"] == "verify" else "slurm"
             step = os.path.basename(p["script"]) if p.get("script") else None
@@ -1885,7 +1894,8 @@ def day_jobs(site: Site, since: tuple[str, str] | None = None) -> dict:
         elif st.get("scheduler_state"):
             counts[str(st["scheduler_state"]).split()[0]] = tasks
         completed, cancelled = counts.get("COMPLETED", 0), counts.get("CANCELLED", 0)
-        failed = sum(v for k, v in counts.items() if k in TERMINAL_STATES and k not in ("COMPLETED", "CANCELLED"))
+        failed = sum(v for k, v in counts.items() if (k in TERMINAL_STATES or k == "NOT_RUN")
+                     and k not in ("COMPLETED", "CANCELLED"))
         other = tasks - completed - cancelled - failed
         level = p.get("level") or (arr or {}).get("level") or ("group" if p.get("after") else "single")
         out.append({"run": r["id"], "wi": r["wi"], "kind": kind, "step": step, "level": level, "reason": p.get("reason"),
