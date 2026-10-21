@@ -180,7 +180,11 @@ def _checker_brief_check(site: Site, draft: dict, what: str) -> None:
 
 
 def wi_approve(site: Site, actor: str, wi: str, memo: str, by: str = "Director") -> dict:
-    """Gate 1. The desk records the Director's approval as a decision, then the event."""
+    """Gate 1. The desk records the approval as a decision, then the event. The CLI requires `--by` (release 78: no
+    default approver); here `by` must be one of records.APPROVER_ROLES."""
+    from .records import approver
+
+    by = approver(by, what="Gate 1")
     led = Ledger(site)
     rec = led.get("work-item", wi)
     _local_output_check(site, wi, rec["payload"])
@@ -668,7 +672,10 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
                                               **({"added_constraints": adds, "status": st} if adds else {}),
                                               **({"reopened_from": "verified"} if reopen else {})})
     if st == "stopped":  # an amended stopped item is re-opened with the same approval words
-        wi_approve(site, actor, wi, f"amended ({ev['id']}): {memo}")
+        # release 78: the re-approval names the approver of the item's last Gate 1, never an assumed Director
+        last = [e for e in led.events(wi) if e["type"] == "wi.approved"]
+        wi_approve(site, actor, wi, f"amended ({ev['id']}): {memo}",
+                   by=(last[-1]["payload"].get("by") if last else None) or "Director")
     if reopen:
         verified = [e for e in led.events(wi) if e["type"] == "wi.verified"]
         led.event("wi.reopened", actor, wi, {"amendment": ev["id"], "memo": memo, "by": "Director",
