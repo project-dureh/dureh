@@ -1513,6 +1513,78 @@ def slurm_wait(site: Site, actor: str, run_id: str, timeout: int = 3600, interva
     return {**ev, "logs": _log_hint(site, run)}
 
 
+def wake_command(site: Site, run_id: str) -> str:
+    """Release 77 (#38): the one command that tells the desk when a job it submitted ends."""
+    return f"{site.root}/bin/dureh slurm wait --run {run_id} --notify"
+
+
+def desk_wake(site: Site, actor: str, run_id: str | None) -> str | None:
+    """The wake command for a job the desk submitted itself while no standing `slurm watch` reports job ends
+    (config `slurm.watch` on-demand or off); None otherwise (another role ends its turn; a watch reports it)."""
+    try:
+        if not run_id or site.org.role(actor).kind != "desk" or watch_mode(site) == "monitor":
+            return None
+    except DurehError:
+        return None
+    return wake_command(site, run_id)
+
+
+def _final_state(led: Ledger, run_id: str) -> str | None:
+    rec = _recorded_states(led.events()).get(run_id)
+    return rec[0] if rec and (rec[1] or rec[0] in TERMINAL_STATES) else None
+
+
+def unchecked_desk_jobs(site: Site, led: Ledger | None = None) -> list[dict]:
+    """Release 77 (#38): jobs the desk submitted itself (any run type with a job id) whose final state is not
+    recorded yet. Records only: no scheduler call, nothing recorded (safe under --observe)."""
+    led = led or Ledger(site)
+    states = _recorded_states(led.events())
+    out = []
+    for r in led.load("run"):
+        p = r["payload"]
+        if p.get("status") != "submitted" or not p.get("job_id"):
+            continue
+        try:
+            if site.org.role(r["actor"]).kind != "desk":
+                continue
+        except DurehError:
+            continue
+        st = states.get(r["id"])
+        if st and (st[1] or st[0] in TERMINAL_STATES):
+            continue
+        out.append({"run": r["id"], "job_id": str(p["job_id"]), "run_type": p.get("run_type"), "wi": r["wi"],
+                    "submitted": r["ts"], "wake": wake_command(site, r["id"])})
+    return out
+
+
+def wait_notify(site: Site, actor: str, run_id: str, timeout: int | None = None, interval: int = 60) -> str:
+    """`slurm wait --run R --notify` (release 77, #38): block until the job is terminal (no time limit unless
+    `timeout`), record its final state as `slurm wait` does, and return ONE line: the state first, then the run,
+    job, WI and the next step. A run whose final state is already recorded returns at once without asking the
+    scheduler."""
+    led = Ledger(site)
+    run = _get_run(led, run_id)
+    p = run["payload"]
+    if not p.get("job_id"):
+        fail(f"{run_id} has no scheduler job id")
+    state, seen = _final_state(led, run_id), {}
+    if state is None:
+        ev = slurm_wait(site, actor, run_id, timeout if timeout is not None else 10 ** 9, interval)
+        ep = ev["payload"]
+        state = (str(ep.get("scheduler_state") or "UNKNOWN").split() or ["UNKNOWN"])[0]
+        if not ep.get("final"):
+            return (f"NOT-ENDED run={run_id} job={p['job_id']} state={state} after {timeout} s; run"
+                    f" `{wake_command(site, run_id)}` again")
+        if ep.get("counts"):
+            seen["array"] = {"counts": ep["counts"]}
+    seen["state"] = state
+    kind = p.get("run_type")
+    if run["wi"] and kind in ("slurm", "verify", "member"):
+        return f"{state} " + _watch_line(led, led.events(), run, seen).split(" ", 1)[1]  # the watch line, no clock
+    nxt = f"verify --self --collect {run_id}" if kind == "selftest" else f"slurm status --run {run_id}"
+    return f"{state} run={run_id} job={p['job_id']} wi={run['wi'] or '-'} next={nxt}"
+
+
 def _watch_line(led: Ledger, events: list[dict], run: dict, seen: dict, nxt: str | None = None) -> str:
     """One line per ended job: run, job, WI, owner role and agent, state, and what the desk does next."""
     wi = run["wi"]

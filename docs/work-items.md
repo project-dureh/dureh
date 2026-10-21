@@ -104,6 +104,28 @@ globs), and `wi approve` refuses one recorded earlier, with the reason `member r
 inside the role's write scopes, so the local member would have no file to write"); declare them with
 `wi amend --wi <WI> --memo ... --output <path>`. Other roles are not affected.
 
+## Files in a project cache: `purge --project` (release 77, project-dureh/dureh#40)
+
+Before, `purge` reached only WI worktrees, so a Director-approved delete of old container images in a project cache
+had to be done by hand.
+
+```
+dureh purge --project <name> --cache <cache> --path <file> [--path ...] --dry-run                 # list, sizes, sha256
+dureh purge --project <name> --cache <cache> --path <file> ... --approve --memo '<where approved>' [--by Director]
+dureh purge --project <name> --cache <cache> --path <file> ... --approval <decision>
+```
+
+- Desk only. Each path is a file in `projects/<name>/cache/<cache>/` (relative to it, or absolute inside it). Refused:
+  `..`, a symlink, a directory, a missing file, anything that resolves outside that directory, a protected path, and
+  a **pinned** file: its file name or its sha256 appears in the site's `config.json` or the project manifest
+  (config `project.manifest`).
+- Data deletion is fail-closed: `--approval` is required (no default, no config switch). `--approve` records the
+  Director's approval as a `purge-approval` decision bound to the exact files and their sha256 (like `push
+  --approve`); the purge refuses a decision of another type, one that binds other files or content, and one already
+  used.
+- The purge records one `cache.purged` event (refs: the decision) with `files` (path, size, sha256), `bytes` and
+  `removed`.
+
 ## Stray untracked files in an active WI: `purge --path` (release 72, project-dureh/dureh#23)
 
 `dureh purge --wi <WI>` removes a finished WI whole (promoted, stopped or reverted). A dispatched or staged WI whose

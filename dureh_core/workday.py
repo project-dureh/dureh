@@ -558,6 +558,30 @@ def _session_clock(site: Site, session: dict | None) -> dict:
 
 
 def status(site: Site) -> dict:
+    out = _status(site)
+    try:  # release 77 (#38): the desk's own submitted jobs whose end nobody has recorded yet
+        from .ops import unchecked_desk_jobs
+
+        jobs = unchecked_desk_jobs(site)
+    except (DurehError, OSError):
+        jobs = []
+    if jobs:
+        out["desk_jobs"] = jobs
+    return out
+
+
+def desk_jobs_text(jobs: list[dict] | None) -> str | None:
+    """"Desk jobs not checked (2): run-... job 5100 verify WI-0001 -> wake: <command>; ..." (release 77, #38)."""
+    if not jobs:
+        return None
+    parts = [f"{j['run']} job {j['job_id']} {j['run_type'] or 'run'}" + (f" {j['wi']}" if j.get("wi") else "")
+             for j in jobs[:10]]
+    more = f"; ... and {len(jobs) - 10} more" if len(jobs) > 10 else ""
+    return (f"Desk jobs not checked ({len(jobs)}): " + "; ".join(parts) + more +
+            " (wake: `dureh slurm wait --run <run> --notify` as a Monitor, or `dureh slurm status --run <run>`)")
+
+
+def _status(site: Site) -> dict:
     evs = _events(site)
     dv = devices(site, evs)
     switches = {"devices": dv["state"], "devices_off": [d for d in DEVICES if not dv["state"][d]],
@@ -695,6 +719,11 @@ def banner(st: dict) -> str | None:
 
 
 def render(st: dict, with_banner: bool = True) -> str | None:
+    text, jobs = _render(st, with_banner), desk_jobs_text(st.get("desk_jobs"))
+    return "\n".join(filter(None, [text, jobs])) or None
+
+
+def _render(st: dict, with_banner: bool = True) -> str | None:
     head = banner(st) if with_banner else None
     if not st.get("enabled"):
         dd = st.get("day")

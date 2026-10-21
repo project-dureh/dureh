@@ -429,7 +429,7 @@ def _upstream_watch_rule(site: Site, dureh) -> str:
     return (lead +
             " `merge-window` open: dispatch nothing new, let running agents reach a safe point, then"
             f" `{dureh} upstream send --kind idle`; `landed` naming a release checkout: `{dureh} adapter sync --harness <checkout>`,"
-            f" `{dureh} verify --self`, and report the result; `reply` or `approval`: it is recorded by `--record`; give the"
+            f" `{dureh} verify --self --skip-unit`, `{dureh} verify --self --submit` (the unit suite as a scheduler job), and report the result; `reply` or `approval`: it is recorded by `--record`; give the"
             " Director a one-line notice.")
 
 
@@ -457,9 +457,17 @@ def _job_end_rule(site: Site, dureh) -> str:
                 f" wait for a job expected within minutes with `{dureh} slurm wait --run <id>`; check a longer job with"
                 f" `{dureh} slurm status --run <id>` at your next turn or when the Director asks (`{dureh} slurm watch --once`"
                 " checks every tracked job in one pass and prints one line per ended job with its next step, then exits)."
-                " When a job has ended,")
+                + _wake_rule(dureh) + " When a job has ended,")
     return (f" Jobs end outside agent turns; they are not watched (config `slurm.watch: off`): read a job's state with"
-            f" `{dureh} slurm status --run <id>`. When a job has ended,")
+            f" `{dureh} slurm status --run <id>`." + _wake_rule(dureh) + " When a job has ended,")
+
+
+def _wake_rule(dureh) -> str:
+    """Release 77 (project-dureh/dureh#38): a job the desk submits itself wakes the desk when it ends."""
+    return (" A job you submit yourself (`verify --submit`, `slurm submit`, `member run`, `verify --self --submit`) prints a"
+            f" `wake` command, `{dureh} slurm wait --run <id> --notify`: start it as a Monitor right after submitting (longest timeout;"
+            " re-arm it when it expires: an end already recorded answers at once); it prints"
+            f" one line (final state, run, next step) when the job ends. `{dureh} day status` lists your submitted jobs not yet checked.")
 
 
 def _verify_end_rule(site: Site) -> str:
@@ -580,6 +588,8 @@ def _claude_md(site: Site) -> str:
               f"7. Before moving or deleting a path, run `{dureh} path-refs <path>`. Delete only through `{dureh} purge`."
               " Stray untracked or ignored files in a dispatched or staged WI's worktree (they fail verify's ownership check):"
               f" `{dureh} purge --wi <WI> --path <path relative to the worktree> --dry-run`, then without `--dry-run`; tracked files are refused."
+              f" Files in a project cache (unpinned only): `{dureh} purge --project <name> --cache <cache> --path <file> --dry-run` (sizes, sha256),"
+              " then, after the Director approved those files, `--approve --memo '<where approved>'` and `--approval <decision>`; there is no default approval."
               f" If a dispatch or verify reports a broken worktree, a stale `.venv` (for example after the site moved) or a missing worktree env, run `{dureh} worktree repair --wi <WI>`"
               f" (or `--target <target>` for a main tree's `.venv`); it rebuilds the environment with `env_rebuild` from config.json."
               f" After the site moved or was renamed, `{dureh} worktree repair --all` does this for every worktree and environment at once (`--dry-run` first)."
@@ -598,7 +608,9 @@ def _claude_md(site: Site) -> str:
               " `dispatch_start_grace_seconds` (default 120 s); `dispatch stop` is for releasing the item, not for clearing it."
               " Brief a role with the `submit_jobs` capability the same way (item list or `@file`, steps, `--after` order)."
               f" External pushes only through `{dureh} push` with a Director decision.",
-              f"9. Self-test the harness and this site with `{dureh} verify --self` after any harness or package update."
+              f"9. Self-test the harness and this site after any harness or package update: `{dureh} verify --self --skip-unit`, then"
+              f" `{dureh} verify --self --submit` (the unit suite as a scheduler job; start its `wake` command as a Monitor, then"
+              f" `{dureh} verify --self --collect`); plain `verify --self` only where there is no scheduler."
               f" Several work items at once: `{dureh} wi show --wi A --wi B --summary`. Never wait for a scheduler job in a polling loop:"
               + _no_poll_rule(site, dureh) +
               f" A NEW module starts with `{dureh} site new-module --id <id> --package <pkg> [--depends <site module>] [--source <dir>]`"
@@ -612,7 +624,7 @@ def _claude_md(site: Site) -> str:
               " While a request is open: stop the affected WI at a safe point and list it under `Blocked WIs` in the UR; keep the unaffected WIs going;"
               " batch new requests into one message instead of sending them one by one; never run `adapter sync` (except in a merge window, below) or a harness WI, and never work around the issue."
               " When a merge window opens (upstream opens it through the mailbox, or the Director): dispatch nothing new, let running agents finish, confirm with"
-              f" `{dureh} status` that no agent runs and nothing is orphaned, and report \"idle\"; when the landed message names a release checkout, switch to it yourself with `{dureh} adapter sync --harness <release checkout>` and run `{dureh} verify --self`"
+              f" `{dureh} status` that no agent runs and nothing is orphaned, and report \"idle\"; when the landed message names a release checkout, switch to it yourself with `{dureh} adapter sync --harness <release checkout>` and run `{dureh} verify --self --skip-unit` and `{dureh} verify --self --submit`"
               " (without a named checkout the Director runs `adapter sync`); record the landed rev, report the result to upstream, then resume."
               f" When `config.json` sets `upstream.exchange`, deliver through the mailbox instead: `{dureh} upstream send` (requests), `{dureh} upstream send --kind idle`"
               f" (merge window), and read replies with `{dureh} upstream inbox --record`, which also records Director approvals relayed by upstream (by: Director, via: upstream)."

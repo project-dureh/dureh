@@ -8,7 +8,7 @@ dureh slurm submit --wi <WI> --via '<module command ...>' [--record <path>] [--v
                    [--after <run>[,<run>...]] [--dry-run]            # a module's own submit command (release 42)
 dureh slurm submit --wi <WI> --resubmit-failed <via run>             # re-runs the module command over the failed items
 dureh slurm status --run <run id>
-dureh slurm wait   --run <run id> [--timeout S] [--interval S]
+dureh slurm wait   --run <run id> [--timeout S] [--interval S] [--notify]
 dureh slurm watch  [--interval S] [--once]          # desk only
 dureh slurm cancel --run <run id>
 ```
@@ -100,6 +100,45 @@ wait for jobs; the desk watches the scheduler and re-dispatches.
   and a refused wait form (background command, `&`, command substitution, a heredoc into an interpreter)
   carries the hint "do not wait for jobs in the session: end your turn; the desk re-dispatches you when `dureh
   slurm watch` reports the job". `slurm wait` stays for jobs expected to end within minutes.
+
+### A job the desk submits itself: the `wake` command (release 77, project-dureh/dureh#38)
+
+Measured 2026-10-20 at a company site with `slurm.watch: off`: the desk submitted a verify job itself (`verify --wi
+--submit`), nothing told it when the job ended, and it sat idle for about 20 minutes.
+
+- When the **desk** submits a job and the site has no standing watch (`slurm.watch` `on-demand` or `off`), the output
+  of `slurm submit` (all forms), `verify --wi --submit` and `member run` carries ONE `wake` command:
+  `<site>/bin/dureh slurm wait --run <run> --notify` (`verify --self --submit` prints it in every mode). Other roles get
+  none (they end their turn), and in `monitor` mode the standing `slurm watch` reports the job instead.
+- **`slurm wait --run <run> --notify`** waits with no time limit (unless `--timeout`), records the final state as
+  `slurm wait` does, and prints ONE line: the state first, then the run, job, WI and the next step (for a WI run the
+  `slurm watch` line without its clock; a selftest run says `next=verify --self --collect <run>`). A run whose final
+  state is already recorded answers at once without asking the scheduler. A `--timeout` that passes prints
+  `NOT-ENDED run=... state=...` and the command to run again.
+- The generated desk text (on-demand and off) says: start the `wake` command as a Monitor right after submitting,
+  with the longest timeout, and re-arm it when the Monitor expires (a Monitor lasts at most 30 minutes; a re-armed
+  wait for a job whose end is already recorded answers at once). Background shell commands stay refused.
+- **`day status`** (and `status`) lists the desk's own submitted jobs whose final state is not recorded yet:
+  `Desk jobs not checked (n): <run> job <id> <run type> <WI>; ...`, from records only (no scheduler call).
+
+### The harness unit suite as a job: `verify --self --submit` (release 77, project-dureh/dureh#41)
+
+Measured 2026-10-20 at two company sites: after `adapter sync` the unit suite of `verify --self` needed 590-820 s,
+more than the session's tool limit, and background commands are refused, so only `--skip-unit` passed.
+
+```
+dureh verify --self --submit            # site checks here; the unit suite as ONE scheduler job; prints `wake`
+dureh verify --self --collect [RUN]     # after the job ended: records the selftest result (failing tests named)
+```
+
+- The job runs `python -m unittest discover -s tests -t .` in the harness checkout the command runs from, with the
+  options of the `verify --wi` checks job (`checks.time`, else `slurm.time`, else 01:00:00; `slurm.account` and
+  `partition`; `checks.sbatch_args`), named `<prefix>-selftest`, logs under `<log_dir>/selftest/`. Nothing is
+  hard-coded: a site without a scheduler (`checks.runner` local, or no `sbatch`) is refused and runs `verify --self`.
+- The submission is a `run` record (`run_type: selftest`, `status: submitted`, the site-check result); `--collect`
+  writes the selftest run with `collected_from`, refuses while the job runs and refuses a second collect.
+- Landing: `adapter sync --harness <checkout>`, `verify --self --skip-unit`, `verify --self --submit` (desk text,
+  `tools/release.py`, docs/upstream-protocol.md).
 
 ### External jobs (release 45)
 
