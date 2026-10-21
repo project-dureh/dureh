@@ -494,7 +494,7 @@ class Items(GithubBase):
         self.assertIn("Approved, Option 1, Option 2, Rejected, Later", create["input"])
         self.assertIn(["label", "create"], self.gh.commands())
         edits = [c["argv"] for c in self.gh.calls if c["argv"][1:3] == ["project", "item-edit"]]
-        self.assertIn("O_S3", [e[-1] for e in edits])  # Waiting for Director
+        self.assertIn("O_S3", [e[-1] for e in edits])  # Needs approval
         self.assertIn("O_L3", [e[-1] for e in edits])
         ev = [e for e in self.events() if e["type"] == github.ASKED]
         self.assertEqual(len(ev), 1)

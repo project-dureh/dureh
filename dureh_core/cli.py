@@ -1506,7 +1506,7 @@ def parser() -> argparse.ArgumentParser:
                                    "--repo, add it to the board and set its fields (or link an existing issue with "
                                    "--url); records github.item.added")
     x.add_argument("--wi", required=True)
-    x.add_argument("--status", default="Backlog", help="Backlog (default), Today, In progress, Waiting for Director, Done")
+    x.add_argument("--status", default="Backlog", help="Backlog (default), Today, In progress, Needs approval, Waiting for Director, Done")
     x.add_argument("--project", help="the board's Project option (the project's repository name)")
     x.add_argument("--layer", type=int, choices=[1, 2, 3], help="1 company, 2 DUREH, 3 Director")
     x.add_argument("--units", type=float, help="expected work units")
@@ -1530,7 +1530,7 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--target", help="Target date, YYYY-MM-DD (from DUREH's roadmap)")
     x.add_argument("--actor")
     x = add(gi, "ask", cmd_github, "a decision ask: a kind:decision issue on the board (layer 3: assigned to config "
-                                   "github.director_login, Status Waiting for Director); the answer is the Decision "
+                                   "github.director_login, Status Needs approval); the answer is the Decision "
                                    "column (`github watch`/`status`); records github.ask.created")
     x.add_argument("--title", required=True)
     x.add_argument("--body-file", required=True)

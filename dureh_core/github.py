@@ -34,7 +34,9 @@ DEFAULT_OFFICE = "office"
 DESK_MARK = "<!-- dureh-desk -->"
 DECISION_LABEL = "kind:decision"
 REQUEST_LABEL = "kind:request"
-STATUSES = ("Backlog", "Today", "In progress", "Waiting for Director", "Done")
+# dureh-team#28 A (Director 2026-10-20): Needs approval = the Director approves, chooses or comments (decision asks,
+# review requests); Waiting for Director = a step only the Director does
+STATUSES = ("Backlog", "Today", "In progress", "Needs approval", "Waiting for Director", "Done")
 DECISIONS = ("Approved", "Option 1", "Option 2", "Option 3", "Rejected", "Later")
 LAYERS = {1: "company", 2: "DUREH", 3: "Director"}
 FIELD_STATUS, FIELD_PROJECT, FIELD_LAYER, FIELD_DECISION, FIELD_UNITS = "Status", "Project", "Layer", "Decision", "Units"
@@ -742,7 +744,7 @@ def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] |
     text += (f"\n\nLayer {layer} ({who}). Decide in the board's **Decision** column: {', '.join(choices)}. "
              f"Comments are opinions; the Decision column is the decision.\n\n{DESK_MARK}")
     text = _clean(text, "the issue body")
-    fields = _fields("Waiting for Director" if int(layer) == 3 else "In progress", project, layer, units)
+    fields = _fields("Needs approval" if int(layer) == 3 else "In progress", project, layer, units)
     meta = _meta(cfg)
     _edits(meta, fields)
     if FIELD_DECISION not in meta["fields"]:

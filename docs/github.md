@@ -6,7 +6,7 @@ organization with
 - a private repository `office`: the home of issues not tied to a project (no Discussions);
 - one repository per project (one project = one repository of the organization);
 - the organization Project (v2) board number 1 with the fields
-  - **Status**: Backlog, Today, In progress, Waiting for Director, Done
+  - **Status**: Backlog, Today, In progress, Needs approval (the Director approves, chooses or comments), Waiting for Director (a step only the Director does), Done
   - **Project**: single select, one option per project
   - **Layer**: 1 (company), 2 (DUREH), 3 (Director)
   - **Decision**: Approved, Option 1, Option 2, Option 3, Rejected, Later
@@ -69,7 +69,7 @@ Every `gh` call goes through one runner that reads the token at call time and pa
 | `github watch [--interval 120] [--once]` | desk, as a Monitor in working hours | one line per Decision change, per new comment and per newly opened issue not marked as the desk's; nothing else |
 | `github item add --wi WI [--status S] [--project P] [--layer 1-3] [--units N] [--priority P0-P3] [--start D] [--target D] [--repo R \| --url U]` | desk | an issue for the work item (its title and goal only) in `office_repo` or `--repo` (or the existing issue `--url`), added to the board with its fields; desk rule: Priority P2 unless asked |
 | `github item set (--wi WI \| --url U) [--status] [--project] [--layer] [--units] [--decision] [--priority] [--start] [--target]` | desk | change a linked item's fields; `--decision` only on a layer 1-2 item; `--priority P0..P3` matches the board option `P1 ...`; `--start`/`--target` YYYY-MM-DD set the `Start date`/`Target date` fields (#31) |
-| `github item ask --title T --body-file F [--options O1 O2 O3] [--layer 3] [--wi WI] [--project P]` | desk | a decision ask: a `kind:decision` issue with the options and the Decision line; layer 3: assigned to `director_login`, Status Waiting for Director |
+| `github item ask --title T --body-file F [--options O1 O2 O3] [--layer 3] [--wi WI] [--project P]` | desk | a decision ask: a `kind:decision` issue with the options and the Decision line; layer 3: assigned to `director_login`, Status Needs approval |
 | `github item comment (--wi WI \| --url U) [--file F]` | desk | the desk's comment, carrying the marker `<!-- dureh-desk -->` |
 | `github item close (--wi WI \| --url U) [--comment C]` | desk | close the item's issue (desk rule: at promote), the comment marked as the desk's; records `github.item.closed` (#34) |
 | `github sweep [--dry-run]` | desk | close every open issue of the organization whose Status is Done and that carries no `waiting-director`, `needs-review` or `needs-approval` label (desk rule: before `day close`); records `github.sweep.done` {closed, kept} (#34) |
