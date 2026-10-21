@@ -1732,6 +1732,22 @@ def _checks_script(wi: str, cwd: Path, troot: Path, site_root: Path, prefix: Pat
     return "\n".join(lines) + "\n"
 
 
+def checks_sbatch(site: Site, name: str, cwd: Path, prefix: Path, script: Path) -> tuple[list[str], str]:
+    """(sbatch command, wall time) for a checks-like job: the site's config only (`checks.time`, else `slurm.time`,
+    else 01:00:00; `slurm.account`/`partition`; `checks.sbatch_args`), logs at `<prefix>.out|.err`. Used by
+    `verify --wi` and (release 77) `verify --self --submit`."""
+    cfg = site.config.get("checks") or {}
+    slurm = site.config.get("slurm") or {}
+    wall = str(cfg.get("time") or slurm.get("time") or CHECKS_TIME_DEFAULT)
+    cmd = ["sbatch", "--parsable", f"--job-name={name}", f"--time={wall}", f"--chdir={cwd}", "--export=ALL"]
+    for key, flag in (("account", "--account"), ("partition", "--partition")):
+        if slurm.get(key):
+            cmd.append(f"{flag}={slurm[key]}")
+    # the log options come last so a checks.sbatch_args -o/-e never moves them out of the log dir
+    cmd += [str(a) for a in (cfg.get("sbatch_args") or [])] + [f"--output={prefix}.out", f"--error={prefix}.err", str(script)]
+    return cmd, wall
+
+
 def _submit_checks_job(site: Site, wi: str, cwd: Path, troot: Path, checks: list[str],
                        plan: dict | None = None) -> dict:
     """Submit the declared checks as one Slurm job (cwd = the work root, the site's environment). Returns the job
@@ -1739,8 +1755,6 @@ def _submit_checks_job(site: Site, wi: str, cwd: Path, troot: Path, checks: list
     from . import ops
     from .util import utc_compact
 
-    cfg = site.config.get("checks") or {}
-    slurm = site.config.get("slurm") or {}
     logs = ops.wi_log_dir(site, wi)
     logs.mkdir(parents=True, exist_ok=True)
     prefix = logs / f"verify-{utc_compact()}"
@@ -1748,14 +1762,7 @@ def _submit_checks_job(site: Site, wi: str, cwd: Path, troot: Path, checks: list
     plan = plan if plan is not None else checks_env_plan(site, wi, cwd, troot)
     script.write_text(_checks_script(wi, cwd, troot, site.root, prefix, checks, plan), encoding="utf-8")
     script.chmod(0o755)
-    wall = str(cfg.get("time") or slurm.get("time") or CHECKS_TIME_DEFAULT)
-    cmd = ["sbatch", "--parsable", f"--job-name={ops.job_prefix(site)}-verify-{wi}", f"--time={wall}", f"--chdir={cwd}",
-           "--export=ALL"]
-    for key, flag in (("account", "--account"), ("partition", "--partition")):
-        if slurm.get(key):
-            cmd.append(f"{flag}={slurm[key]}")
-    # the log options come last so a checks.sbatch_args -o/-e never moves them out of the log dir
-    cmd += [str(a) for a in (cfg.get("sbatch_args") or [])] + [f"--output={prefix}.out", f"--error={prefix}.err", str(script)]
+    cmd, wall = checks_sbatch(site, f"{ops.job_prefix(site)}-verify-{wi}", cwd, prefix, script)
     env = _checks_env(site, wi, cwd, troot)  # the plan's exports live in the script, after `cd`
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=env)
@@ -2542,3 +2549,127 @@ def purge_paths(site: Site, actor: str, wi: str, paths: list[str], dry_run: bool
             fail(f"could not remove {left} (removed so far: {', '.join(removed) or 'nothing'}); check what is left there")
     return {"wi": wi, "worktree": str(wt), "planned": [str(x) for _, x in planned], "removed": removed,
             "dry_run": dry_run}
+
+
+# ------------------------------------------------- purge --project (release 77)
+CACHE_PURGED = "cache.purged"
+CACHE_APPROVAL = "purge-approval"
+_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _cache_files(site: Site, project: str, cache: str, paths: list[str]) -> tuple[Path, list[dict]]:
+    """Validate a project-cache purge (project-dureh/dureh#40) and return (cache dir, [{path, size, sha256, abs}]).
+    Fail-closed: every path must be an existing regular file (no symlink, no directory) inside
+    `projects/<project>/cache/<cache>/` after resolving links, outside every protected path, and pinned nowhere: its
+    file name and its sha256 must not appear in the site's config.json nor in the project manifest."""
+    from . import protect
+
+    for what, v in (("--project", project), ("--cache", cache)):
+        if not v or not _NAME.match(v):
+            fail(f"{what} takes a plain name, not {v!r}")
+    if not paths:
+        fail("purge --project needs at least one --path")
+    base = site.root / "projects" / project / "cache" / cache
+    if not base.is_dir():
+        fail(f"no cache directory {base}")
+    real_base = os.path.realpath(base)
+    pins = [site.config_path]
+    manifest = site.project_manifest()
+    if manifest and (site.root / "projects" / project / manifest).is_file():
+        pins.append(site.root / "projects" / project / manifest)
+    pin_text = "\n".join(p.read_text(encoding="utf-8", errors="replace") for p in pins)
+    out, seen = [], set()
+    for raw in paths:
+        p = Path(raw)
+        if ".." in p.parts:
+            fail(f"refusing a path with `..`: {raw}")
+        item = p if p.is_absolute() else base / p
+        if not os.path.lexists(item):
+            fail(f"no such file in {base}: {raw}")
+        if item.is_symlink():
+            fail(f"refusing a symlink: {raw} (purge removes cached files, not links)")
+        real = os.path.realpath(item)
+        if not real.startswith(real_base + os.sep):
+            fail(f"refusing a path outside projects/{project}/cache/{cache}/: {raw} (-> {real})")
+        if not os.path.isfile(real):
+            fail(f"refusing {raw}: not a regular file (directories are not purged this way)")
+        rel = os.path.relpath(real, real_base)
+        why = protect.write_refusal(site, base / rel) or protect.write_refusal(site, Path(real))
+        if why:
+            fail(f"refusing {raw}: {why}")
+        if rel in seen:
+            continue
+        seen.add(rel)
+        digest = sha256_file(Path(real))
+        name = os.path.basename(real)
+        for token, what in ((name, "its name"), (digest, "its sha256")):
+            if token in pin_text:
+                where = [str(x.relative_to(site.root)) for x in pins if token in x.read_text(encoding="utf-8", errors="replace")]
+                fail(f"refusing {rel}: pinned ({what} appears in {', '.join(where)}); unpin it first")
+        out.append({"path": rel, "size": os.path.getsize(real), "sha256": digest, "abs": real})
+    return base, out
+
+
+def _cache_binding(project: str, cache: str, files: list[dict]) -> dict:
+    return {"project": project, "cache": cache,
+            "files": sorted(({"path": f["path"], "sha256": f["sha256"]} for f in files), key=lambda f: f["path"])}
+
+
+def purge_cache_approve(site: Site, actor: str, project: str, cache: str, paths: list[str], memo: str,
+                        by: str = "Director") -> dict:
+    """Record the Director's approval to delete these exact files (bound by path and sha256), like `push --approve`."""
+    if site.org.role(actor).kind != "desk":
+        fail("only the desk purges")
+    if not (memo or "").strip():
+        fail("--approve needs --memo: where and when the Director approved (e.g. the board item or message)")
+    _base, files = _cache_files(site, project, cache, paths)
+    size = sum(f["size"] for f in files)
+    return Ledger(site).append("decision", CACHE_APPROVAL, actor, None, {
+        "subject": f"delete {len(files)} file(s), {size} bytes, from projects/{project}/cache/{cache}",
+        "disposition": "approve", "by": by, "memo": memo, "binding": _cache_binding(project, cache, files)})
+
+
+def purge_cache(site: Site, actor: str, project: str, cache: str, paths: list[str], approval: str | None,
+                dry_run: bool = False) -> dict:
+    """`purge --project P --cache C --path F... --approval D [--dry-run]` (release 77, project-dureh/dureh#40):
+    delete unpinned files from a project cache. Desk only; data deletion is fail-closed: no default approval and no
+    fallback. The approval is a `purge-approval` decision (`--approve`) bound to exactly these files and their
+    sha256. `--dry-run` lists the files, sizes and sha256 and needs no approval. Records `cache.purged` with the list."""
+    if site.org.role(actor).kind != "desk":
+        fail("only the desk purges")
+    base, files = _cache_files(site, project, cache, paths)
+    listing = [{k: f[k] for k in ("path", "size", "sha256")} for f in files]
+    if dry_run:
+        return {"project": project, "cache": str(base), "files": listing, "bytes": sum(f["size"] for f in files),
+                "dry_run": True, "approval": approval,
+                "next": f"the Director approves these files, then `purge --project {project} --cache {cache} --path ..."
+                        f" --approve --memo '...'` records it and `--approval <decision>` deletes them"}
+    if not approval:
+        fail("purge --project deletes data: --approval <decision id> is required (record the Director's approval with"
+             f" `purge --project {project} --cache {cache} --path ... --approve --memo '...'`); there is no default")
+    led = Ledger(site)
+    dec = led.get("decision", approval)
+    if dec["type"] != CACHE_APPROVAL or dec["payload"].get("disposition") != "approve":
+        fail(f"decision {approval} is not a purge approval")
+    if dec["payload"].get("binding") != _cache_binding(project, cache, files):
+        fail(f"decision {approval} does not approve deleting exactly these files (paths and sha256 must match)")
+    used = [e for e in led.events() if e["type"] == CACHE_PURGED and approval in e["refs"]]
+    if used:
+        fail(f"decision {approval} was already used ({used[0]['id']})")
+    removed, left = [], None
+    for f in files:
+        try:
+            os.unlink(f["abs"])
+        except OSError:
+            pass
+        if os.path.lexists(f["abs"]):
+            left = f["abs"]
+            break
+        removed.append(f["path"])
+    ev = led.event(CACHE_PURGED, actor, None, {"project": project, "cache": cache, "dir": str(base), "files": listing,
+                                               "bytes": sum(f["size"] for f in files), "removed": removed,
+                                               "decision": approval, **({"failed": left} if left else {})}, [approval])
+    if left:
+        fail(f"could not remove {left} (removed so far: {', '.join(removed) or 'nothing'}); recorded {ev['id']}")
+    return {"project": project, "cache": str(base), "files": listing, "removed": removed, "event": ev["id"],
+            "dry_run": False}

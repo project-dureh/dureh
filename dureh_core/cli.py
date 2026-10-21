@@ -256,6 +256,19 @@ def cmd_dispatch_stop(a):
 
 def cmd_verify(a):
     site = None
+    if a.self and (a.submit or a.collect is not None):  # release 77 (#41): the unit suite as a scheduler job
+        from .selftest import collect_self, submit_self
+
+        if a.skip_unit or a.local or (a.submit and a.collect is not None):
+            fail("verify --self takes one of --submit, --collect [RUN] (not with --skip-unit or --local)")
+        if a.submit:
+            _print(submit_self(_site(a), _actor(a)))
+            return
+        r = collect_self(_site(a), _actor(a), a.collect or None)
+        _print(r)
+        if r["result"] != "pass":
+            raise SystemExit(1)
+        return
     if a.self:
         from .selftest import run_self
 
@@ -284,8 +297,11 @@ def cmd_verify(a):
     if a.submit:
         r = verify_submit(_site(a), _actor(a), a.wi)
         if r["submitted"]:
+            from .ops import desk_wake
+
+            wake = desk_wake(_site(a), _actor(a), r["run"])  # release 77 (#38)
             _print({k: r[k] for k in ("submitted", "run", "job_id", "head", "log_out", "superseded", "superseded_note",
-                                      "next") if k in r})
+                                      "next") if k in r} | ({"wake": wake} if wake else {}))
             return
     elif a.collect is not None:
         r = verify_collect(_site(a), _actor(a), a.wi, a.collect or None)
@@ -391,23 +407,27 @@ def cmd_slurm(a):
                                 ("--single", a.single or None), ("--reason", a.reason)):
                 if value not in (None, []):
                     raise DurehError(f"{flag} does not go with --via: the module command renders and submits the job itself")
-            _print(ops.slurm_submit_via(site, _actor(a), a.wi, a.via, record=a.record, after=a.after, dry_run=a.dry_run,
-                                        via_module=a.via_module))
+            r = ops.slurm_submit_via(site, _actor(a), a.wi, a.via, record=a.record, after=a.after, dry_run=a.dry_run,
+                                     via_module=a.via_module)
         elif a.record is not None or a.via_module is not None:
             raise DurehError("--record and --via-module go with --via")
         elif a.resubmit_failed:
             if a.each:
                 raise DurehError("--resubmit-failed takes the items from the run; drop --each")
-            _print(ops.slurm_resubmit_failed(site, _actor(a), a.resubmit_failed, a.script, a.dry_run, a.sbatch_arg,
-                                             a.module, a.rev, a.after, a.max_parallel, wi=a.wi))
+            r = ops.slurm_resubmit_failed(site, _actor(a), a.resubmit_failed, a.script, a.dry_run, a.sbatch_arg,
+                                          a.module, a.rev, a.after, a.max_parallel, wi=a.wi)
         else:
-            _print(ops.slurm_submit(site, _actor(a), a.wi, a.script, a.dry_run, a.sbatch_arg, module=a.module,
-                                    rev=a.rev, each=" ".join(a.each) if a.each else None, after=a.after,
-                                    max_parallel=a.max_parallel, single=a.single, reason=a.reason))
+            r = ops.slurm_submit(site, _actor(a), a.wi, a.script, a.dry_run, a.sbatch_arg, module=a.module,
+                                 rev=a.rev, each=" ".join(a.each) if a.each else None, after=a.after,
+                                 max_parallel=a.max_parallel, single=a.single, reason=a.reason)
+        wake = None if a.dry_run else ops.desk_wake(site, _actor(a), r.get("id"))
+        _print({**r, "wake": wake} if wake else r)  # release 77 (#38): the desk starts it as a Monitor
     elif a.slurm_command == "status":
         _print(ops.slurm_status(site, _actor(a), a.run))
+    elif a.slurm_command == "wait" and a.notify:
+        print(ops.wait_notify(site, _actor(a), a.run, a.timeout, a.interval), flush=True)
     elif a.slurm_command == "wait":
-        _print(ops.slurm_wait(site, _actor(a), a.run, a.timeout, a.interval))
+        _print(ops.slurm_wait(site, _actor(a), a.run, 3600 if a.timeout is None else a.timeout, a.interval))
     elif a.slurm_command == "watch":
         ops.slurm_watch(site, _actor(a), a.interval, a.once)
     else:
@@ -424,8 +444,24 @@ def cmd_path_refs(a):
 
 
 def cmd_purge(a):
-    from .workflow import purge, purge_paths
+    from .workflow import purge, purge_cache, purge_cache_approve, purge_paths
 
+    if bool(a.wi) == bool(a.project):
+        fail("purge takes --wi <WI> or --project <name> --cache <cache> (not both)")
+    if a.project:  # release 77 (#40): files in a project cache, with a bound Director approval
+        if not a.cache or not a.path:
+            fail("purge --project needs --cache <name> and at least one --path")
+        if a.approve:
+            if a.approval or a.dry_run:
+                fail("--approve records the approval; it does not go with --approval or --dry-run")
+            _print(purge_cache_approve(_site(a), _actor(a), a.project, a.cache, a.path, a.memo or "", a.by))
+        else:
+            _print(purge_cache(_site(a), _actor(a), a.project, a.cache, a.path, a.approval, a.dry_run))
+        return
+    for flag, v in (("--cache", a.cache), ("--approval", a.approval), ("--approve", a.approve or None),
+                    ("--memo", a.memo)):
+        if v is not None:
+            fail(f"{flag} goes with --project")
     if a.path:
         _print(purge_paths(_site(a), _actor(a), a.wi, a.path, a.dry_run))
     else:
@@ -580,8 +616,12 @@ def cmd_member(a):
         elif r.get("fallback"):
             print(f"fallback recorded ({r['event']}): {r['next']}")
         else:
+            from .ops import desk_wake
+
+            wake = desk_wake(site, _actor(a), r.get("run"))  # release 77 (#38): the desk dispatched it itself
             print(f"member run {r['run']}: {r['role']} on {r['runtime']} ({r['model']}) submitted as job {r['job_id']}"
-                  f" (wall {r['wall']}); recorded {r['dispatch']}. Next: {r['next']}")
+                  f" (wall {r['wall']}); recorded {r['dispatch']}. Next: {r['next']}"
+                  + (f"\nwake: {wake}  (start it as a Monitor now; one line when the job ends)" if wake else ""))
     elif c == "exec":
         r = members.execute(site, a.run)
         print(f"member run {a.run}: {r['outcome']}" + (f" ({r['reason']})" if r.get("reason") else ""))
@@ -1118,9 +1158,11 @@ def parser() -> argparse.ArgumentParser:
                         "(escape hatch; the default is config checks.runner: slurm where sbatch exists, else local)")
     x.add_argument("--submit", action="store_true",
                    help="with --wi: submit the declared-checks job and return at once with a verify run id (checker;"
-                        " end the turn, then --collect when `slurm watch` reports the job ended)")
+                        " end the turn, then --collect when `slurm watch` reports the job ended); with --self (release"
+                        " 77): check the site here and submit the harness unit suite as one scheduler job")
     x.add_argument("--collect", nargs="?", const="", default=None, metavar="RUN",
-                   help="with --wi: record the verification of a finished submitted verify job (default: the latest)")
+                   help="with --wi: record the verification of a finished submitted verify job (default: the latest);"
+                        " with --self: record the unit-suite job's outcome")
     x.add_argument("--exam", help="role whose exam to score")
     x.add_argument("--task")
     x.add_argument("--answers")
@@ -1210,8 +1252,11 @@ def parser() -> argparse.ArgumentParser:
         x.add_argument("--actor")
     x = add(sl, "wait", cmd_slurm, "block until a recorded job ends (records its final state); instead of polling loops")
     x.add_argument("--run", required=True)
-    x.add_argument("--timeout", type=int, default=3600, help="seconds (default 3600)")
+    x.add_argument("--timeout", type=int, default=None, help="seconds (default 3600; with --notify: no limit)")
     x.add_argument("--interval", type=int, default=60, help="seconds between checks (default 60)")
+    x.add_argument("--notify", action="store_true",
+                   help="release 77: wait until the job ends and print ONE line (final state, run, job, WI, next step);"
+                        " the desk starts it as a Monitor right after submitting a job itself")
     x.add_argument("--actor")
     x = add(sl, "watch", cmd_slurm, "desk only: print one line per tracked job as it ends (run, job, WI, role, agent, "
                                     "state, next step) and record its final state; run it as a Monitor, re-dispatch "
@@ -1225,10 +1270,20 @@ def parser() -> argparse.ArgumentParser:
     x = add(sub, "purge", cmd_purge, "remove a finished WI's worktree, scratch outputs and its own jobs' scheduler logs; "
                                      "with --path, only untracked or ignored paths in a dispatched or staged WI's "
                                      "worktree (release 72)")
-    x.add_argument("--wi", required=True)
+    x.add_argument("--wi")
     x.add_argument("--path", action="append", help="a path relative to the WI's worktree to remove (repeatable): "
                                                    "untracked or ignored only, never a tracked file or a path that "
-                                                   "resolves outside the worktree; the WI must be dispatched or staged")
+                                                   "resolves outside the worktree; the WI must be dispatched or staged."
+                                                   " With --project: a file in projects/<name>/cache/<cache>/")
+    x.add_argument("--project", help="release 77: delete files from projects/<name>/cache/<cache>/ (desk only; never a"
+                                     " file pinned in config.json or the project manifest; needs --approval)")
+    x.add_argument("--cache", help="with --project: the cache directory name, e.g. containers")
+    x.add_argument("--approval", help="with --project: the Director's purge-approval decision id (bound to the files"
+                                      " and their sha256); required, no default")
+    x.add_argument("--approve", action="store_true", help="with --project: record the Director's approval for these"
+                                                          " exact files (needs --memo), like `push --approve`")
+    x.add_argument("--memo", help="with --approve: where the Director approved (board item, message)")
+    x.add_argument("--by", default="Director", help="with --approve: who approved (default Director)")
     x.add_argument("--dry-run", action="store_true")
     x.add_argument("--actor")
     x = add(sub, "push", cmd_push, "push an approved revision to an allowlisted remote; without --approval only a "

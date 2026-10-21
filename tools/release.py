@@ -119,7 +119,8 @@ def cmd_cut(a) -> None:
     print(f"release {tag} = {rev[:12]} at {dest} (read-only; tag pushed to {remote})")
     print("next, in a merge window, for each site that should run it:")
     print(f"  <site>/bin/dureh adapter sync --harness {dest}")
-    print("  <site>/bin/dureh verify --self")
+    print("  <site>/bin/dureh verify --self --skip-unit")
+    print("  <site>/bin/dureh verify --self --submit    # the unit suite as a scheduler job; start the printed wake command")
 
 
 def cmd_list(a) -> None:

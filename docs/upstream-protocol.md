@@ -43,7 +43,8 @@ developers in one uniform, traceable form, so the harness improves from real use
    `--action escalated` (then `--by` names the Director) or `provisional`; facts are yes/no only, prose goes in
    `--memo`. The block is optional: records without it keep their shape.
 5. **Landed**: once a harness revision contains the change, set `Status: landed <rev>`, run
-   `dureh adapter sync`, then `dureh verify --self`.
+   `dureh adapter sync`, then `dureh verify --self --skip-unit` and `dureh verify --self --submit` (release 77: the unit
+   suite as a scheduler job; plain `verify --self` where there is no scheduler).
 
 ## Working in parallel with upstream
 
@@ -209,7 +210,9 @@ When a UR's `Status` reaches `landed <rev>`:
    the next `dureh site session start` (run by upstream at clock-in) applies the newest `landed`
    message's checkout before it submits the session job, records `harness.switched`, and prints
    `switched harness <old> -> <new> (landed <id>)`; `--no-apply-landed` skips it (docs/workday.md).
-2. Run `dureh verify --self` to self-test the harness and this site against that revision.
+2. Run `dureh verify --self --skip-unit`, then `dureh verify --self --submit` (release 77: the unit suite as one
+   scheduler job; start its `wake` command as a Monitor, then `verify --self --collect`) to self-test the harness and
+   this site against that revision.
 3. Only after both succeed, resume or re-open any WI that was waiting on the change, citing the
    landed rev and the `verify --self` result as evidence.
 
