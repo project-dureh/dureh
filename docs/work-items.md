@@ -71,6 +71,14 @@ Director, 2026-10-08: whenever a WI is named to the Director, a short title goes
   proposed overtime, the day's job runs, items finished past the end time).
 - **Desk.** The generated CLAUDE.md says: "When you name a WI to the Director, add its short title".
 
+## The approver is named: `wi approve --by` (release 78, improvement plan v0.4 bundle 1)
+
+`wi approve --wi <WI> --by Director|DUREH|desk --memo "<the approver's words>"`: `--by` is required and is refused
+when missing or outside those three. Before, a missing `--by` recorded the Director as the approver, so a desk's own
+Gate 1 approval read as the Director's in the ledger. The same holds for the gate approvals `push --approve`,
+`purge --project ... --approve` and `day approve` (Director or DUREH). The re-approval of an amended stopped item names
+the approver of its last Gate 1. Old records keep their `by` and load as before.
+
 ## Kind and model of a brief (release 54, D3)
 
 Every brief is a work unit of one kind, derived in `dispatch brief` in this order: `check` (a checker dispatch,
@@ -111,7 +119,7 @@ had to be done by hand.
 
 ```
 dureh purge --project <name> --cache <cache> --path <file> [--path ...] --dry-run                 # list, sizes, sha256
-dureh purge --project <name> --cache <cache> --path <file> ... --approve --memo '<where approved>' [--by Director]
+dureh purge --project <name> --cache <cache> --path <file> ... --approve --by Director --memo '<where approved>'   # --by required (release 78)
 dureh purge --project <name> --cache <cache> --path <file> ... --approval <decision>
 ```
 

@@ -120,6 +120,64 @@ def typed_block(question: str, options: list[str], chosen: str, confidence: str 
     return block
 
 
+# Release 78 (improvement plan v0.4 bundle 1): the approver of an approval record is always named, never assumed.
+# Before, `wi approve` and the gate approvals (`push --approve`, `purge --approve`, `day approve`) wrote
+# by=Director when the desk left `--by` out. Old records keep their `by` and load as before.
+APPROVER_ROLES = ("Director", "DUREH", "desk")
+
+
+def approver(by: str | None, allowed: tuple[str, ...] = APPROVER_ROLES, what: str = "this approval") -> str:
+    """The named approver of `what`, checked against `allowed`; refused when missing (no default)."""
+    name = (by or "").strip()
+    if not name:
+        fail(f"--by is required for {what}: name who approved ({' | '.join(allowed)}); the approver is never assumed "
+             "(release 78: it used to default to the Director, so a desk's own approval was recorded as the Director's)")
+    if name not in allowed:
+        fail(f"--by must be one of {', '.join(allowed)} for {what} (not {name!r})")
+    return name
+
+
+# Release 78 (improvement plan v0.4 bundle 1, fail-closed kinds): a fail-closed ask never proceeds without an explicit
+# answer from its approver: no 30-minute fallback, no timeout approval, no provisional choice by the desk.
+FAIL_CLOSED_LABEL = "fail-closed"
+FAIL_CLOSED_KINDS = ("a push other than the standing fast-forward (new branch, new remote)", "a dataset or project link",
+                     "a config change that changes running behaviour", "a GPU or Slurm request above the caps",
+                     "a harness merge or release", "training data or a fine-tuning run",
+                     "making anything public or changing organization settings", "a structural change",
+                     "closing the day early", "writing or deleting data outside a WI worktree (dataset save, cache or "
+                     "image deletion)", "anything about credentials")
+FAIL_CLOSED_RULE = ("Fail-closed asks (release 78): " + "; ".join(FAIL_CLOSED_KINDS) + ". For these there is no 30-minute"
+                    " fallback and no timeout approval: wait for an explicit answer (the Decision column, the Director's"
+                    " words in the session, or a relayed approval); with no answer the action waits to the next working day."
+                    " Independent work continues meanwhile. Mark such a board ask fail-closed (`--fail-closed` on the ask, label"
+                    " `fail-closed`; its body names no fallback option) and record a decision on it with `day decide"
+                    " --fail-closed` (or `--ask <url>`): `--action provisional` is refused, and an `acted` choice needs the"
+                    " approver in `--by`.")
+_FALLBACK_CUE = re.compile(r"fall\s*-?\s*back|폴백|대체\s*선택|30\s*-?\s*min|30\s*분|무응답|무답|no answer", re.I)
+_OPTION_NAME = re.compile(r"\bOption\s*[1-9A-C](?![0-9A-Za-z])|선택지\s*[1-9A-C]|옵션\s*[1-9A-C]|(?<![\d.])[1-9]\s*번(?!째)", re.I)
+_NO_FALLBACK = re.compile(r"\bnone\b|\bno fallback\b|\bnot? apply\b|없음|없다|없습니다|적용하지 않|기다린다|기다립니다|wait",
+                          re.I)
+
+
+def fallback_lines(text: str) -> list[str]:
+    """Lines of `text` that name a fallback option (a fallback or 30-minute cue together with an option name), unless
+    the line says there is none ("Fallback: none, this waits for the Director")."""
+    return [ln.strip() for ln in (text or "").splitlines()
+            if _FALLBACK_CUE.search(ln) and _OPTION_NAME.search(ln) and not _NO_FALLBACK.search(ln)]
+
+
+def fail_closed_check(action: str, by: str, actor: str, what: str = "a fail-closed ask") -> None:
+    """Refuse a decision on a fail-closed ask that the desk takes itself: `provisional` (the 30-minute fallback path)
+    always, and `acted` unless `by` names the approver who answered (not the desk)."""
+    if action == "provisional":
+        fail(f"refused: {what} has no 30-minute fallback and no provisional choice (release 78, fail-closed); wait "
+             "for the approver's explicit answer and keep independent work going (record the wait with "
+             "`--action escalated --by Director`)")
+    if action == "acted" and (not (by or "").strip() or by.strip().lower() in {"desk", (actor or "").lower()}):
+        fail(f"refused: {what} is decided only by its approver's explicit answer (release 78, fail-closed): record "
+             "it with `--by Director` (or `--by DUREH` for a layer-2 kind) once that answer exists")
+
+
 def typed_line(typed: dict | None) -> str:
     """One line for show/list output: `chosen (of a | b | c), confidence medium, acted; facts x=yes, y=no`."""
     if not typed:

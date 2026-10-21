@@ -339,7 +339,15 @@ def _linked(site: Site) -> dict[str, dict]:
             layer = (e["payload"].get("fields") or {}).get(FIELD_LAYER) or e["payload"].get("layer")
             if layer is not None:
                 row["layer"] = layer
+            if e["payload"].get("fail_closed"):
+                row["fail_closed"] = True
     return out
+
+
+def ask_fail_closed(site: Site, url: str | None) -> bool:
+    """Release 78: True when the board ask at `url` was recorded fail-closed (`github item ask --fail-closed`)."""
+    target = (url or "").strip()
+    return bool(target) and any(row.get("url") == target and row.get("fail_closed") for row in _linked(site).values())
 
 
 _ISSUE = ("issues(first: 50, states: OPEN, orderBy: {field: CREATED_AT, direction: DESC}) { nodes {"
@@ -725,14 +733,25 @@ def item_set(site: Site, actor: str, wi: str | None = None, url: str | None = No
 
 
 def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] | None = None, layer: int = 3,
-             wi: str | None = None, project=None, repo: str | None = None, units=None) -> dict:
+             wi: str | None = None, project=None, repo: str | None = None, units=None,
+             fail_closed: bool = False) -> dict:
     """A decision ask: a `kind:decision` issue (layer 3: assigned to config github.director_login, Status Waiting for
-    Director), on the board with its Layer; the answer is the board's Decision, read by `watch`/`status`."""
+    Director), on the board with its Layer; the answer is the board's Decision, read by `watch`/`status`.
+    `fail_closed` (release 78, v0.4 bundle 1): the ask also carries the `fail-closed` label and a line saying it has
+    no fallback; a body or option naming a fallback option is refused before anything is created, and the record
+    keeps `fail_closed: true` so `day decide --ask <url>` refuses a provisional choice on it."""
+    from .records import FAIL_CLOSED_LABEL, fallback_lines
+
     _require_desk(site, actor)
     cfg = config(site)
     options = [o.strip() for o in options or [] if o.strip()]
     if len(options) > 3:
         fail("at most 3 options (the Decision column has Option 1, Option 2 and Option 3)")
+    if fail_closed:
+        named = fallback_lines("\n".join([body or "", *options]))
+        if named:
+            fail("refused: a fail-closed ask names no fallback option (release 78; no 30-minute fallback, no timeout "
+                 f"approval): remove or rewrite {named[0]!r} (for example \"Fallback: none, this waits for the answer\")")
     if wi:
         Ledger(site).get("work-item", wi)
     title = _clean(title, "the title", 256)
@@ -741,6 +760,9 @@ def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] |
         text += "\n\n**Options**\n" + "\n".join(f"- **Option {i}**: {o}" for i, o in enumerate(options, 1))
     choices = ["Approved", *[f"Option {i}" for i in range(1, len(options) + 1)], "Rejected", "Later"]
     who = "the Director" if int(layer) == 3 else LAYERS.get(int(layer), "?")
+    if fail_closed:
+        text += (f"\n\n**Fail-closed**: no 30-minute fallback and no timeout approval; nothing here proceeds until "
+                 f"{who} answers.")
     text += (f"\n\nLayer {layer} ({who}). Decide in the board's **Decision** column: {', '.join(choices)}. "
              f"Comments are opinions; the Decision column is the decision.\n\n{DESK_MARK}")
     text = _clean(text, "the issue body")
@@ -753,11 +775,18 @@ def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] |
     assignee = cfg.get("director_login") if int(layer) == 3 else None
     gh(cfg, ["label", "create", DECISION_LABEL, "--repo", repo_name, "--color", "5319e7", "--description",
              "a decision asked on the board's Decision column", "--force"])
-    url = _create_issue(cfg, repo_name, title, text, labels=[DECISION_LABEL], assignee=assignee)
+    labels = [DECISION_LABEL]
+    if fail_closed:
+        gh(cfg, ["label", "create", FAIL_CLOSED_LABEL, "--repo", repo_name, "--color", "b60205", "--description",
+                 "no fallback, no timeout approval: waits for an explicit answer", "--force"])
+        labels.append(FAIL_CLOSED_LABEL)
+    url = _create_issue(cfg, repo_name, title, text, labels=labels, assignee=assignee)
     item_id = _add_to_board(cfg, meta, url, fields)
     _, number = _issue_number(cfg, url)
     rec = {"url": url, "repo": repo_name, "number": number, "item_id": item_id, "layer": int(layer),
            "options": len(options), "assignee": assignee, "fields": fields, "chars": len(text)}
+    if fail_closed:
+        rec["fail_closed"] = True
     Ledger(site).event(ASKED, actor, wi, rec, [wi] if wi else None)
     return {"asked": True, "wi": wi, **rec}
 

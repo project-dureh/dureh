@@ -2060,7 +2060,7 @@ def slurm_cancel(site: Site, actor: str, run_id: str) -> dict:
 
 
 # ------------------------------------------------------------------- push
-PUSH_APPROVAL_HINT = ("ask the Director: `dureh push --approve --repo <path> --remote <remote> --ref <branch> --memo \"...\"`"
+PUSH_APPROVAL_HINT = ("ask the Director: `dureh push --approve --by Director --repo <path> --remote <remote> --ref <branch> --memo \"...\"`"
                       " then `dureh push --repo <path> --remote <remote> --ref <branch> --approval <decision>`")
 STANDING_FF = "standing-ff"
 

@@ -51,7 +51,7 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    When one is done, `dureh day action done <n|text> [--ref <commit, issue URL or record>]` (desk, #32) appends
    `day.action.done`: `day status` stops listing it and the end report shows `director_actions` {open, done}.
 2. **Approval.** When the Director approves in the session, the desk records the Director's words:
-   `dureh day approve --memo "..."`. With Slack configured (`slack.director_user` set), the desk also runs
+   `dureh day approve --by Director --memo "..."` (`--by` is required since release 78; see below). With Slack configured (`slack.director_user` set), the desk also runs
    `dureh slack ask --kind day-plan` right after `day plan` and `dureh slack watch` as a Monitor; the Director's
    ✅ reaction on that bot message is recorded by `slack check`/`slack watch` exactly as `day approve` would, with
    memo `Slack ✅ by <user> on <ts>` and `via: slack` (❌ holds the plan; the request expires at the day end).
@@ -60,8 +60,9 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    `day.approved` record with the rule in its memo (state `approved-by-timeout`) and prints `...; start work`;
    the desk starts work at that line. **DUREH's approval (release 71).** The company day plan is an approval-layer-2
    kind (CHARTER, layer table): when DUREH approves the plan (in the session or by a mailbox reply), the desk records
-   `dureh day approve --by DUREH --memo "<DUREH's words>"`. `--by` takes `Director` (the default, as before) or
-   `DUREH` and is refused otherwise (and with `via: slack`, which is the Director's own reaction); the `day.approved`
+   `dureh day approve --by DUREH --memo "<DUREH's words>"`. `--by` takes `Director` or
+   `DUREH` and is refused otherwise; since release 78 it is required (no default: an approval left without `--by`
+   used to be recorded as the Director's, improvement plan v0.4 bundle 1), and old records keep their `by` (and with `via: slack`, which is the Director's own reaction); the `day.approved`
    record keeps its shape with `by` set, the approval counts the same with workday mode on or off, and `day status`
    shows `approved <id> by <who>`. **Addenda (release 73, project-dureh/dureh#26).** When the plan is done early and
    the desk proposes more work the same day, it records an addendum instead of a second plan (which stays refused
@@ -96,7 +97,15 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    --action provisional`. A question with no answer after 30 minutes proceeds the same way on the option that
    needs no Director action, recorded with `--action provisional` too; the end report lists these choices under
    `provisional` (title, choice). The day plan names, for every choice it offers the Director, the fallback the
-   desk takes after 30 minutes. A wait is allowed only when the Director alone can act (a push, a dataset link,
+   desk takes after 30 minutes. **Fail-closed (release 78, improvement plan v0.4 bundle 1).** A fail-closed kind
+   (a push other than the standing fast-forward, a dataset or project link, a config change that changes running
+   behaviour, GPU or Slurm above the caps, a harness merge or release, training data or fine-tuning, public or
+   organization settings, a structural change, an early close, a data write or delete outside a WI worktree, anything
+   about credentials) has no 30-minute fallback and no timeout approval: it waits for an explicit answer; independent
+   work continues. `github item ask --fail-closed` labels the ask `fail-closed` and refuses a body that names a
+   fallback option; `day decide --fail-closed` (or `--ask <url>` of such an ask) refuses `--action provisional` and an
+   `acted` choice without the approver in `--by`; `day plan` refuses a line marked `fail-closed` that names a fallback
+   option. A wait is allowed only when the Director alone can act (a push, a dataset link,
    an approval-exec item). Director, 2026-10-12: "꼭 필요할때는 기다릴수 있지만, 이를 예방하기 위한 제안을 제게 하고 제가
    선택적으로 해결해주기로 합니다": the desk records such a wait with `dureh day decide ... --action escalated --by
    Director`, putting a prevention proposal in `--why` (a standing authorization, bundling the Director's actions

@@ -114,7 +114,7 @@ class PurgeCache(SiteCase):
 
         base = ["--project", "p1", "--cache", "containers", "--path", "old-a.img"]
         self.assertTrue(cli(*base, "--dry-run")["dry_run"])
-        dec = cli(*base, "--approve", "--memo", "board item 7")
+        dec = cli(*base, "--approve", "--by", "Director", "--memo", "board item 7")
         self.assertEqual((dec["type"], dec["payload"]["by"]), (wf.CACHE_APPROVAL, "Director"))
         self.assertEqual(cli(*base, "--approval", dec["id"])["removed"], ["old-a.img"])
         err = io.StringIO()

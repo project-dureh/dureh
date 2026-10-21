@@ -167,7 +167,9 @@ def cmd_wi_new(a):
 def cmd_wi_approve(a):
     from .workflow import wi_approve
 
-    ev = wi_approve(_site(a), _actor(a), a.wi, a.memo, a.by)
+    from .records import approver
+
+    ev = wi_approve(_site(a), _actor(a), a.wi, a.memo, approver(a.by, what="`wi approve`"))
     print(f"{a.wi} approved (Gate 1) by {a.by}: {ev['id']}")
 
 
@@ -454,12 +456,15 @@ def cmd_purge(a):
         if a.approve:
             if a.approval or a.dry_run:
                 fail("--approve records the approval; it does not go with --approval or --dry-run")
-            _print(purge_cache_approve(_site(a), _actor(a), a.project, a.cache, a.path, a.memo or "", a.by))
+            from .records import approver
+
+            _print(purge_cache_approve(_site(a), _actor(a), a.project, a.cache, a.path, a.memo or "",
+                                       approver(a.by, what="`purge --approve`")))
         else:
             _print(purge_cache(_site(a), _actor(a), a.project, a.cache, a.path, a.approval, a.dry_run))
         return
     for flag, v in (("--cache", a.cache), ("--approval", a.approval), ("--approve", a.approve or None),
-                    ("--memo", a.memo)):
+                    ("--memo", a.memo), ("--by", a.by)):
         if v is not None:
             fail(f"{flag} goes with --project")
     if a.path:
@@ -473,7 +478,10 @@ def cmd_push(a):
 
     site = _site(a)
     if a.approve:
-        _print(ops.push_approve(site, _actor(a), a.repo, a.remote, a.ref, a.memo or "", a.by))
+        from .records import approver
+
+        _print(ops.push_approve(site, _actor(a), a.repo, a.remote, a.ref, a.memo or "",
+                                approver(a.by, what="`push --approve`")))
     else:
         _print(ops.push(site, _actor(a), a.repo, a.remote, a.ref, a.approval, a.dry_run))
 
@@ -703,7 +711,10 @@ def cmd_day(a):
                 raise DurehError("day plan: --goal is required (except with --addendum)")
             _print(workday.plan(site, actor, a.goal, text, a.wi or [], a.director_action or []))
     elif c == "approve":
-        _print(workday.approve(site, actor, a.memo, by=a.by, addendum=a.addendum))
+        from .records import approver
+
+        _print(workday.approve(site, actor, a.memo, by=approver(a.by, workday.APPROVERS, "`day approve`"),
+                               addendum=a.addendum))
     elif c == "action":
         _print(workday.action_done(site, actor, a.which, a.ref))
     elif c == "decide":
@@ -713,7 +724,13 @@ def cmd_day(a):
 
             typed = typed_block(a.question or a.title, a.option or [], a.choice, a.confidence, a.action,
                                 dict(parse_fact(f) for f in a.fact or []), a.by or "", actor)
-        _print(workday.decide(site, actor, a.title, a.choice, a.why, a.rev or [], typed=typed, by=a.by or actor))
+        fail_closed = bool(a.fail_closed)
+        if a.ask:
+            from . import github
+
+            fail_closed = fail_closed or github.ask_fail_closed(site, a.ask)
+        _print(workday.decide(site, actor, a.title, a.choice, a.why, a.rev or [], typed=typed, by=a.by or actor,
+                              fail_closed=fail_closed, action=a.action, ask=a.ask))
     elif c == "end":
         _print(workday.end(site, actor, a.done, a.problems or "", a.overtime or [], _early_reason(a), a.approval))
     elif c == "overtime":
@@ -844,7 +861,8 @@ def cmd_github(a):
                                a.priority, a.start, a.target))
     elif a.item_command == "ask":
         body = Path(a.body_file).read_text(encoding="utf-8")
-        _print(github.item_ask(site, _actor(a), a.title, body, a.options, a.layer, a.wi, a.project, a.repo, a.units))
+        _print(github.item_ask(site, _actor(a), a.title, body, a.options, a.layer, a.wi, a.project, a.repo, a.units,
+                               fail_closed=a.fail_closed))
     elif a.item_command == "close":
         _print(github.item_close(site, _actor(a), a.wi, a.url, a.comment))
     else:
@@ -1065,10 +1083,10 @@ def parser() -> argparse.ArgumentParser:
                    help="a requirements file inside the site, pinned by sha256; the brief names it (read first) instead"
                         " of carrying its text, so only that line counts toward the brief limit")
     x.add_argument("--actor")
-    x = add(wi, "approve", cmd_wi_approve, "record the Director's Gate 1 approval (desk)")
+    x = add(wi, "approve", cmd_wi_approve, "record the Gate 1 approval (desk); --by names the approver")
     x.add_argument("--wi", required=True)
     x.add_argument("--memo", required=True)
-    x.add_argument("--by", default="Director")
+    x.add_argument("--by", help="who approved: Director, DUREH or desk (required, no default; release 78)")
     x.add_argument("--actor")
     x = add(wi, "amend", cmd_wi_amend, "change acceptance/checks/constraints/outputs or move the base (desk; Director's words)")
     x.add_argument("--wi", required=True)
@@ -1283,7 +1301,8 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--approve", action="store_true", help="with --project: record the Director's approval for these"
                                                           " exact files (needs --memo), like `push --approve`")
     x.add_argument("--memo", help="with --approve: where the Director approved (board item, message)")
-    x.add_argument("--by", default="Director", help="with --approve: who approved (default Director)")
+    x.add_argument("--by", help="with --approve: who approved, Director, DUREH or desk (required, no default; "
+                                "release 78)")
     x.add_argument("--dry-run", action="store_true")
     x.add_argument("--actor")
     x = add(sub, "push", cmd_push, "push an approved revision to an allowlisted remote; without --approval only a "
@@ -1295,7 +1314,8 @@ def parser() -> argparse.ArgumentParser:
                                       "push.standing_ff and must fast-forward the destination branch")
     x.add_argument("--approve", action="store_true", help="record the Director's approval bound to this revision")
     x.add_argument("--memo")
-    x.add_argument("--by", default="Director")
+    x.add_argument("--by", help="with --approve: who approved, Director, DUREH or desk (required, no default; "
+                                "release 78)")
     x.add_argument("--dry-run", action="store_true")
     x.add_argument("--actor")
     add(sub, "usage", cmd_usage, "tokens per WI and per promoted WI from recorded agent runs")
@@ -1394,8 +1414,8 @@ def parser() -> argparse.ArgumentParser:
     x = add(dy, "approve", cmd_day, "record the approval of the plan (the Director's, or DUREH's under approval layer 2); "
                                     "starts the clock (workday mode on)")
     x.add_argument("--memo", required=True, help="the approver's words")
-    x.add_argument("--by", default="Director", help="who approved: Director (default; layer 3) or DUREH (approval "
-                                                    "layer 2, CHARTER; valid with workday mode on or off)")
+    x.add_argument("--by", help="who approved: Director (layer 3) or DUREH (approval layer 2, CHARTER; valid with "
+                                "workday mode on or off); required, no default (release 78)")
     x.add_argument("--addendum", action="store_true", help="release 73: approve the day's latest addendum "
                                                            "(`day plan --addendum`); the day's clock is unchanged")
     x = add(dy, "action", cmd_day, "#32: `day action done <n|text> [--ref R]`: mark one of today's Director actions "
@@ -1416,6 +1436,11 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--action", default="acted", choices=["acted", "escalated", "provisional"])
     x.add_argument("--fact", action="append", help="typed decision: name=yes|no the choice rests on (repeatable)")
     x.add_argument("--by", help="typed decision: who decides; required (not the desk) with --action escalated")
+    x.add_argument("--fail-closed", action="store_true",
+                   help="release 78: the decision answers a fail-closed kind: --action provisional is refused and an "
+                        "acted choice needs the approver in --by")
+    x.add_argument("--ask", metavar="URL", help="release 78: the board ask this decision answers; an ask recorded with "
+                                                "`github item ask --fail-closed` makes the decision fail-closed")
     x = add(dy, "end", cmd_day, "record the end report (done, problems, proposed overtime WIs); after the end time "
                                 "only when the plan is finished or a stop hit (usage share, data at risk, wall time)")
     x.add_argument("--done", required=True)
@@ -1591,6 +1616,9 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--body-file", required=True)
     x.add_argument("--options", nargs="+", default=[], help="up to 3 options (Option 1..3 in the Decision column)")
     x.add_argument("--layer", type=int, choices=[1, 2, 3], default=3)
+    x.add_argument("--fail-closed", action="store_true",
+                   help="release 78: a fail-closed kind (no 30-minute fallback, no timeout approval): label fail-closed; "
+                        "a body naming a fallback option is refused")
     x.add_argument("--wi", help="the work item the ask belongs to")
     x.add_argument("--project")
     x.add_argument("--units", type=float)

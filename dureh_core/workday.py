@@ -995,12 +995,23 @@ def calibrate(site: Site, weekly_percent: float) -> dict:
     return {**cal, "record": rec["id"]}
 
 
+def _fail_closed_choices(text: str) -> None:
+    """Release 78 (v0.4 bundle 1): a choice the plan marks `fail-closed` names no 30-minute fallback option."""
+    from .records import FAIL_CLOSED_LABEL, fallback_lines
+
+    bad = [ln for ln in (text or "").splitlines() if FAIL_CLOSED_LABEL in ln.lower() and fallback_lines(ln)]
+    if bad:
+        fail(f"refused: a fail-closed choice names no fallback (release 78; no 30-minute fallback, no timeout approval):"
+             f" {bad[0].strip()!r}; write \"fallback: none, waits for the answer\" and keep independent work going")
+
+
 def plan(site: Site, actor: str, goal: str, text: str, items: list[str] | None = None,
          director_actions: list[str] | None = None, addendum: bool = False) -> dict:
     """Record the day plan. Its work items are `items` (`day plan --wi`, each an existing WI) or, without them,
     every WI id the text names: the finish-plan rule reads them (`plan_items`). `director_actions` (release 58,
     `--director-action`, repeatable) lists every action only the Director can take today (a dataset link, a push
     approval, a config change); `slack ask --kind day-plan` posts them so the Director handles them in one go."""
+    _fail_closed_choices(text)
     if addendum:
         return plan_addendum(site, actor, text, goal, items)
     if not goal.strip() or not text.strip():
@@ -1144,7 +1155,8 @@ def _state_head(site: Site) -> str | None:
 
 
 def decide(site: Site, actor: str, title: str, choice: str, why: str, revs: list[str],
-           typed: dict | None = None, by: str | None = None) -> dict:
+           typed: dict | None = None, by: str | None = None, fail_closed: bool = False, action: str | None = None,
+           ask: str | None = None) -> dict:
     """Record a decision point (following the desk's own proposal) and commit state as a rollback point.
     With a typed block (release 52) a `day-choice` decision record is appended too, referencing the event; the
     event keeps its shape and stays the rollback point. With workday mode off (#27) it records against today's plan
@@ -1156,9 +1168,17 @@ def decide(site: Site, actor: str, title: str, choice: str, why: str, revs: list
         fail(f"decisions are recorded during the working day (phase {d['phase']})")
     if not (title.strip() and choice.strip() and why.strip()):
         fail("--title, --choice and --why are required")
+    payload = {"title": title, "choice": choice, "why": why, "revs": revs, "state_before": _state_head(site)}
+    if fail_closed:  # release 78 (v0.4 bundle 1): no fallback, no provisional choice, no desk's own answer
+        from .records import fail_closed_check
+
+        fail_closed_check(action or (typed or {}).get("action") or "acted", by or "", actor,
+                          f"the fail-closed ask{' ' + ask.strip() if ask and ask.strip() else ''}")
+        payload.update(fail_closed=True, by=by)
+    if ask and ask.strip():
+        payload["ask"] = ask.strip()
     led = Ledger(site)
-    rec = led.event("day.decision", actor, None, {"title": title, "choice": choice, "why": why,
-                                                  "revs": revs, "state_before": _state_head(site)}, [d["plan"]])
+    rec = led.event("day.decision", actor, None, payload, [d["plan"]])
     out = {"record": rec["id"]}
     if typed:
         dec = led.append("decision", DAY_CHOICE, actor, None,

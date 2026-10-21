@@ -24,6 +24,7 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 
 from .. import yamlsub
+from ..records import FAIL_CLOSED_RULE
 from ..ops import render_status, status, transcript_usage, watch_mode
 from ..org import HARNESS_ROOT
 from .. import procs
@@ -569,7 +570,8 @@ def _claude_md(site: Site) -> str:
               " dispatch and verify refuse while it differs, until `wi amend --requirements <file>` re-pins it)."
               " Nobody runs a module's test suite (`pytest`, `unittest discover`) in the session: tests are checks or `slurm submit` jobs."
               " Place each output inside the owning role's write scope (see `.claude/agents/<role>.md`).",
-              f"2. Gate 1: show the plan to the Director. Only after the Director approves, run `{dureh} wi approve --wi <WI> --memo \"<Director's words>\"`.",
+              f"2. Gate 1: show the plan to the Director. Only after the Director approves, run `{dureh} wi approve --wi <WI> --by Director --memo \"<Director's words>\"`"
+              " (`--by` is required and names who approved: Director, DUREH or desk; it never defaults, release 78).",
               f"3. Dispatch: `{dureh} dispatch brief --wi <WI>`, then use the Agent tool with `subagent_type` = the named role and the printed brief as the whole prompt."
               " The hook refuses any spawn without a recorded brief." + member_rule(site, dureh),
               f"4. Stop or rework: `{dureh} dispatch stop --wi <WI> --reason ...` (the runtime stop ends the agent; the record keeps the reason)."
@@ -589,7 +591,7 @@ def _claude_md(site: Site) -> str:
               " Stray untracked or ignored files in a dispatched or staged WI's worktree (they fail verify's ownership check):"
               f" `{dureh} purge --wi <WI> --path <path relative to the worktree> --dry-run`, then without `--dry-run`; tracked files are refused."
               f" Files in a project cache (unpinned only): `{dureh} purge --project <name> --cache <cache> --path <file> --dry-run` (sizes, sha256),"
-              " then, after the Director approved those files, `--approve --memo '<where approved>'` and `--approval <decision>`; there is no default approval."
+              " then, after the Director approved those files, `--approve --by Director --memo '<where approved>'` and `--approval <decision>`; there is no default approval."
               f" If a dispatch or verify reports a broken worktree, a stale `.venv` (for example after the site moved) or a missing worktree env, run `{dureh} worktree repair --wi <WI>`"
               f" (or `--target <target>` for a main tree's `.venv`); it rebuilds the environment with `env_rebuild` from config.json."
               f" After the site moved or was renamed, `{dureh} worktree repair --all` does this for every worktree and environment at once (`--dry-run` first)."
@@ -634,7 +636,7 @@ def _claude_md(site: Site) -> str:
               f"11. Workday mode (when status shows a `Workday:` line; only the Director switches it with `dureh site workday on|off`):"
               f" at the start of the day report a plan to the Director (goal, work items, order, expected usage) and record it with `{dureh} day plan --goal ... --file <plan>`;"
               f"{upstream_start}"
-              f" when the Director approves in the session, record it with `{dureh} day approve --memo \"<Director's words>\"`"
+              f" when the Director approves in the session, record it with `{dureh} day approve --by Director --memo \"<Director's words>\"`"
               " (a Director ✅ reaction in Slack is recorded by `slack check`/`slack watch`, item 12);"
               f" when DUREH approves it under approval layer 2 (the company day plan is a layer-2 kind), record"
               f" `{dureh} day approve --by DUREH --memo \"<DUREH's words>\"` (workday mode on or off)."
@@ -684,7 +686,8 @@ def _claude_md(site: Site) -> str:
               " (a push, a link-project, a config change, an approval-exec item); every other item continues on an easy-to-change provisional choice"
               f" recorded with `{dureh} day decide ... --action provisional`, and a question with no answer after 30 minutes proceeds the same way"
               " on the option that needs no Director action (the end report lists these under `provisional`)."
-              " The day plan names, for every choice it offers the Director, the fallback the desk takes after 30 minutes (release 56)."
+              " The day plan names, for every choice it offers the Director, the fallback the desk takes after 30 minutes (release 56),"
+              " except for a fail-closed choice, which has none. " + FAIL_CLOSED_RULE +
               f" The plan lists every action only the Director can take (a dataset link, a push approval, a config change) with `{dureh} day plan --director-action \"<text>\"` (repeatable),"
               " so the Director handles them in one go at approval: `slack ask --kind day-plan` posts them under 대표님 조치 필요 (release 58)."
               " A wait is allowed only when the Director alone can act (a push, a dataset link, an approval-exec item): record it with"

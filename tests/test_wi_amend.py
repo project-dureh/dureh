@@ -61,6 +61,18 @@ class WiAmend(AmendCase):
             wf.wi_amend(self.s, "desk", self.bundle, "x", {"acceptance": ["y"]})
         self.assertIn("running", str(cm.exception))
 
+    def test_reapproval_names_the_last_approver(self):
+        """Release 78: the re-approval of an amended stopped item keeps the approver of its last Gate 1."""
+        led = Ledger(self.s)
+        wf.dispatch_brief(self.s, self.item, "pm-modules")
+        wf.dispatch_stop(self.s, "desk", self.item, "wrong check")
+        wf.wi_approve(self.s, "desk", self.item, "desk's own Gate 1 under the plan", by="desk")
+        wf.dispatch_brief(self.s, self.item, "pm-modules")
+        wf.dispatch_stop(self.s, "desk", self.item, "wrong check again")
+        wf.wi_amend(self.s, "desk", self.item, "fix the check", {"checks": ["true"]})
+        last = [e for e in led.events(self.item) if e["type"] == "wi.approved"][-1]
+        self.assertEqual(last["payload"]["by"], "desk")
+
     def test_rebase_moves_the_base_and_tells_the_worker(self):
         first = wf.dispatch_brief(self.s, self.item, "pm-modules")
         old_base = Ledger(self.s).events(self.item)[-1]["payload"]["base"]
