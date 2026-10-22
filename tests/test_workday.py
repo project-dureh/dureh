@@ -1893,7 +1893,7 @@ class Workday(SiteCase):
         self.assertEqual(len(st["addenda"]), 2)
 
     def test_addendum_items_come_from_its_table(self):
-        """camri-org 2026-10-22: a sentence naming WI-0254 as excluded made it an addendum item."""
+        """A company report 2026-10-22: a sentence naming WI-0254 as excluded made it an addendum item."""
         self.assertEqual(workday.plan_items({"payload": {"addendum": True, "plan": (
             "| # | Work item |\n|---|---|\n| B1 | WI-0334 fix |\n| B2 | WI-0335 test |\n"
             "Not in this addendum: WI-0254/0255 ports (WI-0256 done).")}}), ["WI-0334", "WI-0335"])

@@ -48,6 +48,10 @@ class FallbackLines(unittest.TestCase):
         fail_closed_check("escalated", "Director", "desk")
 
 
+FC_THREE = ("--decide", "새 remote로 push할까요?", "--recommend", "아니오, 로컬에 둡니다.",
+            "--otherwise", "기다립니다 (Fallback: none).")
+
+
 class Ask(GithubBase):
     def body(self, text):
         f = self.tmp / "ask.md"
@@ -57,7 +61,7 @@ class Ask(GithubBase):
     def test_fail_closed_ask_is_labelled_and_recorded(self):
         code, out, err = self.run_cli("item", "ask", "--title", "Push to a new remote",
                                       "--body-file", self.body("Push WI-0001 to a new remote?\nFallback: none."),
-                                      "--options", "push now", "keep local", "--fail-closed")
+                                      "--options", "push now", "keep local", "--fail-closed", *FC_THREE)
         self.assertEqual(code, 0, err)
         create = next(c for c in self.gh.calls if c["argv"][1:3] == ["issue", "create"])
         argv = create["argv"]
@@ -82,10 +86,19 @@ class Ask(GithubBase):
             self.assertEqual(self.gh.calls, [])
         self.assertEqual([e for e in self.events() if e["type"] == "github.ask.created"], [])
 
+    def test_fail_closed_otherwise_naming_a_fallback_is_refused(self):
+        code, _, err = self.run_cli("item", "ask", "--title", "Push", "--body-file", self.body("Push?"),
+                                    "--options", "push", "keep", "--fail-closed", "--decide", "push할까요?",
+                                    "--recommend", "예", "--otherwise", "fallback after 30 min: Option 2")
+        self.assertEqual(code, 2)
+        self.assertIn("rewrite --otherwise", err)
+        self.assertEqual(self.gh.calls, [])
+
     def test_ordinary_ask_unchanged(self):
         code, out, err = self.run_cli("item", "ask", "--title", "Order", "--body-file",
                                       self.body("Which first?\nFallback after 30 minutes: Option 1"),
-                                      "--options", "A", "B")
+                                      "--options", "A", "B", "--decide", "A 먼저?", "--recommend", "A",
+                                      "--otherwise", "30분 뒤 Option 1")
         self.assertEqual(code, 0, err)
         create = next(c for c in self.gh.calls if c["argv"][1:3] == ["issue", "create"])
         self.assertNotIn("fail-closed", create["argv"])

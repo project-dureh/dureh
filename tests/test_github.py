@@ -62,6 +62,10 @@ def issue(iid, number, title, author="example-director", created="2026-10-16T12:
             "labels": {"nodes": [{"name": n} for n in labels]}}
 
 
+THREE = ("--decide", "A를 먼저 할까요?", "--recommend", "예, A가 B의 입력입니다.", "--otherwise",
+         "30분 뒤 Option 1로 진행합니다.")
+
+
 class FakeGh:
     """Answers the gh commands the harness uses, from an in-memory board and in-memory repositories."""
 
@@ -638,7 +642,7 @@ class Items(GithubBase):
         body = self.tmp / "ask.md"
         body.write_text("Which order for the next two items?")
         code, out, err = self.run_cli("item", "ask", "--title", "Order of work", "--body-file", str(body),
-                                      "--options", "first A", "first B", "--layer", "3", "--wi", "WI-0001")
+                                      "--options", "first A", "first B", "--layer", "3", "--wi", "WI-0001", *THREE)
         self.assertEqual(code, 0, err)
         create = next(c for c in self.gh.calls if c["argv"][1:3] == ["issue", "create"])
         argv = create["argv"]
@@ -661,6 +665,25 @@ class Items(GithubBase):
         code, _, err = self.run_cli("item", "set", "--url", res["url"], "--decision", "Option 1")
         self.assertEqual(code, 2)
         self.assertIn("only the Director decides", err)
+
+    def test_layer3_ask_opens_with_three_lines(self):
+        """Release 80 (dureh-team#30 Option 1): 결정할 것 / 추천 / 답이 없으면 first, the body as background."""
+        body = self.tmp / "ask.md"
+        body.write_text("Two items are ready; the order matters for the release.")
+        code, _, err = self.run_cli("item", "ask", "--title", "Order", "--body-file", str(body), "--options", "A", "B")
+        self.assertEqual(code, 2)
+        self.assertIn("give --decide, --recommend, --otherwise", err)
+        self.assertEqual(self.gh.calls, [])
+        code, _, err = self.run_cli("item", "ask", "--title", "Order", "--body-file", str(body), "--options", "A", "B",
+                                    *THREE)
+        self.assertEqual(code, 0, err)
+        text = next(c for c in self.gh.calls if c["argv"][1:3] == ["issue", "create"])["input"]
+        self.assertTrue(text.startswith("**결정할 것:** A를 먼저 할까요?\n**추천:** 예, A가 B의 입력입니다.\n"
+                                        "**답이 없으면:** 30분 뒤 Option 1로 진행합니다."), text)
+        self.assertLess(text.index("**배경 · Background**"), text.index("Two items are ready"))
+        self.gh.calls.clear()
+        code, _, err = self.run_cli("item", "ask", "--title", "Order", "--body-file", str(body), "--layer", "2")
+        self.assertEqual(code, 0, err)  # a layer-2 ask (DUREH) needs no three lines
 
     def test_ask_refuses_more_than_three_options(self):
         body = self.tmp / "ask.md"

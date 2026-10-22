@@ -862,7 +862,8 @@ def cmd_github(a):
     elif a.item_command == "ask":
         body = Path(a.body_file).read_text(encoding="utf-8")
         _print(github.item_ask(site, _actor(a), a.title, body, a.options, a.layer, a.wi, a.project, a.repo, a.units,
-                               fail_closed=a.fail_closed))
+                               fail_closed=a.fail_closed, decide=a.decide, recommend=a.recommend,
+                               otherwise=a.otherwise))
     elif a.item_command == "close":
         _print(github.item_close(site, _actor(a), a.wi, a.url, a.comment))
     else:
@@ -1619,6 +1620,9 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--fail-closed", action="store_true",
                    help="release 78: a fail-closed kind (no 30-minute fallback, no timeout approval): label fail-closed; "
                         "a body naming a fallback option is refused")
+    x.add_argument("--decide", help="release 80: 결정할 것, one sentence (required on a layer-3 ask)")
+    x.add_argument("--recommend", help="release 80: 추천, the recommended choice and why (required on layer 3)")
+    x.add_argument("--otherwise", help="release 80: 답이 없으면, what happens without an answer (required on layer 3)")
     x.add_argument("--wi", help="the work item the ask belongs to")
     x.add_argument("--project")
     x.add_argument("--units", type=float)

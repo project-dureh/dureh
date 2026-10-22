@@ -859,9 +859,13 @@ def item_set(site: Site, actor: str, wi: str | None = None, url: str | None = No
 
 def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] | None = None, layer: int = 3,
              wi: str | None = None, project=None, repo: str | None = None, units=None,
-             fail_closed: bool = False) -> dict:
+             fail_closed: bool = False, decide: str | None = None, recommend: str | None = None,
+             otherwise: str | None = None) -> dict:
     """A decision ask: a `kind:decision` issue (layer 3: assigned to config github.director_login, Status Waiting for
     Director), on the board with its Layer; the answer is the board's Decision, read by `watch`/`status`.
+    Release 80 (dureh-team#30 Option 1, the Director's three-line ask of dureh-team#49): a layer-3 ask opens with three
+    lines, 결정할 것 (`decide`, one yes/no or choice sentence), 추천 (`recommend`, with the reason) and 답이 없으면
+    (`otherwise`); the body follows as background. A layer-3 ask without them is refused.
     `fail_closed` (release 78, v0.4 bundle 1): the ask also carries the `fail-closed` label and a line saying it has
     no fallback; a body or option naming a fallback option is refused before anything is created, and the record
     keeps `fail_closed: true` so `day decide --ask <url>` refuses a provisional choice on it."""
@@ -881,6 +885,19 @@ def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] |
         Ledger(site).get("work-item", wi)
     title = _clean(title, "the title", 256)
     text = _clean(body, "the body")
+    lines = {"decide": decide, "recommend": recommend, "otherwise": otherwise}
+    missing = [f"--{k}" for k, v in lines.items() if not (v or "").strip()]
+    if int(layer) == 3 and missing:
+        fail(f"refused: a layer-3 ask opens with three lines (release 80, dureh-team#30): give {', '.join(missing)} "
+             "(결정할 것 / 추천 / 답이 없으면, one sentence each, Korean for the Director)")
+    if not missing:
+        if fail_closed:
+            named = fallback_lines(otherwise or "")
+            if named:
+                fail(f"refused: a fail-closed ask names no fallback option: rewrite --otherwise {named[0]!r}")
+        head = "\n".join(f"**{k}:** {_clean(v, '--' + n, 500)}" for k, v, n in
+                         (("결정할 것", decide, "decide"), ("추천", recommend, "recommend"), ("답이 없으면", otherwise, "otherwise")))
+        text = f"{head}\n\n---\n**배경 · Background**\n\n{text}"
     if options:
         text += "\n\n**Options**\n" + "\n".join(f"- **Option {i}**: {o}" for i, o in enumerate(options, 1))
     choices = ["Approved", *[f"Option {i}" for i in range(1, len(options) + 1)], "Rejected", "Later"]

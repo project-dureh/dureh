@@ -433,7 +433,7 @@ def addendum_items(addenda: list[dict]) -> list[str]:
 
 def plan_items(plan_event: dict) -> list[str]:
     """The WIs a day plan lists: `items` recorded by `day plan --wi`, else every WI id named in the plan text. An
-    addendum whose text has a table takes the ids of its table rows only (release 80: camri-org 2026-10-22, an
+    addendum whose text has a table takes the ids of its table rows only (release 80: a company report of 2026-10-22, an
     addendum naming WI-0254 as excluded in a sentence counted it as an item)."""
     p = plan_event.get("payload") or {}
     if p.get("items"):
