@@ -1892,6 +1892,16 @@ class Workday(SiteCase):
         self.assertEqual(sorted(st["open"]), sorted([self.wi, other]))
         self.assertEqual(len(st["addenda"]), 2)
 
+    def test_addendum_items_come_from_its_table(self):
+        """camri-org 2026-10-22: a sentence naming WI-0254 as excluded made it an addendum item."""
+        self.assertEqual(workday.plan_items({"payload": {"addendum": True, "plan": (
+            "| # | Work item |\n|---|---|\n| B1 | WI-0334 fix |\n| B2 | WI-0335 test |\n"
+            "Not in this addendum: WI-0254/0255 ports (WI-0256 done).")}}), ["WI-0334", "WI-0335"])
+        self.assertEqual(workday.plan_items({"payload": {"addendum": True, "plan": "1. WI-0001 then WI-0002"}}),
+                         ["WI-0001", "WI-0002"])  # no table: every id, as before
+        self.assertEqual(workday.plan_items({"payload": {"plan": "| WI-0001 |\nOrder: WI-0002 after"}}),
+                         ["WI-0001", "WI-0002"])  # a day plan keeps every id
+
     def test_end_report_lists_addenda(self):
         self.start_day(f"1. {self.wi}")
         other = self.other_wi()

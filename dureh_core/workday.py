@@ -432,11 +432,18 @@ def addendum_items(addenda: list[dict]) -> list[str]:
 
 
 def plan_items(plan_event: dict) -> list[str]:
-    """The WIs a day plan lists: `items` recorded by `day plan --wi`, else every WI id named in the plan text."""
+    """The WIs a day plan lists: `items` recorded by `day plan --wi`, else every WI id named in the plan text. An
+    addendum whose text has a table takes the ids of its table rows only (release 80: camri-org 2026-10-22, an
+    addendum naming WI-0254 as excluded in a sentence counted it as an item)."""
     p = plan_event.get("payload") or {}
     if p.get("items"):
         return sorted(set(p["items"]))
-    return sorted(set(WI_RE.findall(p.get("plan") or "")))
+    text = p.get("plan") or ""
+    if p.get("addendum"):
+        rows = [ln for ln in text.splitlines() if ln.lstrip().startswith("|") and WI_RE.search(ln)]
+        if rows:
+            return sorted(set(WI_RE.findall("\n".join(rows))))
+    return sorted(set(WI_RE.findall(text)))
 
 
 def plan_progress(site: Site, plan_event: dict, extra=()) -> dict:
