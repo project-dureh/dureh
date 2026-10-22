@@ -303,6 +303,17 @@ class Watch(GithubBase):
         self.assertIn("-> Rejected (was Later)", out)
         self.assertEqual(len(out.strip().splitlines()), 1)
 
+    def test_empty_board_answer_keeps_the_state(self):
+        """2026-10-22: one poll saw the board with no items; the next replayed every Decision and comment as new."""
+        self.gh.items = [node("I1", 1, "first", "Today", "Approved", None, [("C1", "example-director", "hi")])]
+        self.assertEqual(len(self.lines()), 1)
+        full, self.gh.items = self.gh.items, []
+        self.assertEqual(self.lines(), [])
+        self.gh.items = full
+        self.assertEqual(self.lines(), [])
+        decided = [e for e in self.events() if e["type"] == github.DECIDED]
+        self.assertEqual(len(decided), 1)
+
     def test_transient_failure_is_skipped(self):
         self.gh.items = [node("I1", 1, "first", "Today", "Approved")]
         self.gh.fail_next = "HTTP 502: Bad Gateway"

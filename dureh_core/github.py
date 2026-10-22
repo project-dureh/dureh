@@ -506,6 +506,10 @@ def poll(site: Site, actor: str, cfg: dict) -> list[str]:
         issue_lines, issue_state = _issue_lines(site, actor, cfg, old, costs)
     finally:
         note_usage(site, costs)
+    if old and old.get("decisions") and not b["items"]:
+        # GitHub at times answers a board query with no items (2026-10-22); saving that would replay every Decision
+        # and comment as new on the next poll. A failed read: the poll is skipped and the state kept.
+        raise GhError(f"the board {cfg['org']}/{cfg['project']} answered with no items; kept the last state")
     first = old is None
     seen_dec = {} if first else dict(old.get("decisions") or {})
     seen_com = {} if first else {k: set(v) for k, v in (old.get("comments") or {}).items()}
