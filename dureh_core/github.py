@@ -495,6 +495,41 @@ def _issue_lines(site: Site, actor: str, cfg: dict, old: dict | None,
                    "issue_floors": floors}
 
 
+FOLLOWUP_AFTER = 20 * 60  # release 80 (project-dureh/dureh-team#63): seconds after a Decision before the reminder
+FOLLOWUP_DECISIONS = ("Approved", "Option 1", "Option 2", "Option 3")
+
+
+def _clock() -> float:
+    return time.time()
+
+
+def _followups(items: list[dict], pending: dict, first: bool, changed: set) -> tuple[list[str], dict]:
+    """Release 80 (dureh-team#63 part 3): a Decision the desk must act on (Approved / Option N) whose item is still
+    open 20 minutes later with no new desk comment gets one line: report the follow-up, or the block and the
+    Director's step, on that item. `pending` is {item id: {"at", "decision", "before": [comment ids]}}."""
+    now, out, keep = _clock(), [], {}
+    by_id = {it["id"]: it for it in items}
+    for iid, p in pending.items():
+        it = by_id.get(iid)
+        if not it or it.get("state") not in (None, "OPEN") or it.get("decision") != p.get("decision"):
+            continue
+        before = set(p.get("before") or [])
+        if any(c.get("id") not in before and DESK_MARK in (c.get("body") or "") for c in it["comments"]):
+            continue
+        if now - float(p.get("at") or now) < FOLLOWUP_AFTER:
+            keep[iid] = p
+            continue
+        out.append(f"followup: {_ref(it)} {it['title'] or ''} -> {p['decision']} {int((now - p['at']) // 60)} min ago, "
+                   f"still open and no desk comment since: report the follow-up on the item, or the block with the "
+                   f"Director's step (대표님 조치 필요) {it['url'] or ''}".rstrip())
+    if not first:
+        for it in items:
+            if it["id"] in changed and it.get("decision") in FOLLOWUP_DECISIONS and it.get("state") in (None, "OPEN"):
+                keep[it["id"]] = {"at": now, "decision": it["decision"],
+                                  "before": [c["id"] for c in it["comments"] if c.get("id")]}
+    return out, keep
+
+
 def poll(site: Site, actor: str, cfg: dict) -> list[str]:
     """One poll: the lines for Decision changes and new comments not marked as the desk's; saves the state. The first
     poll (no state) reports the Decisions already set and takes the existing comments as seen. Newly opened issues
@@ -514,11 +549,12 @@ def poll(site: Site, actor: str, cfg: dict) -> list[str]:
     seen_dec = {} if first else dict(old.get("decisions") or {})
     seen_com = {} if first else {k: set(v) for k, v in (old.get("comments") or {}).items()}
     lines, links, led = [], None, Ledger(site)
-    new_dec, new_com = {}, {}
+    new_dec, new_com, changed = {}, {}, set()
     for it in b["items"]:
         iid, dec = it["id"], it["decision"]
         new_dec[iid] = dec
         if dec != seen_dec.get(iid) and not (first and dec is None):
+            changed.add(iid)
             links = _linked(site) if links is None else links
             link = links.get(iid, {})
             was = seen_dec.get(iid)
@@ -536,7 +572,10 @@ def poll(site: Site, actor: str, cfg: dict) -> list[str]:
                     lines.append(f"comment: {_ref(it)} by {c['author'] or '?'}: {_one_line(c['body'])} "
                                  f"{c['url'] or ''}".rstrip())
         new_com[iid] = sorted(before | set(ids))[-200:]
+    follow, pending = _followups(b["items"], {} if first else dict(old.get("followups") or {}), first, changed)
+    lines += follow
     _save_state(site, {"board": f"{cfg['org']}/{cfg['project']}", "decisions": new_dec, "comments": new_com,
+                       "followups": pending,
                        "polled": time.strftime("%Y-%m-%dT%H:%M:%S"),
                        "polled_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **issue_state})
     return lines + issue_lines

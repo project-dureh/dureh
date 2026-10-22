@@ -147,6 +147,13 @@ measured cost the expected budget is checked against.
 GitHub does not report who changed a field value; the Decision column's authority rests on the board's permissions
 (only the Director should set Decision on a layer-3 item).
 
+
+Follow-up reminder (release 80, project-dureh/dureh-team#63): when a Decision the desk must act on (Approved,
+Option 1-3) is seen, the watch keeps it in `watch.json` `followups`; if the item is still open 20 minutes later and no
+new comment carries the desk marker, it prints once
+`followup: <ref> <title> -> <Decision> N min ago, still open and no desk comment since: ...`. The desk comments on the
+item: what it did, or what blocks it and the Director's step. The first poll tracks nothing; a closed item or a
+changed Decision drops the reminder. An empty board answer is a skipped poll (the state is kept).
 ## Records
 
 | event | payload |

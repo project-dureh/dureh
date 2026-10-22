@@ -307,6 +307,45 @@ class Watch(GithubBase):
         self.assertIn("-> Rejected (was Later)", out)
         self.assertEqual(len(out.strip().splitlines()), 1)
 
+    def test_followup_after_twenty_minutes_without_a_desk_comment(self):
+        """Release 80 (dureh-team#63 part 3): an Approved item still open 20 min later with no desk comment."""
+        clock = [1000.0]
+        p = mock.patch.object(github, "_clock", lambda: clock[0])
+        p.start()
+        self.addCleanup(p.stop)
+        self.gh.items = [node("I1", 1, "push", "Needs approval", None, "3 Director"),
+                         node("I2", 2, "order", "Needs approval", None, "3 Director")]
+        self.lines()
+        self.gh.items = [node("I1", 1, "push", "Today", "Approved", "3 Director"),
+                         node("I2", 2, "order", "Today", "Option 1", "3 Director")]
+        self.assertEqual(len(self.lines()), 2)  # the two decisions
+        clock[0] += 10 * 60
+        self.assertEqual(self.lines(), [])
+        self.gh.items[1] = node("I2", 2, "order", "Today", "Option 1", "3 Director",
+                                [("C9", "desk-bot", f"started WI-0002\n{github.DESK_MARK}")])
+        clock[0] += 11 * 60
+        got = self.lines()
+        self.assertEqual(len(got), 1, got)
+        self.assertTrue(got[0].startswith("followup: office#1 push -> Approved 21 min ago, still open"), got)
+        self.assertIn("대표님 조치 필요", got[0])
+        clock[0] += 60 * 60
+        self.assertEqual(self.lines(), [], "once")
+
+    def test_followup_skips_closed_and_first_poll(self):
+        clock = [1000.0]
+        p = mock.patch.object(github, "_clock", lambda: clock[0])
+        p.start()
+        self.addCleanup(p.stop)
+        self.gh.items = [node("I1", 1, "old", "Today", "Approved", "3 Director")]
+        self.assertEqual(len(self.lines()), 1)  # first poll reports, does not track
+        self.gh.items.append(node("I2", 2, "done", "Today", None, "3 Director"))
+        self.lines()
+        self.gh.items[1] = node("I2", 2, "done", "Today", "Approved", "3 Director")
+        self.lines()
+        self.gh.items[1] = node("I2", 2, "done", "Done", "Approved", "3 Director", state="CLOSED")
+        clock[0] += 30 * 60
+        self.assertEqual(self.lines(), [])
+
     def test_empty_board_answer_keeps_the_state(self):
         """2026-10-22: one poll saw the board with no items; the next replayed every Decision and comment as new."""
         self.gh.items = [node("I1", 1, "first", "Today", "Approved", None, [("C1", "example-director", "hi")])]
