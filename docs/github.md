@@ -80,8 +80,9 @@ carry it.
 ### Watch
 
 `watch` polls the board every `--interval` seconds (default 120 since release 73, at least 5) with one GraphQL query (paged by 100 items), then the
-open issues of the organization's repositories (release 71: `office_repo` always; every unarchived repository the
-token can list, up to 100 repositories and the newest 50 open issues each, when it can), and prints
+open issues of the organization's repositories (release 71: `office_repo` every poll; every unarchived repository the
+token can list, when it can; release 79: the newest 20 open issues of each, the other repositories 10 a page and only
+every 600 s), and prints
 
 ```
 decision: office#12 WI-0007 example item -> Option 1 (was none) [layer 3] https://github.com/example-org/office/issues/12
@@ -118,6 +119,30 @@ and waits `--interval`, then twice that after each further rate-limited poll (24
 Retry-After the error names), printing nothing more; the first poll that succeeds prints
 `github watch: resumed after N rate-limited polls` and the normal interval returns. Each Decision change is recorded as `github.decision.changed`
 `{item_id, url, from, to, layer, first_poll}` (with the WI when the item is linked).
+
+Cost (release 79, v0.4 bundle 1 step 3): GitHub prices a GraphQL query by the page sizes it asks for, not by what
+comes back. Until release 78 the organization scan asked for 100 repositories x 50 issues x 20 labels, about 51 of the
+hourly 5,000 points per poll for an organization of two or three repositories (about 1,700 points an hour per desk at
+120 s, and the desks and the team share one user's quota). Since release 79 the watch's board read leaves out assignees
+and labels (`status` and `sweep` keep them), the issue reads ask for 20 issues and 10 labels, the organization scan pages
+10 repositories at a time and runs at the first poll and then every 600 s (`ORG_SCAN_INTERVAL`; the office
+repository is still read every poll, so a work request is seen within one interval and an issue in a project
+repository within ten minutes). Only the newest 20 open issues of a repository come back: when that page is full the
+first time a repository is scanned, its oldest creation time becomes the repository's floor (`issue_floors` in
+`watch.json`), and an older issue that later slides into the page because newer ones were closed is taken as seen,
+not reported.
+
+Every watch query asks for `rateLimit { cost remaining resetAt }` (no extra call) and the watch appends one line per
+query to `cache/github/usage.jsonl` under the site (a runtime cache next to `watch.json`, not a record; trimmed to its
+newer half above 2 MB):
+
+```
+{"caller": "watch", "cost": 3, "query": "board", "remaining": 4890, "reset_at": "2026-10-21T18:21:00Z", "ts": "2026-10-21T17:40:02Z"}
+```
+
+The first rate-limited poll of a back-off also appends an `exhausted` line with the error and, from `gh api rate_limit`
+(which GitHub does not count), the GraphQL and core `remaining`, `used`, `limit` and `reset_at`. These lines are the
+measured cost the expected budget is checked against.
 
 GitHub does not report who changed a field value; the Decision column's authority rests on the board's permissions
 (only the Director should set Decision on a layer-3 item).

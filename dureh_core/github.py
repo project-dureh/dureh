@@ -13,7 +13,11 @@ recorded. Records carry ids, URLs and counts (`github.item.added`, `github.item.
 
 Release 71: `watch` also reports every newly opened issue in the organization's repositories (the office repository
 always, every repository the token can list when it can) that the desk did not write; a `kind:request` issue (the
-"일 요청 · Work request" template) is a work request."""
+"일 요청 · Work request" template) is a work request.
+
+Release 79 (v0.4 bundle 1 step 3): the watch asks small pages and scans the other repositories every
+ORG_SCAN_INTERVAL; every watch query reports its GraphQL cost to cache/github/usage.jsonl (M1) and a rate-limit hit
+adds an `exhausted` line (M2)."""
 from __future__ import annotations
 
 import json
@@ -185,7 +189,9 @@ def gh(cfg: dict, args: list[str], *, input_text: str | None = None, timeout: fl
     return _redact(proc.stdout or "", token)
 
 
-def graphql(cfg: dict, query: str, variables: dict) -> dict:
+def graphql(cfg: dict, query: str, variables: dict, costs: list | None = None, name: str | None = None) -> dict:
+    """One GraphQL call. When `costs` is a list and the query asks for RATE_LIMIT (release 79), the answer's
+    `rateLimit {cost remaining resetAt}` is appended to it as {query: name, cost, remaining, reset_at}."""
     out = gh(cfg, ["api", "graphql", "--input", "-"], input_text=json.dumps({"query": query, "variables": variables}))
     try:
         data = json.loads(out)
@@ -194,7 +200,12 @@ def graphql(cfg: dict, query: str, variables: dict) -> dict:
     if data.get("errors"):
         msgs = "; ".join(str(e.get("message", e))[:200] for e in data["errors"][:3])
         raise GhError(f"gh api graphql: {msgs}")
-    return data.get("data") or {}
+    data = data.get("data") or {}
+    rl = data.get("rateLimit")
+    if costs is not None and isinstance(rl, dict):
+        costs.append({"query": name, "cost": rl.get("cost"), "remaining": rl.get("remaining"),
+                      "reset_at": rl.get("resetAt")})
+    return data
 
 
 # ------------------------------------------------------------------ the board
@@ -252,11 +263,11 @@ def _parse_item(node: dict) -> dict:
             "comments": comments}
 
 
-def board(cfg: dict) -> dict:
+def board(cfg: dict, query: str = BOARD_QUERY, costs: list | None = None) -> dict:
     """{meta, items}: the board's fields and every item (paged, at most MAX_PAGES x 100)."""
     items, after, meta = [], None, None
     for _ in range(MAX_PAGES):
-        data = graphql(cfg, BOARD_QUERY, {"org": cfg["org"], "number": cfg["project"], "after": after})
+        data = graphql(cfg, query, {"org": cfg["org"], "number": cfg["project"], "after": after}, costs, "board")
         proj = (data.get("organization") or {}).get("projectV2")
         if not proj:
             raise GhError(f"organization {cfg['org']} has no Project {cfg['project']} the token can read")
@@ -350,13 +361,26 @@ def ask_fail_closed(site: Site, url: str | None) -> bool:
     return bool(target) and any(row.get("url") == target and row.get("fail_closed") for row in _linked(site).values())
 
 
-_ISSUE = ("issues(first: 50, states: OPEN, orderBy: {field: CREATED_AT, direction: DESC}) { nodes {"
-          " id number title url createdAt body author { login } labels(first: 20) { nodes { name } } } }")
-OFFICE_ISSUES_QUERY = ("query($org: String!, $repo: String!) { repository(owner: $org, name: $repo) {"
-                       " nameWithOwner %s } }" % _ISSUE)
-ORG_ISSUES_QUERY = ("query($org: String!) { organization(login: $org) { repositories(first: 100,"
-                    " orderBy: {field: PUSHED_AT, direction: DESC}) { nodes { nameWithOwner isArchived %s } } } }"
-                    % _ISSUE)
+# Release 79 (v0.4 bundle 1 step 3, G1-G3/M1): GitHub prices a GraphQL query by the page sizes it asks for
+# (`first`/`last`), not by what comes back: 100 repositories x 50 issues x 20 labels cost about 51 points per poll
+# for an organization of 2-3 repositories. The watch asks for small pages, pages repositories only when there are
+# more, scans the organization every ORG_SCAN_INTERVAL seconds, and asks every query for its own cost.
+RATE_LIMIT = "rateLimit { cost remaining resetAt }"
+ISSUE_PAGE = 20
+_ISSUE = ("issues(first: %d, states: OPEN, orderBy: {field: CREATED_AT, direction: DESC}) { nodes {"
+          " id number title url createdAt body author { login } labels(first: 10) { nodes { name } } } }" % ISSUE_PAGE)
+OFFICE_ISSUES_QUERY = ("query($org: String!, $repo: String!) { %s repository(owner: $org, name: $repo) {"
+                       " nameWithOwner %s } }" % (RATE_LIMIT, _ISSUE))
+ORG_ISSUES_QUERY = ("query($org: String!, $after: String) { %s organization(login: $org) { repositories(first: 10,"
+                    " after: $after, orderBy: {field: PUSHED_AT, direction: DESC}) { pageInfo { hasNextPage endCursor }"
+                    " nodes { nameWithOwner isArchived %s } } } }" % (RATE_LIMIT, _ISSUE))
+MAX_REPO_PAGES = 10
+ORG_SCAN_INTERVAL = 600.0  # G2: the other repositories every 10 minutes; the office repository every poll
+# G3: the watch reads Decisions and comments only (no assignees, no labels) and asks for its cost
+WATCH_BOARD_QUERY = (BOARD_QUERY.replace("query($org: String!, $number: Int!, $after: String) {",
+                                         "query($org: String!, $number: Int!, $after: String) {\n  %s" % RATE_LIMIT)
+                     .replace("\n              assignees(first: 5) { nodes { login } } labels(first: 20) { nodes { name } }",
+                              ""))
 MAX_SEEN_ISSUES = 5000
 
 
@@ -373,21 +397,34 @@ def _parse_issues(repo_node: dict) -> list[dict]:
     return out
 
 
-def open_issues(cfg: dict) -> tuple[dict[str, list[dict]], bool]:
-    """({repo: [open issue]}, org_listed): the office repository's open issues (required; a failure raises GhError)
-    and, when the token can list them, those of every other unarchived repository of the organization."""
-    data = graphql(cfg, OFFICE_ISSUES_QUERY, {"org": cfg["org"], "repo": cfg["office_repo"]})
+def open_issues(cfg: dict, scan_org: bool = True, costs: list | None = None) -> tuple[dict[str, list[dict]], bool]:
+    """({repo: [open issue]}, org_listed): the office repository's newest open issues (required; a failure raises
+    GhError) and, with `scan_org` and when the token can list them, those of every other unarchived repository of the
+    organization (10 repositories a page)."""
+    data = graphql(cfg, OFFICE_ISSUES_QUERY, {"org": cfg["org"], "repo": cfg["office_repo"]}, costs, "office_issues")
     office = data.get("repository")
     if not office:
         raise GhError(f"repository {cfg['org']}/{cfg['office_repo']} is not readable with the token")
     repos = {office.get("nameWithOwner") or f"{cfg['org']}/{cfg['office_repo']}": _parse_issues(office)}
-    try:
-        org = graphql(cfg, ORG_ISSUES_QUERY, {"org": cfg["org"]}).get("organization") or {}
-    except GhError:
-        return repos, False  # the token may not list the organization's repositories: the office repository only
-    for r in (org.get("repositories") or {}).get("nodes") or []:
-        if r and r.get("nameWithOwner") and not r.get("isArchived") and r["nameWithOwner"] not in repos:
-            repos[r["nameWithOwner"]] = _parse_issues(r)
+    if not scan_org:
+        return repos, False
+    after = None
+    for _ in range(MAX_REPO_PAGES):
+        try:
+            org = graphql(cfg, ORG_ISSUES_QUERY, {"org": cfg["org"], "after": after}, costs,
+                          "org_issues").get("organization") or {}
+        except GhError as e:
+            if rate_limited(e):
+                raise
+            return repos, False  # the token may not list the organization's repositories: the office repository only
+        page = org.get("repositories") or {}
+        for r in page.get("nodes") or []:
+            if r and r.get("nameWithOwner") and not r.get("isArchived") and r["nameWithOwner"] not in repos:
+                repos[r["nameWithOwner"]] = _parse_issues(r)
+        info = page.get("pageInfo") or {}
+        if not info.get("hasNextPage"):
+            break
+        after = info.get("endCursor")
     return repos, True
 
 
@@ -404,22 +441,44 @@ def _utc_stamp(old: dict | None) -> str | None:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
 
 
-def _issue_lines(site: Site, actor: str, cfg: dict, old: dict | None) -> tuple[list[str], dict]:
+def _org_scan_due(old: dict | None, now: float) -> bool:
+    """G2: the organization's other repositories are scanned at the first poll and then every ORG_SCAN_INTERVAL s."""
+    try:
+        last = float((old or {}).get("org_scanned_at"))
+    except (TypeError, ValueError):
+        return True
+    return not (0 <= now - last < ORG_SCAN_INTERVAL)
+
+
+def _issue_lines(site: Site, actor: str, cfg: dict, old: dict | None,
+                 costs: list | None = None) -> tuple[list[str], dict]:
     """Lines for newly opened issues not written by the desk, and the issue part of the state. A repository seen for
-    the first time (or the first poll) takes its open issues as seen, except those opened after the last saved poll."""
-    repos, _ = open_issues(cfg)
+    the first time (or the first poll) takes its open issues as seen, except those opened after the last saved poll.
+    Only the newest ISSUE_PAGE open issues of a repository come back: when that page is full the first time a repository
+    is scanned, its oldest creation time is the repository's floor, and an older unseen issue that later slides into
+    the page (newer ones closed) was open before the watch and is taken as seen, not reported."""
+    now = time.time()
+    scan = _org_scan_due(old, now)
+    repos, _ = open_issues(cfg, scan, costs)
+    org_at = now if scan else (old or {}).get("org_scanned_at")
     old = old or {}
     seen = set(old.get("issues") or [])
     scanned = set(old.get("issue_repos") or [])
     since = _utc_stamp(old) if old else None
+    floors = dict(old.get("issue_floors") or {})
     lines, led = [], Ledger(site)
     for repo, issues in repos.items():
         fresh_repo = repo not in scanned
+        floor = floors.get(repo)
+        if floor is None:
+            floors[repo] = min(i["created"] for i in issues) if len(issues) >= ISSUE_PAGE else ""
         for it in sorted(issues, key=lambda i: (i["created"], i["number"] or 0)):
             if it["id"] in seen:
                 continue
             seen.add(it["id"])
             if fresh_repo and not (since and it["created"] > since):
+                continue
+            if floor and it["created"] < floor:
                 continue
             if DESK_MARK in it["body"]:
                 continue
@@ -432,16 +491,25 @@ def _issue_lines(site: Site, actor: str, cfg: dict, old: dict | None) -> tuple[l
                                             "url": it["url"], "author": it["author"], "request": request,
                                             "created": it["created"]})
     keep = sorted(seen)[-MAX_SEEN_ISSUES:] if len(seen) > MAX_SEEN_ISSUES else sorted(seen)
-    return lines, {"issues": keep, "issue_repos": sorted(scanned | set(repos))}
+    return lines, {"issues": keep, "issue_repos": sorted(scanned | set(repos)), "org_scanned_at": org_at,
+                   "issue_floors": floors}
 
 
 def poll(site: Site, actor: str, cfg: dict) -> list[str]:
     """One poll: the lines for Decision changes and new comments not marked as the desk's; saves the state. The first
     poll (no state) reports the Decisions already set and takes the existing comments as seen. Newly opened issues
     not by the desk come after (`_issue_lines`)."""
-    b = board(cfg)
-    old = _load_state(site, cfg)
-    issue_lines, issue_state = _issue_lines(site, actor, cfg, old)
+    costs: list[dict] = []
+    try:
+        b = board(cfg, WATCH_BOARD_QUERY, costs)
+        old = _load_state(site, cfg)
+        issue_lines, issue_state = _issue_lines(site, actor, cfg, old, costs)
+    finally:
+        note_usage(site, costs)
+    if old and old.get("decisions") and not b["items"]:
+        # GitHub at times answers a board query with no items (2026-10-22); saving that would replay every Decision
+        # and comment as new on the next poll. A failed read: the poll is skipped and the state kept.
+        raise GhError(f"the board {cfg['org']}/{cfg['project']} answered with no items; kept the last state")
     first = old is None
     seen_dec = {} if first else dict(old.get("decisions") or {})
     seen_com = {} if first else {k: set(v) for k, v in (old.get("comments") or {}).items()}
@@ -472,6 +540,61 @@ def poll(site: Site, actor: str, cfg: dict) -> list[str]:
                        "polled": time.strftime("%Y-%m-%dT%H:%M:%S"),
                        "polled_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **issue_state})
     return lines + issue_lines
+
+
+def usage_path(site: Site) -> Path:
+    """M1/M2 (release 79): the watch's measured GitHub cost, one JSON line per query and one per rate-limit hit; a
+    runtime cache next to watch.json (not a record)."""
+    return site.root / "cache" / "github" / "usage.jsonl"
+
+
+USAGE_MAX_BYTES = 2_000_000
+
+
+def _append_usage(site: Site, rows: list[dict]) -> None:
+    if not rows:
+        return
+    path = usage_path(site)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and path.stat().st_size > USAGE_MAX_BYTES:  # keep the newer half
+            kept = path.read_text(encoding="utf-8").splitlines()
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text("".join(f"{x}\n" for x in kept[len(kept) // 2:]), encoding="utf-8")
+            os.replace(tmp, path)
+        with path.open("a", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row, sort_keys=True) + "\n")
+    except OSError:
+        pass  # measurement must never stop the watch
+
+
+def _now_utc() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def note_usage(site: Site, costs: list[dict], caller: str = "watch") -> None:
+    """M1: one line {ts, caller, query, cost, remaining, reset_at} per GraphQL query that reported its cost."""
+    ts = _now_utc()
+    _append_usage(site, [{"ts": ts, "caller": caller, **c} for c in costs])
+
+
+def note_exhausted(site: Site, cfg: dict, err: Exception, caller: str = "watch") -> dict:
+    """M2: one `exhausted` line when a poll hits a rate limit: the time, the error (redacted, short) and, from
+    `gh api rate_limit` (which GitHub does not count), the GraphQL and core remaining and reset times."""
+    row = {"ts": _now_utc(), "caller": caller, "event": "exhausted", "error": str(err)[:200]}
+    try:
+        res = (json.loads(gh(cfg, ["api", "rate_limit"], timeout=30)) or {}).get("resources") or {}
+        for kind in ("graphql", "core"):
+            r = res.get(kind) or {}
+            if r:
+                row[kind] = {"remaining": r.get("remaining"), "used": r.get("used"), "limit": r.get("limit"),
+                             "reset_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(int(r["reset"])))
+                             if r.get("reset") is not None else None}
+    except (GhError, DurehError, ValueError, TypeError, AttributeError):
+        pass
+    _append_usage(site, [row])
+    return row
 
 
 WATCH_INTERVAL = 120.0  # release 73: the team and the desks poll as one GitHub user; 30 s hit the secondary limit
@@ -506,6 +629,8 @@ def watch(site: Site, actor: str, interval: float = WATCH_INTERVAL, emit=print, 
         except GhError as e:
             if rate_limited(e):
                 limited += 1
+                if limited == 1:
+                    note_exhausted(site, cfg, e)
                 backoff = interval if backoff is None else min(BACKOFF_CAP, backoff * 2)
                 backoff = min(BACKOFF_CAP, max(backoff, _retry_after(e) or 0))
                 wait = backoff

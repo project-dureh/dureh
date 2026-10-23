@@ -69,10 +69,19 @@ class FakeGh:
         self.calls, self.items, self.next_issue, self.fail_next = [], [], 10, None
         self.repos = {"office": []}  # repository name -> open issues (newest first, as GitHub orders them)
         self.org_listable = True
+        self.costs = {"board": 3, "office": 1, "org": 2}  # rateLimit.cost answered per query kind (release 79)
+        self.remaining = 5000
 
     def _repo_node(self, name):
-        return {"nameWithOwner": f"{ORG}/{name}", "isArchived": False,
-                "issues": {"nodes": sorted(self.repos[name], key=lambda i: i["createdAt"], reverse=True)}}
+        newest = sorted(self.repos[name], key=lambda i: i["createdAt"], reverse=True)[:github.ISSUE_PAGE]
+        return {"nameWithOwner": f"{ORG}/{name}", "isArchived": False, "issues": {"nodes": newest}}
+
+    def _answer(self, argv, req, data, kind):
+        if "rateLimit" in req["query"]:
+            self.remaining -= self.costs[kind]
+            data = dict(data or {}, rateLimit={"cost": self.costs[kind], "remaining": self.remaining,
+                                               "resetAt": "2026-10-21T18:21:00Z"})
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"data": data}), "")
 
     def __call__(self, argv, env, input_text, timeout):
         self.calls.append({"argv": argv, "env": env, "input": input_text})
@@ -85,17 +94,27 @@ class FakeGh:
             if "repository(owner" in req["query"]:
                 name = req["variables"]["repo"]
                 repo = self._repo_node(name) if name in self.repos else None
-                return subprocess.CompletedProcess(argv, 0, json.dumps({"data": {"repository": repo}}), "")
+                return self._answer(argv, req, {"repository": repo}, "office")
             if "repositories(" in req["query"]:
                 if not self.org_listable:
                     return subprocess.CompletedProcess(argv, 0, json.dumps(
                         {"data": None, "errors": [{"message": "Resource not accessible by personal access token"}]}), "")
-                org = {"repositories": {"nodes": [self._repo_node(n) for n in self.repos]}}
-                return subprocess.CompletedProcess(argv, 0, json.dumps({"data": {"organization": org}}), "")
+                start = int(req["variables"].get("after") or 0)
+                names = list(self.repos)[start:start + 10]  # the query's page of 10 repositories
+                more = start + 10 < len(self.repos)
+                org = {"repositories": {"pageInfo": {"hasNextPage": more, "endCursor": str(start + 10) if more else None},
+                                        "nodes": [self._repo_node(n) for n in names]}}
+                return self._answer(argv, req, {"organization": org}, "org")
             proj = {"id": "PVT_1", "title": "Example board", "fields": {"nodes": FIELDS},
                     "items": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": self.items}}
-            return subprocess.CompletedProcess(argv, 0, json.dumps({"data": {"organization": {"projectV2": proj}}})
-                                               if req["variables"]["org"] == ORG else '{"data": {}}', "")
+            if req["variables"]["org"] != ORG:
+                return subprocess.CompletedProcess(argv, 0, '{"data": {}}', "")
+            return self._answer(argv, req, {"organization": {"projectV2": proj}}, "board")
+        if a[:2] == ["api", "rate_limit"]:
+            res = {"graphql": {"limit": 5000, "used": 5000 - self.remaining, "remaining": self.remaining,
+                               "reset": 1792606860},
+                   "core": {"limit": 5000, "used": 42, "remaining": 4958, "reset": 1792606860}}
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"resources": res}), "")
         if a[:2] == ["issue", "create"]:
             self.next_issue += 1
             repo = a[a.index("--repo") + 1]
@@ -239,6 +258,12 @@ class Status(GithubBase):
 
 
 class Watch(GithubBase):
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(github, "ORG_SCAN_INTERVAL", 0)  # every poll scans the organization here; see WatchCost
+        p.start()
+        self.addCleanup(p.stop)
+
     def lines(self, polls=1, sleep=None):
         got = []
         github.watch(self.site(), "desk", 5, emit=got.append, sleep=sleep or (lambda s: None), polls=polls)
@@ -278,6 +303,17 @@ class Watch(GithubBase):
         self.assertIn("-> Rejected (was Later)", out)
         self.assertEqual(len(out.strip().splitlines()), 1)
 
+    def test_empty_board_answer_keeps_the_state(self):
+        """2026-10-22: one poll saw the board with no items; the next replayed every Decision and comment as new."""
+        self.gh.items = [node("I1", 1, "first", "Today", "Approved", None, [("C1", "example-director", "hi")])]
+        self.assertEqual(len(self.lines()), 1)
+        full, self.gh.items = self.gh.items, []
+        self.assertEqual(self.lines(), [])
+        self.gh.items = full
+        self.assertEqual(self.lines(), [])
+        decided = [e for e in self.events() if e["type"] == github.DECIDED]
+        self.assertEqual(len(decided), 1)
+
     def test_transient_failure_is_skipped(self):
         self.gh.items = [node("I1", 1, "first", "Today", "Approved")]
         self.gh.fail_next = "HTTP 502: Bad Gateway"
@@ -295,7 +331,7 @@ class Watch(GithubBase):
         orig = self.gh.__call__
 
         def runner(argv, env, input_text, timeout):
-            if fails:
+            if fails and argv[1:3] == ["api", "graphql"]:  # `gh api rate_limit` (M2) is not counted by GitHub
                 self.gh.fail_next = fails.pop(0)
             return orig(argv, env, input_text, timeout)
 
@@ -382,6 +418,125 @@ class Watch(GithubBase):
     def test_only_the_desk_watches(self):
         with self.assertRaises(DurehError):
             github.watch(self.site(), "py-writer", polls=1)
+
+
+class WatchCost(GithubBase):
+    """Release 79 (v0.4 bundle 1 step 3): small pages (G1), the organization scan every ORG_SCAN_INTERVAL (G2), a
+    lighter board read (G3), and the measured cost (M1) and the time the limit ran out (M2) in cache/github/usage.jsonl."""
+
+    def lines(self, polls=1, sleep=None):
+        got = []
+        github.watch(self.site(), "desk", 5, emit=got.append, sleep=sleep or (lambda s: None), polls=polls)
+        return got
+
+    def queries(self):
+        return [json.loads(c["input"])["query"] for c in self.gh.calls if c["argv"][1:3] == ["api", "graphql"]]
+
+    def usage(self):
+        path = github.usage_path(self.site())
+        return [json.loads(x) for x in path.read_text().splitlines()] if path.exists() else []
+
+    def test_watch_queries_ask_small_pages_and_their_cost(self):
+        q = github.ORG_ISSUES_QUERY
+        for part in ("repositories(first: 10", "issues(first: 20", "labels(first: 10", "rateLimit { cost remaining"):
+            self.assertIn(part, q)
+        self.assertNotIn("first: 100", q)
+        self.assertNotIn("first: 50", q)
+        self.assertIn("issues(first: 20", github.OFFICE_ISSUES_QUERY)
+        w = github.WATCH_BOARD_QUERY
+        self.assertIn("rateLimit { cost remaining resetAt }", w)
+        self.assertIn("comments(last: 30)", w)
+        self.assertNotIn("assignees(", w)
+        self.assertNotIn("labels(", w)
+        self.assertIn("assignees(first: 5)", github.BOARD_QUERY)  # status and sweep keep the full read
+        self.assertNotIn("rateLimit", github.BOARD_QUERY)
+
+    def test_org_scan_runs_every_interval_and_misses_nothing(self):
+        self.gh.repos["example-project"] = []
+        self.lines()
+        self.assertEqual(sum("repositories(" in q for q in self.queries()), 1)
+        self.gh.repos["example-project"].append(issue("IS1", 1, "a bug", author="someone", repo="example-project"))
+        self.gh.repos["office"].append(issue("IS2", 2, "office news"))
+        got = self.lines()  # within the interval: the office repository only
+        self.assertEqual(got, [f"issue office#2 by example-director: office news | https://github.com/{ORG}/office/issues/2"])
+        self.assertEqual(sum("repositories(" in q for q in self.queries()), 1)
+        state_file = github.state_path(self.site())
+        state = json.loads(state_file.read_text())
+        state["org_scanned_at"] -= github.ORG_SCAN_INTERVAL + 1
+        state_file.write_text(json.dumps(state))
+        got = self.lines()
+        self.assertEqual(got, [f"issue example-project#1 by someone: a bug | "
+                               f"https://github.com/{ORG}/example-project/issues/1"])
+        self.assertEqual(sum("repositories(" in q for q in self.queries()), 2)
+
+    def test_repositories_are_paged_by_ten(self):
+        for i in range(12):
+            self.gh.repos[f"project-{i:02d}"] = []
+        self.lines()
+        self.gh.repos["project-11"].append(issue("IS1", 1, "late page", repo="project-11"))
+        state_file = github.state_path(self.site())
+        state = json.loads(state_file.read_text())
+        state["org_scanned_at"] = 0
+        state_file.write_text(json.dumps(state))
+        self.assertEqual(self.lines(), [f"issue project-11#1 by example-director: late page | "
+                                        f"https://github.com/{ORG}/project-11/issues/1"])
+
+    def test_an_older_issue_sliding_into_the_page_is_not_reported(self):
+        self.gh.repos["office"] = [issue(f"IS{n}", n, f"old {n}", created=f"2026-01-{n:02d}T00:00:00Z")
+                                   for n in range(1, github.ISSUE_PAGE + 3)]
+        self.assertEqual(self.lines(), [])
+        self.gh.repos["office"] = [i for i in self.gh.repos["office"] if i["number"] < github.ISSUE_PAGE]  # newest closed
+        self.assertEqual(self.lines(), [])
+        self.gh.repos["office"].append(issue("ISN", 99, "really new"))
+        self.assertEqual(self.lines(), [f"issue office#99 by example-director: really new | "
+                                        f"https://github.com/{ORG}/office/issues/99"])
+
+    def test_usage_records_the_cost_of_every_query(self):
+        self.lines(polls=2)
+        rows = self.usage()
+        self.assertEqual([r["query"] for r in rows], ["board", "office_issues", "org_issues", "board", "office_issues"])
+        self.assertEqual([r["cost"] for r in rows], [3, 1, 2, 3, 1])
+        self.assertEqual(rows[-1]["remaining"], 5000 - 10)
+        self.assertTrue(all(r["caller"] == "watch" and r["reset_at"] == "2026-10-21T18:21:00Z" and r["ts"].endswith("Z")
+                            for r in rows))
+        self.assertTrue(str(github.usage_path(self.site())).startswith(str(self.site_root / "cache")))
+        self.assertEqual(self.events("github.usage"), [])  # a cache, not a record
+
+    def test_the_time_the_limit_ran_out_is_recorded_once(self):
+        self.gh.remaining = 0
+        fails = ["GraphQL: API rate limit already exceeded for user ID 7.", "API rate limit already exceeded"]
+        orig = self.gh.__call__
+
+        def runner(argv, env, input_text, timeout):
+            if fails and argv[1:3] == ["api", "graphql"]:
+                self.gh.fail_next = fails.pop(0)
+            return orig(argv, env, input_text, timeout)
+
+        with mock.patch.object(github, "_exec", runner):
+            github.watch(self.site(), "desk", 120, emit=lambda line: None, sleep=lambda s: None, polls=3)
+        out = [r for r in self.usage() if r.get("event") == "exhausted"]
+        self.assertEqual(len(out), 1, self.usage())
+        self.assertIn("rate limit", out[0]["error"])
+        self.assertEqual(out[0]["graphql"]["remaining"], 0)
+        self.assertTrue(out[0]["graphql"]["reset_at"].endswith("Z"))
+        self.assertEqual(out[0]["core"]["remaining"], 4958)
+        self.assertNotIn(FAKE_TOKEN, github.usage_path(self.site()).read_text())
+
+    def test_a_rate_limited_org_scan_backs_off(self):
+        self.gh.repos["example-project"] = []
+        self.lines()
+        orig = self.gh.__call__
+
+        def runner(argv, env, input_text, timeout):
+            if argv[1:3] == ["api", "graphql"] and "repositories(" in (input_text or ""):
+                return subprocess.CompletedProcess(argv, 1, "", "GraphQL: API rate limit already exceeded")
+            return orig(argv, env, input_text, timeout)
+
+        with mock.patch.object(github, "ORG_SCAN_INTERVAL", 0), mock.patch.object(github, "_exec", runner):
+            got, slept = [], []
+            github.watch(self.site(), "desk", 120, emit=got.append, sleep=slept.append, polls=2)
+        self.assertEqual(slept, [120.0])
+        self.assertTrue(got and got[0].startswith("github watch: rate limited"), got)
 
 
 class Items(GithubBase):
