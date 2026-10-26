@@ -30,6 +30,30 @@ def _tools_path():
 TOOLS = _tools_path()
 
 
+class private_tmp:
+    """`with private_tmp(base):` datalad and git-annex subprocesses (and the harness commands that start them) see a
+    TMPDIR of their own, a new directory under `base`, and git never looks above `base` for a repository
+    (GIT_CEILING_DIRECTORIES). Company finding 68757440 (2026-10-26): on a compute node datalad's probe met a
+    `/tmp/.git` that was not ours (Permission denied). The environment is restored on exit."""
+
+    def __init__(self, base):
+        self.base = Path(base)
+
+    def __enter__(self):
+        self._saved = {k: os.environ.get(k) for k in ("TMPDIR", "GIT_CEILING_DIRECTORIES")}
+        os.environ["TMPDIR"] = tempfile.mkdtemp(prefix="tool-tmp-", dir=self.base)
+        os.environ["GIT_CEILING_DIRECTORIES"] = str(self.base.parent)
+        return os.environ["TMPDIR"]
+
+    def __exit__(self, *exc):
+        for k, v in self._saved.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        return False
+
+
 def run(cmd, cwd=None):
     proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
     if proc.returncode != 0:
