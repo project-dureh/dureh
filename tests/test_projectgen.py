@@ -103,15 +103,19 @@ class ProjectGen(ExampleSiteCase):
         self.assertFalse((self.proj / ".claude" / "agents" / "publisher.md").exists())
 
     def test_saves_in_a_datalad_project(self):
-        from helpers import TOOLS, run
+        from helpers import TOOLS, private_tmp, run
 
         if not TOOLS:
             self.skipTest("datalad and git-annex not available: not run")
         os.environ["PATH"] = TOOLS
         dl = self.site_root / "projects" / "dl"
-        run(["datalad", "create", "-c", "text2git", str(dl)])
-        _config_add(self.s, "projects", {"id": "dl", "path": "projects/dl"})
-        r = pg.generate_projects(self.site(), only="dl")
+        before = (os.environ.get("TMPDIR"), os.environ.get("GIT_CEILING_DIRECTORIES"))
+        with private_tmp(self.tmp) as tmpdir:  # finding 68757440: never the node's shared /tmp
+            self.assertTrue(tmpdir.startswith(str(self.tmp)))
+            run(["datalad", "create", "-c", "text2git", str(dl)])
+            _config_add(self.s, "projects", {"id": "dl", "path": "projects/dl"})
+            r = pg.generate_projects(self.site(), only="dl")
+        self.assertEqual((os.environ.get("TMPDIR"), os.environ.get("GIT_CEILING_DIRECTORIES")), before, "restored")
         self.assertTrue(r[0]["changed"])
         self.assertEqual(git(dl, "status", "--porcelain"), "")
         self.assertIn("dureh: regenerate", git(dl, "log", "-1", "--format=%s"))

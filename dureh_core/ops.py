@@ -377,6 +377,10 @@ def config_errors(site: Site, config: dict | None = None, startup: Path | None =
             v = (push_cfg or {}).get(key)
             if v is not None and not isinstance(v, bool):
                 out.append(f"config push.{key} must be true or false (release 58; default false)")
+        out += push_remote_errors(push_cfg or {})
+    for i, e in enumerate(conf.get("modules") or []):
+        if isinstance(e, dict) and "public" in e and not isinstance(e["public"], bool):
+            out.append(f"config modules[{i}].public must be true or false (release 82; default false)")
     from .site import routing_errors
 
     out += routing_errors(conf)
@@ -458,6 +462,7 @@ def status(site: Site) -> dict:
         "external_jobs": external_jobs(site, led),
         "labels": led.labels(),  # UR-20261008-02: `WI-xxxx (short title)` wherever the text names a WI
         "warnings": status_warnings(site, wis),
+        "push": [push_rule_line(r) for r in push_rules(site.config.get("push") or {})],  # release 82
     }
 
 
@@ -523,6 +528,8 @@ def render_status(st: dict) -> str:
     ext = render_external(st.get("external_jobs"))
     if ext:
         lines.append(ext)
+    for p in st.get("push") or []:
+        lines.append(f"Push: {p}")
     for w in st.get("warnings") or []:
         lines.append(f"Warning: {w}")
     for b in st.get("bundles_to_close") or []:
@@ -2069,6 +2076,108 @@ def _dest_ref(ref: str) -> str:
     return ref if ref.startswith("refs/") else f"refs/heads/{ref}"
 
 
+PUSH_RULE_KEYS = ("url", "branches", "standing_ff", "new_branches", "tags")
+
+
+def push_remote_errors(pcfg: dict) -> list[str]:
+    """Shape of `push.allowed_remotes` (release 82, dureh-team#73): a list of URL strings (every branch, the
+    site-wide standing switches) or objects {url, branches, standing_ff, new_branches, tags}."""
+    allowed = pcfg.get("allowed_remotes")
+    if allowed is None:
+        return []
+    if not isinstance(allowed, list):
+        return ["config push.allowed_remotes must be a list of remote URLs or objects {url, branches, standing_ff,"
+                " new_branches, tags} (release 82)"]
+    out = []
+    for i, e in enumerate(allowed):
+        where = f"config push.allowed_remotes[{i}]"
+        if isinstance(e, str):
+            if not e.strip():
+                out.append(f"{where} is an empty string")
+            continue
+        if not isinstance(e, dict):
+            out.append(f"{where} must be a remote URL string or an object {{url, branches, standing_ff, new_branches,"
+                       " tags}} (release 82)")
+            continue
+        if not isinstance(e.get("url"), str) or not e["url"].strip():
+            out.append(f"{where}.url is required and must be a non-empty string (release 82)")
+        unknown = sorted(set(e) - set(PUSH_RULE_KEYS))
+        if unknown:
+            out.append(f"{where} has unknown key(s) {', '.join(unknown)} (allowed: {', '.join(PUSH_RULE_KEYS)})")
+        for key in ("branches", "new_branches"):
+            v = e.get(key)
+            if v is not None and not (isinstance(v, list) and all(isinstance(g, str) and g.strip() for g in v)):
+                out.append(f"{where}.{key} must be a list of branch globs (non-empty strings) (release 82)")
+        for key in ("standing_ff", "tags"):
+            v = e.get(key)
+            if v is not None and not isinstance(v, bool):
+                out.append(f"{where}.{key} must be true or false (release 82; default false)")
+    return out
+
+
+def push_rules(pcfg: dict) -> list[dict]:
+    """`push.allowed_remotes` as rules {url, form, branches, standing_ff, new_branches, tags} (release 82). A string
+    entry keeps its earlier meaning: every branch (`branches` None), the site-wide `push.standing_ff`, new branches
+    under it when `push.standing_ff_new_branches` (`new_branches` ["*"]), any ref with a decision (`tags` true). An
+    object entry defaults to fail-closed: standing_ff false, no new branches, no tags."""
+    out = []
+    allowed = pcfg.get("allowed_remotes") or []
+    for e in allowed if isinstance(allowed, list) else []:
+        if isinstance(e, str) and e:
+            out.append({"url": e, "form": "string", "branches": None, "standing_ff": pcfg.get("standing_ff") is True,
+                        "new_branches": ["*"] if pcfg.get("standing_ff_new_branches") is True else [], "tags": True})
+        elif isinstance(e, dict) and isinstance(e.get("url"), str) and e["url"]:
+            br = e.get("branches")
+            out.append({"url": e["url"], "form": "object",
+                        "branches": [str(g) for g in br] if isinstance(br, list) else None,
+                        "standing_ff": e.get("standing_ff") is True,
+                        "new_branches": [str(g) for g in e.get("new_branches") or [] if isinstance(g, str)],
+                        "tags": e.get("tags") is True})
+    return out
+
+
+def push_rule(site_or_cfg, *names: str) -> dict | None:
+    """The first `push.allowed_remotes` rule whose url is one of `names` (a remote's URL or its name), else None."""
+    pcfg = (site_or_cfg.config.get("push") if isinstance(site_or_cfg, Site) else site_or_cfg) or {}
+    return next((r for r in push_rules(pcfg) if r["url"] in [n for n in names if n]), None)
+
+
+def _globs(globs: list[str] | None, name: str) -> bool:
+    return globs is None or any(fnmatch.fnmatchcase(name, g) for g in globs)
+
+
+def push_rule_line(rule: dict) -> str:
+    """One status line for a push rule."""
+    if rule["form"] == "string":
+        return (f"{rule['url']}: all branches; standing fast-forward {'on' if rule['standing_ff'] else 'off'}"
+                f" (site-wide){'; new branches too' if rule['new_branches'] else ''}")
+    br = ", ".join(rule["branches"]) if rule["branches"] is not None else "all branches"
+    nb = ", ".join(rule["new_branches"]) or "none"
+    return (f"{rule['url']}: branches {br}; standing fast-forward {'on' if rule['standing_ff'] else 'off'};"
+            f" new branches {nb}; tags {'with a decision' if rule['tags'] else 'refused'}")
+
+
+def push_limit_refusal(rule: dict, dest: str, approval: bool) -> str | None:
+    """Why `rule` refuses pushing to `dest` (a full ref) whatever the authorization, or None (release 82)."""
+    where = f"config push.allowed_remotes rule for {rule['url']}"
+    if dest.startswith("refs/tags/"):
+        if not rule["tags"]:
+            return (f"{dest} is a tag and {where} has tags false: tag pushes to this remote are refused, even with a"
+                    " Director decision (a config change sets tags true)")
+        if not approval and rule["form"] == "object":
+            return f"{dest} is a tag: a tag push needs a Director decision ({where}); {PUSH_APPROVAL_HINT}"
+        return None
+    if not dest.startswith("refs/heads/"):
+        return None if rule["form"] == "string" else (
+            f"{dest} is neither a branch nor a tag; {where} covers refs/heads/ and refs/tags/ only")
+    branch = dest[len("refs/heads/"):]
+    if not _globs(rule["branches"], branch):
+        return (f"branch {branch} is outside {where} (branches {', '.join(rule['branches']) or 'none'}): the desk"
+                " never pushes it, even with a Director decision; it changes only through a pull request the Director"
+                " merges, or a config change")
+    return None
+
+
 def fast_forward(repo_path: Path, remote: str, dest: str, rev: str, env: dict | None = None) -> dict:
     """Is pushing `rev` to `dest` on `remote` a fast-forward? {"fast_forward": bool, "remote_tip": sha or None,
     "new_branch": bool}. The remote tip is read with `git ls-remote` and fetched into FETCH_HEAD when the checkout
@@ -2086,16 +2195,18 @@ def fast_forward(repo_path: Path, remote: str, dest: str, rev: str, env: dict | 
 
 def push(site: Site, actor: str, repo: str, remote: str, ref: str, approval: str | None, dry_run: bool = False) -> dict:
     """Push only to an allowlisted remote, with a Director decision bound to this exact revision, or (release 58)
-    without one when config `push.standing_ff` is true and the push is a fast-forward of the destination branch
-    (a new branch counts only with `push.standing_ff_new_branches`); never forced."""
+    without one when the standing fast-forward switch is on and the push is a fast-forward of the destination branch
+    (a new branch counts only when allowed); never forced. Release 82 (dureh-team#73): an object entry in
+    `push.allowed_remotes` limits the remote's branches (`branches`), carries its own `standing_ff` (default false),
+    the branches the desk may create (`new_branches`) and whether tags may be pushed (`tags`, with a decision); a
+    string entry keeps the earlier meaning. The record carries the matched rule."""
     if site.org.role(actor).kind != "desk":
         fail("only the desk pushes")
     led = Ledger(site)
-    pcfg = site.config.get("push") or {}
-    allowed = pcfg.get("allowed_remotes") or []
     repo_path = Path(repo).resolve()
     url = git(["remote", "get-url", remote], repo_path, check=False) or remote
-    if url not in allowed and remote not in allowed:
+    rule = push_rule(site, url, remote)
+    if rule is None:
         fail(f"remote {url!r} is not in push.allowed_remotes")
     rev = git(["rev-parse", ref], repo_path)
     if approval:
@@ -2104,15 +2215,27 @@ def push(site: Site, actor: str, repo: str, remote: str, ref: str, approval: str
         if dec["payload"]["disposition"] != "approve" or b.get("revision") != rev or b.get("remote") not in (url, remote):
             fail(f"decision {approval} does not approve pushing {rev[:12]} to {url}")
         dest = _dest_ref(b.get("ref") or ref)
+        refused = push_limit_refusal(rule, dest, True)
+        if refused:
+            fail(refused)
         wi, refs, extra = dec.get("wi"), [approval], {"decision": approval}
     else:
-        if not pcfg.get("standing_ff"):
-            fail(f"--approval DECISION is required (config push.standing_ff is off); {PUSH_APPROVAL_HINT}")
         dest = _dest_ref(ref)
+        refused = push_limit_refusal(rule, dest, False)
+        if refused:
+            fail(refused)
+        if not rule["standing_ff"]:
+            if rule["form"] == "string":
+                fail(f"--approval DECISION is required (config push.standing_ff is off); {PUSH_APPROVAL_HINT}")
+            fail(f"--approval DECISION is required (config push.allowed_remotes rule for {rule['url']} has standing_ff"
+                 f" off); {PUSH_APPROVAL_HINT}")
         ff = fast_forward(repo_path, remote, dest, rev, site.env())
-        if ff["new_branch"] and not pcfg.get("standing_ff_new_branches"):
+        if ff["new_branch"] and not _globs(rule["new_branches"], dest[len("refs/heads/"):] if dest.startswith("refs/heads/") else dest):
+            what = ("config push.standing_ff_new_branches is off" if rule["form"] == "string" else
+                    f"config push.allowed_remotes rule for {rule['url']} has new_branches"
+                    f" {', '.join(rule['new_branches']) or 'none'}")
             fail(f"{dest} does not exist on {url}: a new branch is not covered by the standing fast-forward push"
-                 f" (config push.standing_ff_new_branches is off); {PUSH_APPROVAL_HINT}")
+                 f" ({what}); {PUSH_APPROVAL_HINT}")
         if not ff["new_branch"] and not ff["fast_forward"]:
             fail(f"pushing {rev[:12]} to {dest} on {url} is not a fast-forward (the remote tip {ff['remote_tip'][:12]}"
                  f" is not an ancestor); the standing authorization covers fast-forwards only, and nothing is ever"
@@ -2123,13 +2246,17 @@ def push(site: Site, actor: str, repo: str, remote: str, ref: str, approval: str
         git(["push", remote, f"{rev}:{dest}"], repo_path, env=site.env())
     return led.event("push.completed" if not dry_run else "push.planned", actor, wi,
                      {"repo": str(repo_path), "remote": url, "revision": rev, "ref": dest, **extra,
-                      "action_class": "compensatable"}, refs)
+                      "rule": rule, "action_class": "compensatable"}, refs)
 
 
 def push_approve(site: Site, actor: str, repo: str, remote: str, ref: str, memo: str, by: str = "Director") -> dict:
     repo_path = Path(repo).resolve()
     rev = git(["rev-parse", ref], repo_path)
     url = git(["remote", "get-url", remote], repo_path, check=False) or remote
+    rule = push_rule(site, url, remote)
+    refused = rule and push_limit_refusal(rule, _dest_ref(ref), True)
+    if refused:  # release 82: no decision for a push the remote's rule refuses anyway
+        fail(refused + "; nothing was recorded")
     return Ledger(site).append("decision", "push-approval", actor, None,
                                {"subject": f"push {rev[:12]} to {url}", "disposition": "approve", "by": by, "memo": memo,
                                 "binding": {"revision": rev, "remote": url, "ref": ref}})

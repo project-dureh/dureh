@@ -112,9 +112,20 @@ def _push_off(site: Site, entry: dict, root: Path) -> bool:
     is in config `push.allowed_remotes` (the harness cannot push it)."""
     if entry.get("push") is False:
         return True
-    allowed = (site.config.get("push") or {}).get("allowed_remotes") or []
+    from .ops import push_rule
+
     origin = git(["remote", "get-url", "origin"], root, check=False) if (root / ".git").exists() else ""
-    return not any(x and x in allowed for x in (str(entry.get("source") or ""), origin, "origin"))
+    # release 82: an allowed_remotes entry may be an object; it is compared by its url
+    return push_rule(site, str(entry.get("source") or ""), origin, "origin") is None
+
+
+def _standing_ff_covers(site: Site, source: str, root: Path, branch: str) -> bool:
+    """Would a standing fast-forward push of `branch` to the module's source be allowed by its push rule (release 82)?"""
+    from .ops import _globs, push_rule
+
+    origin = git(["remote", "get-url", "origin"], root, check=False) if (root / ".git").exists() else ""
+    rule = push_rule(site, source, origin, "origin")
+    return bool(rule and rule["standing_ff"] and _globs(rule["branches"], branch))
 
 
 def relink_module(site: Site, actor: str, module_id: str, rev: str, branch: str | None = None,
@@ -489,7 +500,7 @@ def retire_module(site: Site, actor: str, module_id: str, dry_run: bool = False,
         elif unpushed:
             refuse = f"{root} HEAD {head[:12]} is not reachable from {source} at {branch} ({tip[:12]}); push it first" + (
                 f" (standing fast-forward push: `dureh push --repo {root} --remote origin --ref {branch}`)"
-                if (site.config.get("push") or {}).get("standing_ff") else
+                if _standing_ff_covers(site, source, root, branch) else
                 " (ask the Director: `dureh push --approve ...` then `dureh push --approval <decision>`)")  # release 58
         step("checkout", {"path": str(root), "head": head, "dirty": bool(dirty), "source": source, "branch": branch,
                           "source_tip": tip, "unpushed": unpushed}, refuse)

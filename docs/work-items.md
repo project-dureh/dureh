@@ -92,6 +92,24 @@ payload as `env` (`ok`, `rebuilt` or `error`, with `deps_changed`, `stale_lock`,
 repair (`dureh worktree repair --target <target>`). Without env_rebuild, or without a main `.venv` (none is
 created here), nothing runs.
 
+## Gate 2 on a public module (release 82, UR-20261026-01)
+
+A module whose config entry has `public: true` is published under its owner's own name: its history must not
+name a WI, the company or the harness. For such a module:
+
+- `wi promote --wi <WI> --memo ... [--public-summary "<type>: <summary>"]` writes the merge commit message as
+  `<type>: <short English summary>`, from `--public-summary` or else the WI's `--label`; a missing or malformed
+  summary, or one that names a WI id or the site, is refused before anything merges. When the WI branch is one
+  commit on top of the target's current head, the target is fast-forwarded to it instead (no merge commit). The
+  `wi.promoted` record keeps the WI id and decision as always and adds `public: {message, fast_forward}`; the
+  compensation is `git revert <sha>` for a fast-forward. `--public-summary` on another target is refused.
+- Worker briefs carry the line "Commit messages: English, no WI ids, no company name, no Co-Authored-By /
+  Claude-Session trailers."
+- `verify` reads the branch's commit messages (`<base>..<head>`) and fails the item when one names a WI id
+  (`WI-NNNN`) or the site (its configured names and folder), carries a `Co-Authored-By` or `Claude-Session`
+  trailer, or uses letters outside the Latin script; the verify run lists them as `commit_problems`. The worker
+  rewords its own branch (it is not yet published) and stages again.
+
 ## WI titles for the Director (UR-20261008-02)
 
 Director, 2026-10-08: whenever a WI is named to the Director, a short title goes with it, for example

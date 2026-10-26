@@ -110,6 +110,11 @@ class LinkModuleBranch(SiteCase):
         (self.site_root / "config.json").write_text(json.dumps(cfg))
         with self.assertRaisesRegex(DurehError, "unpushed local commits.*only to a push-off module"):
             sitelinks.link_module(self.site(), "desk", "demo", None, self.feat, relink=True, force=True)
+        # release 82: an object entry counts by its url
+        cfg["push"]["allowed_remotes"] = [{"url": str(self.src), "branches": ["main"]}]
+        (self.site_root / "config.json").write_text(json.dumps(cfg))
+        with self.assertRaisesRegex(DurehError, "unpushed local commits.*only to a push-off module"):
+            sitelinks.link_module(self.site(), "desk", "demo", None, self.feat, relink=True, force=True)
         self.assertEqual(git(self.mod, "rev-parse", "HEAD"), local, "nothing changed")
         self.assertEqual(self.events("site.module-relinked"), [])
         # configured push-off (entry push: false) with --force: relinked, recorded as forced

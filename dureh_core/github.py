@@ -60,6 +60,10 @@ OPENED = "github.issue.opened"
 CLOSED, SWEPT = "github.item.closed", "github.sweep.done"
 # #34: a Done item that still waits for the Director (an answer or a review) stays open for the sweep
 HOLD_LABELS = ("waiting-director", "needs-review", "needs-approval")
+# release 82 (Director 2026-10-26, dureh-team#74): at most this many open items of the company In progress at once;
+# an item moved back to Today with `item set --on-hold` carries ON_HOLD_LABEL until it is In progress again
+WIP_IN_PROGRESS = 2
+ON_HOLD_LABEL = "on-hold"
 
 
 class GhError(DurehError):
@@ -865,6 +869,8 @@ def item_add(site: Site, actor: str, wi: str, status: str | None = "Backlog", pr
     if any(e["type"] == ADDED and e["wi"] == wi for e in led.events(wi)):
         fail(f"{wi} already has a board item; change it with `dureh github item set --wi {wi} ...`")
     fields = _fields(status, project, layer, units, priority=priority, start=start, target=target)
+    if fields.get(FIELD_STATUS) == "In progress":  # release 82: the same limit as `item set`
+        _refuse_wip(cfg, board(cfg)["items"], url.strip() if url else None)
     meta = _meta(cfg)
     _edits(meta, fields)  # every field and option exists before anything is created
     if url:
@@ -883,18 +889,55 @@ def item_add(site: Site, actor: str, wi: str, status: str | None = "Backlog", pr
     return {"added": True, "wi": wi, **rec}
 
 
+def _in_progress(cfg: dict, items: list[dict], exclude_url: str | None = None) -> list[dict]:
+    """The company's open board items In progress (repository of the company's organization, or a draft), the
+    item `exclude_url` aside."""
+    return [it for it in items if it.get("status") == "In progress" and it.get("state") not in ("CLOSED", "MERGED")
+            and (not it.get("repo") or it["repo"].startswith(f"{cfg['org']}/"))
+            and not (exclude_url and it.get("url") == exclude_url)]
+
+
+def _refuse_wip(cfg: dict, items: list[dict], url: str | None) -> None:
+    """Release 82 (dureh-team#74): a third In progress item of the company is refused, naming the running ones."""
+    running = _in_progress(cfg, items, url)
+    if len(running) >= WIP_IN_PROGRESS:
+        names = "; ".join(f"{_ref(it)} {it.get('title') or ''}".strip() + (f" ({it['url']})" if it.get("url") else "")
+                          for it in running)
+        fail(f"refused: the board already has {len(running)} open items In progress for {cfg['org']} (limit"
+             f" {WIP_IN_PROGRESS}, Director 2026-10-26): {names}. Finish one, or move one back with"
+             f" `dureh github item set --url <url> --status Today --on-hold`")
+
+
 def item_set(site: Site, actor: str, wi: str | None = None, url: str | None = None, status=None, project=None,
-             layer=None, units=None, decision=None, priority=None, start=None, target=None) -> dict:
+             layer=None, units=None, decision=None, priority=None, start=None, target=None,
+             on_hold: bool = False) -> dict:
     """Change fields of a linked item. The desk records a Decision only on a layer 1-2 item: on a layer-3 item the
-    Decision column is the Director's alone."""
+    Decision column is the Director's alone. Release 82 (dureh-team#74): Status In progress is refused while the
+    company already has WIP_IN_PROGRESS open items In progress (one board read); `on_hold` sets Status Today and
+    adds the label `on-hold`, which a later move to In progress removes."""
     _require_desk(site, actor)
     if not wi and not url:
         fail("name the item with --wi or --url")
     cfg = config(site)
     item = linked_item(site, wi, url)
+    if on_hold:
+        if status is not None and str(status).strip().lower() != "today":
+            fail("--on-hold sets Status Today; it does not go with --status " + repr(status))
+        status = "Today"
     fields = _fields(status, project, layer, units, decision, priority, start, target)
     if not fields:
         fail("nothing to set: give --status, --project, --layer, --units, --decision, --priority, --start or --target")
+    labels = {}
+    if fields.get(FIELD_STATUS) == "In progress":
+        items = board(cfg)["items"]
+        _refuse_wip(cfg, items, item.get("url"))
+        it = next((i for i in items if item.get("url") and i.get("url") == item["url"]), None)
+        if it and ON_HOLD_LABEL in (it.get("labels") or []):
+            labels["remove"] = [ON_HOLD_LABEL]
+    if on_hold:
+        if not item.get("url"):
+            fail("--on-hold needs an issue (a draft carries no label)")
+        labels["add"] = [ON_HOLD_LABEL]
     if FIELD_DECISION in fields and str(fields.get(FIELD_LAYER) or item.get("layer") or "") not in ("1", "2"):
         fail("refused: the desk records a Decision only on a layer 1 or 2 item (set --layer 1|2 with it); on a layer-3 "
              "item only the Director decides, in the board's Decision column")
@@ -902,9 +945,18 @@ def item_set(site: Site, actor: str, wi: str | None = None, url: str | None = No
         _refuse_open_fail_closed(site, cfg, item.get("url"), "set Status Done on")
     meta = _meta(cfg)
     _edit(cfg, meta, item["item_id"], fields)
+    if labels.get("add"):
+        repo_name, _ = _issue_number(cfg, item["url"])
+        gh(cfg, ["label", "create", ON_HOLD_LABEL, "--repo", repo_name, "--color", "fbca04", "--description",
+                 "moved back to Today: waits for a free In progress slot", "--force"])
+        gh(cfg, ["issue", "edit", item["url"], "--add-label", ON_HOLD_LABEL])
+    if labels.get("remove"):
+        gh(cfg, ["issue", "edit", item["url"], "--remove-label", ON_HOLD_LABEL])
     Ledger(site).event(UPDATED, actor, item.get("wi"), {"item_id": item["item_id"], "url": item.get("url"),
-                                                         "fields": fields}, [item["wi"]] if item.get("wi") else None)
-    return {"updated": True, "wi": item.get("wi"), "item_id": item["item_id"], "url": item.get("url"), "fields": fields}
+                                                         "fields": fields, **({"labels": labels} if labels else {})},
+                       [item["wi"]] if item.get("wi") else None)
+    return {"updated": True, "wi": item.get("wi"), "item_id": item["item_id"], "url": item.get("url"), "fields": fields,
+            **({"labels": labels} if labels else {})}
 
 
 def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] | None = None, layer: int = 3,

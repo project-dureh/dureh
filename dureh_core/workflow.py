@@ -1038,6 +1038,8 @@ def _render_brief(site: Site, rec: dict, role: str, wt: dict, entry: dict,
         lines += ["", f"Record each result with `{dureh} ledger add finding --wi {rec['id']} --summary ... --evidence-level ...`.",
                   "Keep sources (identity, retrieval time, passage or hash). Do not write files."]
     else:
+        if public_module(site, p["target"]):  # release 82 (UR-20261026-01)
+            lines.append(PUBLIC_COMMIT_LINE)
         lines += ["", f"When done, commit on the WI branch, then run `{dureh} wi stage --wi {rec['id']} --summary \"...\"`.",
                   f"Return at most {int(site.limit('worker_report_lines', 30))} lines: changed paths, commands run with"
                   " results, open assumptions. The checker owns validation."]
@@ -1918,13 +1920,18 @@ def _record_verification(site: Site, ctx: dict, actor: str, wi: str, paths: list
         f = Path(cwd) / x
         if f.is_file() and not f.is_symlink():
             hashes[x] = sha256_file(f)
-    passed = not violations and not missing and all(r["exit"] == 0 for r in results)
+    commit_problems = public_commit_problems(site, wi, p["target"], head)  # release 82: None off a public module
+    passed = not violations and not missing and all(r["exit"] == 0 for r in results) and not commit_problems
     if not checks:
         note = "no declared checks; only ownership and declared outputs were verified"
     else:
         note = f"{sum(r['exit'] == 0 for r in results)}/{len(results)} declared checks passed"
         if job:
             note += f" (scheduler job {job['job_id']}: {job['state']})"
+    if commit_problems:
+        note += (f"; {len(commit_problems)} commit message problem(s) on public module {p['target']} ("
+                 + "; ".join(commit_problems[:5]) + f"); {PUBLIC_COMMIT_LINE[0].lower()}{PUBLIC_COMMIT_LINE[1:]}"
+                 " Reword the branch's commits (for example `git rebase -i` in the worktree) and stage again")
     if review is not None:
         passed = passed and review["exit"] == 0
         note = (note if checks else "no declared checks") + f"; review {review.get('verdict') or 'no verdict'}" \
@@ -1937,6 +1944,8 @@ def _record_verification(site: Site, ctx: dict, actor: str, wi: str, paths: list
         payload["runner_override"] = True
     if job:
         payload["job"] = job
+    if commit_problems is not None:
+        payload["commit_problems"] = commit_problems
     payload.update(extra or {})
     refs = [extra["collected_from"]] if extra and extra.get("collected_from") else None
     run = led.append("run", "verify", actor, wi, {"run_type": "verify", "status": payload["result"], **payload}, refs)
@@ -2144,9 +2153,106 @@ def _verify_bundle(site: Site, actor: str, wi: str, start: float) -> dict:
     return payload | {"run": run["id"]}
 
 
+# ------------------------------------------------------- public modules
+# release 82 (UR-20261026-01 option A): a module whose config entry has `public: true` is published under the
+# Director's own name; nothing the harness or a worker commits there names a WI, the company or the harness.
+PUBLIC_COMMIT_LINE = "Commit messages: English, no WI ids, no company name, no Co-Authored-By / Claude-Session trailers."
+PUBLIC_TYPES = ("feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert")
+PUBLIC_SUMMARY_RE = re.compile(r"^(?P<type>[a-z]+)(\([A-Za-z0-9._/-]+\))?!?: \S.*$")
+WI_ID_RE = re.compile(r"WI-\d{4}")
+HARNESS_TRAILER_RE = re.compile(r"^\s*(Co-Authored-By|Claude-Session)\s*:", re.I | re.M)
+
+
+def public_module(site: Site, target: str | None) -> bool:
+    """Is `target` a module whose config entry says `public: true` (release 82)?"""
+    if not target or not target.startswith("modules/"):
+        return False
+    from .exectree import module_entry
+
+    return module_entry(site, target.split("/", 1)[1]).get("public") is True
+
+
+def _site_names(site: Site) -> list[str]:
+    """The names a public commit must not carry: the site's own names from its config and folder (session name,
+    mailbox name, folder name, site id, package id), and their hyphen/underscore parts of five letters or more."""
+    names = {site.session_name, site.mailbox_name, site.root.name, site.site_id,
+             str((site.config.get("startup") or {}).get("id") or "")}
+    names.discard("unknown-site")
+    out = set()
+    for n in names:
+        if len(n) >= 4:
+            out.add(n)
+            out.update(t for t in re.split(r"[-_.]", n) if len(t) >= 5)
+    return sorted(out)
+
+
+def public_message_problems(site: Site, message: str) -> list[str]:
+    """Why a commit message breaks the public-module rule (PUBLIC_COMMIT_LINE), [] when it does not."""
+    import unicodedata
+
+    out = []
+    if WI_ID_RE.search(message):
+        out.append("names a WI id")
+    trailers = sorted({m.group(1).lower() for m in HARNESS_TRAILER_RE.finditer(message)})
+    if trailers:
+        out.append("carries a " + " and a ".join("Co-Authored-By" if t.startswith("co") else "Claude-Session"
+                                                   for t in trailers) + " trailer")
+    named = [n for n in _site_names(site) if re.search(rf"(?<![A-Za-z0-9]){re.escape(n)}(?![A-Za-z0-9])", message, re.I)]
+    if named:
+        out.append(f"names the site ({', '.join(named)})")
+    if any(ch.isalpha() and not unicodedata.name(ch, "").startswith("LATIN") for ch in message):
+        out.append("is not English (letters outside the Latin script)")
+    return out
+
+
+def public_summary(site: Site, rec: dict, summary: str | None) -> str:
+    """The commit message `wi promote` writes on a public module: `--public-summary`, else the WI's label, as
+    `<type>: <short English summary>` (one line; type one of PUBLIC_TYPES). Refused with the reason otherwise."""
+    wi = rec["id"]
+    text = summary if summary is not None else rec["payload"].get("label")
+    src = "--public-summary" if summary is not None else "the label"
+    how = (f"pass `--public-summary \"<type>: <short English summary>\"` (type one of {', '.join(PUBLIC_TYPES)})")
+    if not text:
+        fail(f"{wi} targets public module {rec['payload']['target']} and has no label: its promote commit needs"
+             f" `<type>: <summary>`; {how}")
+    text = " ".join(str(text).split())
+    m = PUBLIC_SUMMARY_RE.match(text)
+    if not m or m.group("type") not in PUBLIC_TYPES:
+        fail(f"{src} {text!r} is not `<type>: <short English summary>` for public module {rec['payload']['target']};"
+             f" {how}")
+    problems = public_message_problems(site, text) + (["starts with Promote"] if text.lower().split(": ", 1)[1]
+                                                      .startswith("promote") else [])
+    if problems:
+        fail(f"{src} {text!r} {'; '.join(problems)} (public module {rec['payload']['target']}); {how}")
+    return text
+
+
+def public_commit_problems(site: Site, wi: str, target: str, head: str | None) -> list[str] | None:
+    """The WI branch's commits (base..head) whose messages break the public-module rule, as `<sha12>: <why>`;
+    None when the target is not a public module or there is no branch."""
+    wt = site.worktrees / wi
+    if not head or not public_module(site, target) or not wt.is_dir():
+        return None
+    base = _base_of(site, wi)
+    if not base:
+        return None
+    out = []
+    raw = git(["log", "--format=%H%n%B%x00", f"{base}..{head}"], wt, check=False)
+    for chunk in raw.split("\x00"):
+        chunk = chunk.strip("\n")
+        if not chunk:
+            continue
+        sha, _, body = chunk.partition("\n")
+        out += [f"{sha[:12]}: {why}" for why in public_message_problems(site, body)]
+    return out
+
+
 # ---------------------------------------------------------------- promote
-def wi_promote(site: Site, actor: str, wi: str, memo: str) -> dict:
-    """Gate 2: the desk merges a verified WI branch into its target's current branch."""
+def wi_promote(site: Site, actor: str, wi: str, memo: str, public_summary_text: str | None = None) -> dict:
+    """Gate 2: the desk merges a verified WI branch into its target's current branch. Release 82 (UR-20261026-01):
+    on a public module (config `modules[].public: true`) the merge commit reads `<type>: <summary>` (the WI's label
+    or `public_summary_text`) with no WI id, site name or trailer, and a branch of one commit on top of an unmoved
+    target is fast-forwarded (the worker's commit as it is); the WI id stays in the `wi.promoted` record."""
     led = Ledger(site)
     if site.org.role(actor).kind != "desk":
         fail("only the desk promotes")
@@ -2154,7 +2260,16 @@ def wi_promote(site: Site, actor: str, wi: str, memo: str) -> dict:
     if led.wi_status(wi)["status"] != "verified":
         fail(f"{wi} is not verified")
     verified = [e for e in led.events(wi) if e["type"] == "wi.verified"][-1]
+    public = public_module(site, rec["payload"]["target"])
+    if public_summary_text is not None and (not public or site.org.role(rec["payload"]["role"]).is_manager):
+        fail(f"--public-summary goes with a work item on a public module (config modules[].public: true); {wi}"
+             f" targets {rec['payload']['target']}" + (" and is a bundle (each item carries its own)" if public else ""))
     if site.org.role(rec["payload"]["role"]).is_manager:
+        # release 82: every public child's commit text is checked before the first child merges
+        for kid in _children(site, wi):
+            if led.wi_status(kid["id"])["status"] == "verified" and public_module(site, kid["payload"]["target"]) \
+                    and (site.worktrees / kid["id"]).is_dir():
+                public_summary(site, kid, None)
         promoted_children = []
         for kid in _children(site, wi):
             if led.wi_status(kid["id"])["status"] == "verified":
@@ -2169,6 +2284,7 @@ def wi_promote(site: Site, actor: str, wi: str, memo: str) -> dict:
                          [dec["id"]])
     wt = site.worktrees / wi
     merge = env = None
+    fast_forward = False
     if wt.is_dir():
         head = git(["rev-parse", "HEAD"], wt)
         if head != verified["payload"].get("head") or git(["status", "--porcelain", "--untracked-files=no"], wt):
@@ -2176,6 +2292,7 @@ def wi_promote(site: Site, actor: str, wi: str, memo: str) -> dict:
         root = target_root(site, rec["payload"]["target"])
         if rec["payload"]["target"] in ("harness", "package"):
             return _contribute(site, led, actor, wi, rec, root, head, memo)
+        message = public_summary(site, rec, public_summary_text) if public else f"Promote {wi}: {rec['payload']['title']}"
         if git(["status", "--porcelain", "--untracked-files=no"], root):
             fail(f"target {root} has uncommitted changes; promotion needs a clean main tree")
         branch = git(["rev-parse", "--abbrev-ref", "HEAD"], wt)
@@ -2185,8 +2302,13 @@ def wi_promote(site: Site, actor: str, wi: str, memo: str) -> dict:
         conflicts = _merge_conflicts(root, target_head, branch)
         if conflicts:
             _promote_failed(led, actor, wi, rec, root, base, head, target_head, conflicts, "pre-check")
+        fast_forward = public and base == target_head and \
+            git(["rev-list", "--count", f"{target_head}..{head}"], root, check=False) == "1"
         try:
-            git(["merge", "--no-ff", "-m", f"Promote {wi}: {rec['payload']['title']}", branch], root)
+            if fast_forward:  # release 82: the worker's one commit lands as it is, no merge commit
+                git(["merge", "--ff-only", branch], root)
+            else:
+                git(["merge", "--no-ff", "-m", message, branch], root)
         except DurehError as exc:
             # the pre-check passed (or gave no verdict) and the merge still failed: abort it so the main tree is
             # back where it was (nothing to abort when git refused before starting, e.g. a file in the way)
@@ -2198,10 +2320,13 @@ def wi_promote(site: Site, actor: str, wi: str, memo: str) -> dict:
     dec = led.append("decision", "gate2", actor, wi, {"subject": f"Gate 2 {wi}", "disposition": "approve",
                                                         "by": "desk", "memo": memo,
                                                         "binding": {"head": verified["payload"].get("head"), "merge": merge}})
+    pub = {"public": {"message": None if fast_forward else message, "fast_forward": fast_forward}} \
+        if merge and public else {}
+    revert = f"git revert {merge}" if pub and fast_forward else f"git revert -m 1 {merge}"
     ev = led.event("wi.promoted", actor, wi, {"merge": merge, "decision": dec["id"],
                                               "action_class": "compensatable" if merge else "reversible",
-                                              "compensation": f"git revert -m 1 {merge}" if merge else "append wi.reverted",
-                                              **({"env": env} if env else {})},
+                                              "compensation": revert if merge else "append wi.reverted",
+                                              **pub, **({"env": env} if env else {})},
                    [dec["id"]])
     return ev
 
