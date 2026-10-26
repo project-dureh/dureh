@@ -738,6 +738,37 @@ class Items(GithubBase):
         closed = [c["argv"][3] for c in self.gh.calls if c["argv"][1:3] == ["issue", "close"]]
         self.assertEqual(closed, [u(22), u(24)])
 
+    def test_desk_cannot_finish_an_undecided_fail_closed_ask_by_hand(self):
+        """Release 81 (DUREH's provisional choice): `item set --url <ask> --status Done` and `item close --url <ask>`
+        are refused on a fail-closed ask (record or label) whose Decision is empty; other undecided asks stay allowed."""
+        recorded = self.ask("--fail-closed", "--otherwise", "답이 올 때까지 기다립니다.", wi=None)  # issue 11
+        plain = self.ask(wi=None)  # issue 12, not fail-closed
+        self.gh.items = [node("I11", 11, "fail-closed ask", status="Needs approval", labels=["kind:decision"]),
+                         node("I12", 12, "plain ask", status="Needs approval", labels=["kind:decision"]),
+                         node("I30", 30, "labelled only", status="Needs approval",
+                              labels=["kind:decision", "fail-closed"])]
+        labelled = f"https://github.com/{ORG}/office/issues/30"
+        self.gh.calls.clear()
+        # `item set` takes recorded items only; `item close --url` any issue, so the label alone counts there
+        for url, args in ((recorded["url"], ["set", "--url", recorded["url"], "--status", "Done"]),
+                          (recorded["url"], ["close", "--url", recorded["url"]]), (labelled, ["close", "--url", labelled])):
+            code, _, err = self.run_cli("item", *args)
+            self.assertEqual(code, 2, args)
+            self.assertIn(f"refused: {url} is a fail-closed ask and its Decision column is empty", err)
+            self.assertIn("the board's Decision column", err)
+        self.assertFalse([c for c in self.gh.calls if c["argv"][1:3] in (["project", "item-edit"], ["issue", "close"])])
+        code, _, err = self.run_cli("item", "set", "--url", recorded["url"], "--status", "In progress")
+        self.assertEqual(code, 0, err)  # only Done (and a close) is refused
+        for args in (["set", "--url", plain["url"], "--status", "Done"], ["close", "--url", plain["url"]]):
+            code, _, err = self.run_cli("item", *args)
+            self.assertEqual(code, 0, err)  # an undecided ask that is not fail-closed: allowed by hand
+        self.gh.items[0] = node("I11", 11, "fail-closed ask", status="Needs approval", decision="Option 2",
+                                labels=["kind:decision", "fail-closed"])
+        for args in (["set", "--url", recorded["url"], "--status", "Done"], ["close", "--url", recorded["url"]]):
+            code, _, err = self.run_cli("item", *args)
+            self.assertEqual(code, 0, err)  # once decided, the desk finishes it
+        self.assertEqual(self.gh.commands().count(["issue", "close"]), 2)
+
     def test_ask_assigns_the_director_and_marks(self):
         body = self.tmp / "ask.md"
         body.write_text("Which order for the next two items?")

@@ -898,6 +898,8 @@ def item_set(site: Site, actor: str, wi: str | None = None, url: str | None = No
     if FIELD_DECISION in fields and str(fields.get(FIELD_LAYER) or item.get("layer") or "") not in ("1", "2"):
         fail("refused: the desk records a Decision only on a layer 1 or 2 item (set --layer 1|2 with it); on a layer-3 "
              "item only the Director decides, in the board's Decision column")
+    if fields.get(FIELD_STATUS) == "Done":
+        _refuse_open_fail_closed(site, cfg, item.get("url"), "set Status Done on")
     meta = _meta(cfg)
     _edit(cfg, meta, item["item_id"], fields)
     Ledger(site).event(UPDATED, actor, item.get("wi"), {"item_id": item["item_id"], "url": item.get("url"),
@@ -996,6 +998,22 @@ def comment(site: Site, actor: str, text: str, wi: str | None = None, url: str |
     return {"commented": True, "url": target, "chars": len(body)}
 
 
+def _refuse_open_fail_closed(site: Site, cfg: dict, url: str | None, what: str) -> None:
+    """Release 81 (finding cc81a566, DUREH's provisional choice): the desk may not set Status Done on, or close, a
+    fail-closed ask (label `fail-closed` on the board, or recorded `fail_closed`) whose Decision is empty; an
+    undecided ask that is not fail-closed stays allowed by hand. One board read, only for a Done or a close."""
+    from .records import FAIL_CLOSED_LABEL
+
+    if not url:
+        return
+    it = next((i for i in board(cfg)["items"] if i.get("url") == url.strip()), None)
+    labelled = bool(it) and FAIL_CLOSED_LABEL in (it.get("labels") or [])
+    if not (labelled or ask_fail_closed(site, url)) or (it and it.get("decision")):
+        return
+    fail(f"refused: {url} is a fail-closed ask and its {FIELD_DECISION} column is empty; the desk cannot {what} it"
+         f" until the answer is in the board's {FIELD_DECISION} column (no fallback, no timeout approval)")
+
+
 def item_close(site: Site, actor: str, wi: str | None = None, url: str | None = None, text: str | None = None) -> dict:
     """#34: close a linked item's issue (the desk's rule: at promote), with an optional closing comment carrying the
     desk marker; records github.item.closed {url}."""
@@ -1005,6 +1023,7 @@ def item_close(site: Site, actor: str, wi: str | None = None, url: str | None = 
     cfg = config(site)
     target = linked_item(site, wi, url)["url"] if wi else url.strip()
     _issue_number(cfg, target)
+    _refuse_open_fail_closed(site, cfg, target, "close")
     args = ["issue", "close", target]
     if text and text.strip():
         args += ["--comment", _clean(text, "the comment") + f"\n\n{DESK_MARK}"]
