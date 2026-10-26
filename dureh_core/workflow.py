@@ -1093,10 +1093,19 @@ def dispatch_stop(site: Site, actor: str, wi: str, reason: str) -> dict:
 
 # --------------------------------------------------------------- staging
 def wi_stage(site: Site, actor: str, wi: str, summary: str) -> dict:
+    """Mark committed work ready for the checker.
+
+    Release 81 (UR-20261023-01 and its findings 1368f671/cc00d3b9): a worktree whose head is still its dispatch
+    base (nothing committed past it) is refused, so no `wi.staged` names the base; and a staged item whose head
+    moved since its last `wi.staged` (the worker committed after staging) is staged again at the new head
+    (staged -> staged), while the same head is refused. Release 81 (UR-20261023-02 option 1): an item owned by a
+    role with the verify capability that has no worktree (a read-only sweep, no worker) is staged directly from
+    approved or rework, without a no-op member run to reach dispatched."""
     led = Ledger(site)
     rec = led.get("work-item", wi)
     if actor != rec["payload"]["role"] and actor != "desk":
         fail(f"{wi} is owned by {rec['payload']['role']}, not {actor}")
+    st = led.wi_status(wi)["status"]
     head = None
     wt = site.worktrees / wi
     if wt.is_dir():
@@ -1104,7 +1113,21 @@ def wi_stage(site: Site, actor: str, wi: str, summary: str) -> dict:
         dirty = git(["status", "--porcelain"], wt)
         if dirty:
             fail(f"{wi} worktree has uncommitted changes; commit them on its branch before staging:\n{dirty}")
-    return led.event("wi.staged", actor, wi, {"summary": summary[:4000], "head": head})
+        base = _base_of(site, wi)
+        if base and head == base:
+            fail(f"{wi}: the branch head {head[:12]} is its dispatch base (nothing committed past it); commit the"
+                 f" work on the WI branch in {wt} first, then run `wi stage` again. Nothing was recorded.")
+    elif st in ("approved", "rework") and not led.checker_item(wi):
+        fail(f"{wi} is {st}; only an item owned by a role with the verify capability and without a worktree (a"
+             " read-only sweep) is staged before it is dispatched")
+    if st == "staged":
+        last = [e for e in led.events(wi) if e["type"] == "wi.staged"][-1]
+        if last["payload"].get("head") == head:
+            at = f"head {head[:12]}" if head else "no worktree"
+            fail(f"{wi} is already staged at {at}; commit the new work first (re-staging records a new head only)")
+    return led.event("wi.staged", actor, wi, {"summary": summary[:4000], "head": head,
+                                              **({"restaged_from": last["id"]} if st == "staged" else {})})
+
 
 
 # ------------------------------------------------------------- verify WI
@@ -2145,7 +2168,7 @@ def wi_promote(site: Site, actor: str, wi: str, memo: str) -> dict:
                                                     "compensation": "revert each child merge; append wi.reverted"},
                          [dec["id"]])
     wt = site.worktrees / wi
-    merge = None
+    merge = env = None
     if wt.is_dir():
         head = git(["rev-parse", "HEAD"], wt)
         if head != verified["payload"].get("head") or git(["status", "--porcelain", "--untracked-files=no"], wt):
@@ -2171,14 +2194,46 @@ def wi_promote(site: Site, actor: str, wi: str, memo: str) -> dict:
             git(["merge", "--abort"], root, check=False)
             _promote_failed(led, actor, wi, rec, root, base, head, target_head, sorted(unmerged), "merge", str(exc))
         merge = git(["rev-parse", "HEAD"], root)
+        env = _promote_env(site, led, actor, wi, root, rec["payload"]["target"], target_head, merge)
     dec = led.append("decision", "gate2", actor, wi, {"subject": f"Gate 2 {wi}", "disposition": "approve",
                                                         "by": "desk", "memo": memo,
                                                         "binding": {"head": verified["payload"].get("head"), "merge": merge}})
     ev = led.event("wi.promoted", actor, wi, {"merge": merge, "decision": dec["id"],
                                               "action_class": "compensatable" if merge else "reversible",
-                                              "compensation": f"git revert -m 1 {merge}" if merge else "append wi.reverted"},
+                                              "compensation": f"git revert -m 1 {merge}" if merge else "append wi.reverted",
+                                              **({"env": env} if env else {})},
                    [dec["id"]])
     return ev
+
+
+DEPENDENCY_FILES = re.compile(r"^(?:pyproject\.toml|uv\.lock|setup\.py|setup\.cfg|requirements[^/]*\.txt)$")
+
+
+def _promote_env(site: Site, led: Ledger, actor: str, wi: str, root: Path, target: str, before: str,
+                 after: str) -> dict | None:
+    """Release 81 (finding c3350543: a module's main `.venv` was stale after every promote and the desk rebuilt it
+    by hand): after the merge, the main tree's environment is checked as `worktree repair --target` checks it
+    (_repair_env: interpreter, and `uv sync --check` when env_rebuild is a `uv sync`) and rebuilt only when stale;
+    when the merge changed a top-level dependency file (pyproject.toml, uv.lock, setup.py/cfg, requirements*.txt)
+    and env_rebuild is not a `uv sync` (no lock check to ask), it is rebuilt. Only for a module or project target
+    with env_rebuild whose main tree has a `.venv` (none is created here); else None and nothing runs. A failed
+    rebuild does not undo the promotion (the merge stands): the result says `error` and names the repair."""
+    cmd = _env_rebuild_command(site, target) if _env_target(target) else None
+    if not cmd or not (root / ".venv").is_dir():
+        return None
+    deps = sorted(n for n in git(["diff", "--name-only", f"{before}..{after}"], root, check=False).splitlines()
+                  if DEPENDENCY_FILES.match(n))
+    force = bool(deps) and lock_check_command(cmd) is None
+    try:
+        r = _repair_env(site, root, target, force=force)
+    except DurehError as exc:
+        return {"env": "error", "error": str(exc)[-600:], **({"deps_changed": deps} if deps else {}),
+                "next": f"dureh worktree repair --target {target}"}
+    if r["env"] == "rebuilt":
+        led.event("env.repaired", actor, wi, {"target": target, "after_promote": True,
+                                              **{k: v for k, v in r.items() if k != "hint"}})
+    return {"env": r["env"], **({"deps_changed": deps} if deps else {}), **({"forced": True} if force else {}),
+            **{k: r[k] for k in ("stale_interpreter", "stale_lock", "lock_check", "hint") if r.get(k)}}
 
 
 def _merge_conflicts(root: Path, target_head: str, branch: str) -> list[str] | None:

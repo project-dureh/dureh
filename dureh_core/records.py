@@ -37,16 +37,19 @@ EVENT_TO_STATUS = {
 TRANSITIONS = {
     None: {"proposed"},
     "proposed": {"approved", "stopped"},
-    "approved": {"dispatched", "stopped"},
+    "approved": {"dispatched", "staged", "stopped"},  # -> staged only for a checker item (STAGED_DIRECT)
     "dispatched": {"dispatched", "staged", "stopped", "rework"},  # re-dispatch resumes a finished agent's item
-    "staged": {"verified", "rework", "stopped"},
-    "rework": {"dispatched", "stopped"},
+    "staged": {"staged", "verified", "rework", "stopped"},  # release 81: re-staged at a new head (wi_stage)
+    "rework": {"dispatched", "staged", "stopped"},
     "verified": {"promoted", "rework", "stopped", "approved"},  # -> approved only by wi.reopened
     "promoted": {"reverted"},
     "stopped": {"approved"},
     "reverted": set(),
 }
 ONLY_BY = {("verified", "approved"): "wi.reopened"}  # transitions only one event type may make
+# release 81 (UR-20261023-02): staged without a dispatch only for an item owned by a role with the verify
+# capability that has no worktree (a read-only sweep with no worker; Ledger.checker_item)
+STAGED_DIRECT = {"approved", "rework"}
 ACTIVE = {"dispatched", "staged", "rework", "verified"}
 TITLE_CHARS = 40  # UR-20261008-02: a WI named to the Director carries a short title, at most this long
 WI_MENTION = re.compile(r"(?<![\w-])(WI-\d{4,})(?![\w-])(?!\s*\()")
@@ -227,6 +230,9 @@ class Ledger:
             target = EVENT_TO_STATUS[type_]
             if target not in TRANSITIONS.get(current, set()) or ONLY_BY.get((current, target), type_) != type_:
                 fail(f"invalid transition for {wi}: {current} -> {target} (event {type_})")
+            if target == "staged" and current in STAGED_DIRECT and not self.checker_item(wi):
+                fail(f"invalid transition for {wi}: {current} -> staged is only for an item owned by a role with the"
+                     " verify capability and without a worktree (a read-only sweep); dispatch it first")
         record = {
             "schema_version": SCHEMA_VERSION,
             "id": record_id or self._new_id(kind),
@@ -362,6 +368,11 @@ class Ledger:
             if target == "rework":
                 st["rework"] += 1
         return out
+
+    def checker_item(self, wi: str) -> bool:
+        """The item is owned by a role with the verify capability and has no worktree (release 81)."""
+        role = self.get("work-item", wi)["payload"].get("role")
+        return self.site.org.has(role, "verify") and not (self.site.worktrees / wi).is_dir()
 
     def wi_status(self, wi: str) -> dict:
         return self._project(self.events(wi)).get(wi, {"wi": wi, "status": None, "rework": 0, "updated": None})

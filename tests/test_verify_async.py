@@ -8,7 +8,7 @@ import json
 import subprocess
 import unittest
 
-from helpers import SiteCase
+from helpers import SiteCase, commit_work
 
 from dureh_core import ops
 from dureh_core import workflow as wf
@@ -52,6 +52,7 @@ class AsyncVerify(SiteCase):
         wf.wi_approve(self.s, "desk", wi, "ok")
         wf.dispatch_brief(self.s, wi, "pm-modules")  # creates the WI worktree
         self.led.event("wi.dispatched", "desk", wi, {"role": "py-writer", "brief": "1" * 16, "by": "desk"})
+        commit_work(self.s, wi)
         wf.wi_stage(self.s, "py-writer", wi, "done")
         return wi
 
@@ -415,6 +416,7 @@ class AsyncVerify(SiteCase):
         wf.wi_approve(self.s, "desk", wi, "ok")
         wf.dispatch_brief(self.s, wi, "pm-modules")
         self.led.event("wi.dispatched", "desk", wi, {"role": "py-writer", "brief": "1" * 16, "by": "desk"})
+        commit_work(self.s, wi)
         wf.wi_stage(self.s, "py-writer", wi, "long summary " * 400)
         for stale in (False, True):
             self.running()

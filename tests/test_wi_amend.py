@@ -4,7 +4,7 @@ import os
 import subprocess
 import unittest
 
-from helpers import SiteCase, hook
+from helpers import SiteCase, hook, commit_work
 
 from dureh_core import workflow as wf
 from dureh_core.records import Ledger
@@ -99,6 +99,7 @@ class Reopen(AmendCase):
         wf.dispatch_brief(self.s, wi, "desk")
         led = Ledger(self.s)
         led.event("wi.dispatched", "desk", wi, {"role": "doc-writer"})
+        commit_work(self.s, wi)
         wf.wi_stage(self.s, "desk", wi, "done")
         self.assertEqual(wf.verify_wi(self.s, "checker", wi)["result"], "pass")
         self.assertEqual(led.wi_status(wi)["status"], "verified")

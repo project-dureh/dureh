@@ -5,7 +5,7 @@ import contextlib
 import io
 import json
 
-from helpers import SiteCase
+from helpers import SiteCase, commit_work
 
 from dureh_core import ops, selftest, workday
 from dureh_core import workflow as wf
@@ -73,6 +73,7 @@ class DeskWake(SiteCase):
         wf.wi_approve(self.s, "desk", wi, "ok")
         wf.dispatch_brief(self.s, wi, "pm-modules")  # creates the WI worktree
         self.led.event("wi.dispatched", "desk", wi, {"role": "py-writer", "brief": "1" * 16, "by": "desk"})
+        commit_work(self.s, wi)
         wf.wi_stage(self.s, "py-writer", wi, "done")
         return wi
 

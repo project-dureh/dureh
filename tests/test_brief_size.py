@@ -1,7 +1,7 @@
 """UR-20260930-02: `wi new` rejects items whose brief could never be dispatched."""
 import unittest
 
-from helpers import SiteCase
+from helpers import SiteCase, commit_work
 
 from dureh_core import workflow as wf
 from dureh_core.records import Ledger
@@ -45,6 +45,7 @@ class BriefSizeAtCreation(SiteCase):
         wf.wi_approve(self.s, "desk", wi, "ok")
         wf.dispatch_brief(self.s, wi, "pm-modules")
         led.event("wi.dispatched", "desk", wi, {"role": "py-writer", "brief": "1" * 16, "by": "desk"})
+        commit_work(self.s, wi)
         wf.wi_stage(self.s, "py-writer", wi, "added g() " * 50)
         r = wf.dispatch_brief(self.s, wi, "pm-modules", as_role="checker")
         prep = [e for e in led.events(wi) if e["type"] == "dispatch.prepared"][-1]["payload"]

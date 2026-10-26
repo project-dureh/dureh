@@ -30,6 +30,28 @@ dureh wi amend --wi <WI> --memo "<Director's words>" --requirements notes/<file>
 See docs/workday.md ("What the plan approval covers"): a verified item that is not promoted goes back to
 `approved` with a `wi.reopened` event; promoted items never change.
 
+## Staging needs a commit; re-staging at a new head (release 81, UR-20261023-01)
+
+Measured 2026-10-23 at a company site: `wi stage` accepted two items whose branch head was still the dispatch base
+(nothing committed yet), and the worker's later commit could not be staged (`staged -> staged` was refused), so
+the stage record named the base while verify measured the commit.
+
+- `wi stage` refuses a WI worktree whose `HEAD` equals its dispatch base (`dispatch.prepared` base, or the base
+  of a later `wi amend --rebase`): "commit the work on the WI branch first". Nothing is recorded.
+- A staged item whose head moved since its last `wi.staged` is staged again at the new head (`staged -> staged`,
+  the new `wi.staged` carries `restaged_from`); the same head is refused ("already staged"). A verify job
+  submitted at the old head is superseded as before (release 61).
+
+## A read-only sweep is staged without a dispatch (release 81, UR-20261023-02)
+
+An item owned by a role with the verify capability (the checker) that has no worktree, for example a read-only
+readiness sweep, has no worker and no worker output. Before release 81 it reached `staged` only through
+`dispatched`, which only a member run records, so each sweep (and each rework after a FAIL) cost a no-op codex
+job. Now `wi stage --wi <WI>` takes such an item from `approved` and from `rework` (the ledger allows
+`approved -> staged` and `rework -> staged` for it only; any other item still needs a dispatch). The desk runs
+`wi stage`, then `dispatch brief --wi <WI> --role checker` and the checker run once. Re-staging a staged sweep is
+refused (it has no head to move).
+
 ## Gate 2 and a merge conflict: `wi.promote-failed` (release 60, UR-20261013-01)
 
 Before release 60 a `wi promote` whose merge conflicted left the target's main tree mid-merge (unmerged files,
@@ -54,6 +76,21 @@ with a worktree:
   the WI again: the worker rebases onto that base and resolves the conflict, the checker verifies, and the desk
   promotes. `wi.promote-failed` changes no status (it is not in the lifecycle projection); the item is verified
   until it is re-opened.
+
+## Gate 2 and the main tree's environment (release 81)
+
+Measured 2026-10-23 at a company site: a module's main `.venv` no longer matched the module after a promotion,
+twice in one day, and the desk rebuilt it by hand (`worktree repair --target`). Now, after a successful merge
+into a module or project whose config entry has `env_rebuild` and whose main tree has a `.venv`, `wi promote`
+checks that environment as `worktree repair --target` does: the interpreter, and `uv sync --check` when
+env_rebuild is one `uv sync` (release 51). A stale environment is rebuilt from scratch with env_rebuild (one
+`env.repaired` with `after_promote: true`); a matching one is left alone. When env_rebuild is not a `uv sync`
+(nothing to ask), the environment is rebuilt only if the merge changed a top-level dependency file
+(`pyproject.toml`, `uv.lock`, `setup.py`, `setup.cfg`, `requirements*.txt`). The result is in the `wi.promoted`
+payload as `env` (`ok`, `rebuilt` or `error`, with `deps_changed`, `stale_lock`, `lock_check`) and on the
+`main env:` line `wi promote` prints. A failed rebuild does not undo the promotion: `env: error` names the
+repair (`dureh worktree repair --target <target>`). Without env_rebuild, or without a main `.venv` (none is
+created here), nothing runs.
 
 ## WI titles for the Director (UR-20261008-02)
 

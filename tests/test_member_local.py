@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from member_helpers import JOB_ID, MemberCase
+from helpers import commit_work
 
 from dureh_core import members, office_hours, sessions
 from dureh_core.members import local
@@ -381,6 +382,7 @@ class LocalMember(MemberCase):
         """Release 66 (UR-20261015-08): a local rework that correctly changed nothing re-stages the same head."""
         self.serve()
         self.noop_run()
+        commit_work(self.s, self.wi)
         first = self.wf.wi_stage(self.s, "py-local", self.wi, "first staging")  # the head staged before
         self.led.event("rework.requested", "checker", self.wi, {"run": "run-x", "reason": "codex FAIL"})
         self.wf.dispatch_brief(self.s, self.wi, "pm-modules")

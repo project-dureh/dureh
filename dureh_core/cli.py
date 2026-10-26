@@ -223,6 +223,12 @@ def cmd_wi_promote(a):
 
     ev = wi_promote(_site(a), _actor(a), a.wi, a.memo)
     print(f"{a.wi} promoted: merge {ev['payload'].get('merge')}; compensation: {ev['payload']['compensation']}")
+    env = ev["payload"].get("env")
+    if env:  # release 81: the target main tree's environment after the merge
+        print(f"main env: {env['env']}" + (f" (dependency files changed: {', '.join(env['deps_changed'])})"
+                                            if env.get("deps_changed") else "")
+              + (f"; {env['error']}; next: {env['next']}" if env["env"] == "error" else "")
+              + (f"; {env['hint']}" if env.get("hint") else ""))
 
 
 def cmd_dispatch_brief(a):

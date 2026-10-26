@@ -170,3 +170,11 @@ def hook(site, **data):
 
 def denied(out) -> bool:
     return bool(out) and out.get("hookSpecificOutput", {}).get("permissionDecision") == "deny"
+
+
+def commit_work(site, wi, message="work") -> str:
+    """An empty commit on the WI branch, so the head is past its dispatch base (release 81: `wi stage` refuses a
+    head equal to the base); returns the new head."""
+    wt = site.worktrees / wi
+    subprocess.run(["git", "commit", "--allow-empty", "-qm", message], cwd=wt, check=True, capture_output=True)
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt, check=True, capture_output=True, text=True).stdout.strip()
