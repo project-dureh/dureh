@@ -378,6 +378,9 @@ def config_errors(site: Site, config: dict | None = None, startup: Path | None =
             if v is not None and not isinstance(v, bool):
                 out.append(f"config push.{key} must be true or false (release 58; default false)")
         out += push_remote_errors(push_cfg or {})
+    for i, e in enumerate(conf.get("modules") or []):
+        if isinstance(e, dict) and "public" in e and not isinstance(e["public"], bool):
+            out.append(f"config modules[{i}].public must be true or false (release 82; default false)")
     from .site import routing_errors
 
     out += routing_errors(conf)

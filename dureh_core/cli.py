@@ -221,7 +221,7 @@ def cmd_wi_stage(a):
 def cmd_wi_promote(a):
     from .workflow import wi_promote
 
-    ev = wi_promote(_site(a), _actor(a), a.wi, a.memo)
+    ev = wi_promote(_site(a), _actor(a), a.wi, a.memo, a.public_summary)
     print(f"{a.wi} promoted: merge {ev['payload'].get('merge')}; compensation: {ev['payload']['compensation']}")
     env = ev["payload"].get("env")
     if env:  # release 81: the target main tree's environment after the merge
@@ -1126,6 +1126,8 @@ def parser() -> argparse.ArgumentParser:
     x = add(wi, "promote", cmd_wi_promote, "Gate 2: merge a verified work item (desk); a merge conflict refuses before the merge")
     x.add_argument("--wi", required=True)
     x.add_argument("--memo", required=True)
+    x.add_argument("--public-summary", help="release 82, a public module only (config modules[].public): the merge"
+                   " commit message `<type>: <short English summary>` instead of the WI's label")
     x.add_argument("--actor")
 
     d = sub.add_parser("dispatch", help="dispatch contract").add_subparsers(dest="dispatch_command", required=True)
