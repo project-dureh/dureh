@@ -339,11 +339,15 @@ def _one_line(text: str, limit: int = 300) -> str:
 
 
 def _linked(site: Site) -> dict[str, dict]:
-    """{item_id: {wi, layer}} from the records of this site's board items."""
+    """{item_id: {wi, url, layer, ask, fail_closed}} from the records of this site's board items. Release 81
+    (finding cc81a566): an item made by `item ask` carries `ask: true`; its `wi` is the WI the ask is about, not
+    that WI's board link (linked_item skips it for --wi)."""
     out: dict[str, dict] = {}
     for e in Ledger(site).events():
         if e["type"] in (ADDED, ASKED, UPDATED) and e["payload"].get("item_id"):
             row = out.setdefault(e["payload"]["item_id"], {})
+            if e["type"] == ASKED:
+                row["ask"] = True
             if e["wi"]:
                 row["wi"] = e["wi"]
             row["url"] = e["payload"].get("url") or row.get("url")
@@ -836,11 +840,16 @@ def _edit(cfg: dict, meta: dict, item_id: str, fields: dict) -> None:
 
 
 def linked_item(site: Site, wi: str | None = None, url: str | None = None) -> dict:
-    """The board item recorded for a WI (or an issue URL): {item_id, url, wi, layer}."""
-    hits = [(iid, row) for iid, row in _linked(site).items()
-            if (wi and row.get("wi") == wi) or (url and row.get("url") == url.strip())]
+    """The board item recorded for a WI (or an issue URL): {item_id, url, wi, layer}. Release 81 (finding
+    cc81a566): a decision ask about the WI (`item ask --wi`) is never the WI's item, so `item set/close/comment --wi`
+    do not move or close the ask; the ask is named by `--url`."""
+    links = _linked(site)
+    hits = [(iid, row) for iid, row in links.items()
+            if (wi and row.get("wi") == wi and not row.get("ask")) or (url and row.get("url") == url.strip())]
     if not hits:
-        fail(f"no board item is recorded for {wi or url}; `dureh github item add --wi <WI>` links one")
+        asks = [row.get("url") for row in links.values() if wi and row.get("wi") == wi and row.get("ask")]
+        also = (f" (the decision ask {', '.join(asks)} is not the WI's item; name it with --url)" if asks else "")
+        fail(f"no board item is recorded for {wi or url}{also}; `dureh github item add --wi <WI>` links one")
     iid, row = hits[-1]
     return {"item_id": iid, **row}
 
@@ -1004,14 +1013,30 @@ def item_close(site: Site, actor: str, wi: str | None = None, url: str | None = 
     return {"closed": True, "wi": wi, "url": target}
 
 
+def _sweep_keeps(it: dict, fail_closed_urls: set[str], asks: set[str]) -> bool:
+    """Whether the sweep leaves a Done item open: a HOLD_LABELS label; release 81 (finding cc81a566): a fail-closed
+    ask (label, or recorded fail-closed) is never closed automatically, and a decision ask (`kind:decision`, or
+    recorded by `item ask`) stays open until its Decision is set."""
+    from .records import FAIL_CLOSED_LABEL
+
+    labels = set(it.get("labels") or [])
+    if labels & set(HOLD_LABELS) or FAIL_CLOSED_LABEL in labels or it["url"] in fail_closed_urls:
+        return True
+    return (DECISION_LABEL in labels or it["url"] in asks) and not it.get("decision")
+
+
 def sweep(site: Site, actor: str, dry_run: bool = False) -> dict:
     """#34: close every open issue of the company's organization whose board Status is Done and that carries none of
-    HOLD_LABELS (day close runs it); records github.sweep.done {closed, kept}."""
+    HOLD_LABELS (day close runs it); records github.sweep.done {closed, kept}. Release 81: a decision ask without a
+    Decision and any fail-closed ask are kept (_sweep_keeps)."""
     _require_desk(site, actor)
     cfg = config(site)
     done = [it for it in board(cfg)["items"] if it["type"] == "Issue" and it["state"] == "OPEN"
             and it["status"] == "Done" and str(it.get("repo") or "").startswith(cfg["org"] + "/")]
-    kept = [it["url"] for it in done if set(it.get("labels") or []) & set(HOLD_LABELS)]
+    links = _linked(site).values()
+    fail_closed = {row["url"] for row in links if row.get("fail_closed") and row.get("url")}
+    asks = {row["url"] for row in links if row.get("ask") and row.get("url")}
+    kept = [it["url"] for it in done if _sweep_keeps(it, fail_closed, asks)]
     todo = [it["url"] for it in done if it["url"] not in kept]
     if not dry_run:
         for url in todo:

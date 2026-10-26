@@ -677,6 +677,67 @@ class Items(GithubBase):
         self.assertEqual(code, 2)
         self.assertIn("only the desk", err)
 
+    def ask(self, *extra, wi="WI-0001"):
+        body = self.tmp / "ask.md"
+        body.write_text("Which order?")
+        code, out, err = self.run_cli("item", "ask", "--title", "Order", "--body-file", str(body), "--options", "A",
+                                      "B", *(["--wi", wi] if wi else []), *THREE, *extra)
+        self.assertEqual(code, 0, err)
+        return json.loads(out)
+
+    def test_an_ask_about_a_wi_does_not_take_its_board_link(self):
+        """Release 81 (finding cc81a566): ask --wi, then item set --wi to Done and item close --wi: the WI's own item
+        moves and closes, the ask item is untouched (it went In progress, then Done at promote, before)."""
+        self.run_cli("item", "add", "--wi", "WI-0001")  # issue 11, item PVTI_11
+        ask = self.ask()  # issue 12, item PVTI_12
+        self.assertEqual(ask["item_id"], "PVTI_12")
+        self.gh.calls.clear()
+        code, out, err = self.run_cli("item", "set", "--wi", "WI-0001", "--status", "Done")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["item_id"], "PVTI_11")
+        code, _, err = self.run_cli("item", "close", "--wi", "WI-0001")
+        self.assertEqual(code, 0, err)
+        code, _, err = self.run_cli("item", "comment", "--wi", "WI-0001", stdin="promoted")
+        self.assertEqual(code, 0, err)
+        touched = [c["argv"] for c in self.gh.calls if c["argv"][1:3] in (["project", "item-edit"], ["issue", "close"],
+                                                                         ["issue", "comment"])]
+        self.assertEqual(len(touched), 3)
+        self.assertFalse([a for a in touched if "PVTI_12" in a or ask["url"] in a], "the ask item is untouched")
+        self.assertTrue(all("PVTI_11" in a or f"https://github.com/{ORG}/office/issues/11" in a for a in touched), touched)
+        code, out, err = self.run_cli("item", "set", "--url", ask["url"], "--status", "In progress")
+        self.assertEqual((code, json.loads(out)["item_id"]), (0, "PVTI_12"), err)  # the ask is named by --url
+
+    def test_a_wi_with_only_an_ask_has_no_board_link(self):
+        ask = self.ask()
+        self.gh.calls.clear()
+        code, _, err = self.run_cli("item", "set", "--wi", "WI-0001", "--status", "Done")
+        self.assertEqual(code, 2)
+        self.assertIn(f"the decision ask {ask['url']} is not the WI's item; name it with --url", err)
+        self.assertEqual(self.gh.calls, [], "nothing on the board changed")
+
+    def test_sweep_keeps_undecided_and_fail_closed_asks(self):
+        """Release 81 (finding cc81a566): the sweep closed a fail-closed decision ask with an empty Decision."""
+        plain = self.ask(wi=None)["number"]  # 11: recorded ask
+        closed_ask = self.ask("--fail-closed", "--otherwise", "답이 올 때까지 기다립니다.", wi=None)["number"]  # 12: recorded fail-closed ask
+        u = lambda n: f"https://github.com/{ORG}/office/issues/{n}"
+        self.gh.items = [
+            node("I11", plain, "recorded ask, no Decision, label gone", status="Done"),
+            node("I12", closed_ask, "recorded fail-closed, decided, label gone", status="Done", decision="Approved"),
+            node("I20", 20, "decision ask, empty Decision", status="Done", labels=["kind:decision", "fail-closed"]),
+            node("I21", 21, "decision ask, empty Decision", status="Done", labels=["kind:decision"]),
+            node("I22", 22, "decision ask, decided", status="Done", labels=["kind:decision"], decision="Option 1"),
+            node("I23", 23, "fail-closed, decided", status="Done", labels=["kind:decision", "fail-closed"],
+                 decision="Approved"),
+            node("I24", 24, "plain work", status="Done")]
+        self.gh.calls.clear()
+        code, out, err = self.run_cli("sweep")
+        self.assertEqual(code, 0, err)
+        res = json.loads(out)
+        self.assertEqual(res["closed"], [u(22), u(24)])
+        self.assertEqual(res["kept"], [u(plain), u(closed_ask), u(20), u(21), u(23)])
+        closed = [c["argv"][3] for c in self.gh.calls if c["argv"][1:3] == ["issue", "close"]]
+        self.assertEqual(closed, [u(22), u(24)])
+
     def test_ask_assigns_the_director_and_marks(self):
         body = self.tmp / "ask.md"
         body.write_text("Which order for the next two items?")
