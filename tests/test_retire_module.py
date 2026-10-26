@@ -103,6 +103,16 @@ class RetireModule(SiteCase):
         with self.assertRaisesRegex(DurehError, f"push it first \\(standing fast-forward push: `dureh push --repo {self.mod}"
                                                 " --remote origin --ref main`\\)"):
             sitelinks.retire_module(self.site(), "desk", "demo")
+        # release 82: an object entry is compared by url; its own standing_ff and branches decide the hint
+        cfg["push"] = {"allowed_remotes": [{"url": str(self.src), "branches": ["golden"], "standing_ff": True}],
+                       "standing_ff": True}
+        (self.site_root / "config.json").write_text(json.dumps(cfg))
+        with self.assertRaisesRegex(DurehError, "push it first \\(ask the Director"):
+            sitelinks.retire_module(self.site(), "desk", "demo")
+        cfg["push"]["allowed_remotes"][0]["branches"] = ["main"]
+        (self.site_root / "config.json").write_text(json.dumps(cfg))
+        with self.assertRaisesRegex(DurehError, "push it first \\(standing fast-forward push"):
+            sitelinks.retire_module(self.site(), "desk", "demo")
 
     def test_refuses_unreachable_source(self):
         cfg = self.config()

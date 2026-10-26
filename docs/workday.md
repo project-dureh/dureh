@@ -114,7 +114,9 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    having chosen both ("1번과 2번 복수 선택"): the plan's Director actions (step 1) and the **standing fast-forward
    push**: with config `push.standing_ff` true, `dureh push --repo <path> --remote <remote> --ref <branch>` without
    `--approval` pushes when the remote is in `push.allowed_remotes`, the branch exists there and its tip is an
-   ancestor of the pushed revision (a new branch only with `push.standing_ff_new_branches`); nothing is ever forced,
+   ancestor of the pushed revision (a new branch only with `push.standing_ff_new_branches`; release 82: an object
+   entry in `push.allowed_remotes` limits one remote's branches, standing switch, new branches and tags,
+   docs/config.md); nothing is ever forced,
    the event carries `approval: "standing-ff", fast_forward: true`, and a non-fast-forward is refused naming the
    approval path (`dureh push --approve ...`, then `--approval <decision>`). `site retire-module`'s "push it first"
    refusal names the same way out (docs/config.md).

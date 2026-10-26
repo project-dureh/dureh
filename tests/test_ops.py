@@ -311,6 +311,126 @@ class Ops(SiteCase):
         self.assertTrue(any("push.standing_ff must be true or false (release 58" in e for e in errs), errs)
         self.assertTrue(any("push.standing_ff_new_branches must be true or false" in e for e in errs), errs)
 
+    def _rule_fixture(self, site_wide=None, **rule):
+        """Release 82: `origin` allowlisted as an object entry {url: bare, **rule} (plus site-wide push keys)."""
+        from dureh_core.site import Site
+        _s, repo, bare = self._push_fixture()
+        cfg = json.loads(self.s.config_path.read_text())
+        cfg["push"] = {"allowed_remotes": [{"url": str(bare), **rule}], **(site_wide or {})}
+        self.s.config_path.write_text(json.dumps(cfg))
+        return Site(self.site_root), repo, bare
+
+    def test_object_rule_refuses_a_branch_outside_its_list_even_with_a_decision(self):
+        s, repo, bare = self._rule_fixture(branches=["golden", "integrate/*"], standing_ff=True)
+        before = self._remote_tip(bare)
+        self._commit(repo, "def f():\n    return 2\n")
+        with self.assertRaisesRegex(DurehError, "branch main is outside config push.allowed_remotes rule for .*"
+                                                "pull request the Director merges, or a config change"):
+            ops.push(s, "desk", str(repo), "origin", "main", None)
+        with self.assertRaisesRegex(DurehError, "branch main is outside.*nothing was recorded"):
+            ops.push_approve(s, "desk", str(repo), "origin", "main", "approved")
+        # a decision recorded before the limit existed does not open the branch either
+        cfg = json.loads(s.config_path.read_text())
+        rules = cfg["push"]["allowed_remotes"]
+        cfg["push"]["allowed_remotes"] = [str(bare)]
+        s.config_path.write_text(json.dumps(cfg))
+        from dureh_core.site import Site
+        dec = ops.push_approve(Site(self.site_root), "desk", str(repo), "origin", "main", "approved")
+        cfg["push"]["allowed_remotes"] = rules
+        s.config_path.write_text(json.dumps(cfg))
+        with self.assertRaisesRegex(DurehError, "even with a Director decision"):
+            ops.push(Site(self.site_root), "desk", str(repo), "origin", "main", dec["id"])
+        self.assertEqual(self._remote_tip(bare), before)
+        self.assertEqual([e for e in Ledger(s).events() if e["type"].startswith("push.")], [])
+
+    def test_object_rule_standing_ff_inside_branches_and_records_the_rule(self):
+        s, repo, bare = self._rule_fixture(branches=["main"], standing_ff=True)
+        rev = self._commit(repo, "def f():\n    return 2\n")
+        ev = ops.push(s, "desk", str(repo), "origin", "main", None)
+        self.assertEqual(self._remote_tip(bare), rev)
+        self.assertEqual(ev["payload"]["approval"], "standing-ff")
+        self.assertEqual(ev["payload"]["rule"], {"url": str(bare), "form": "object", "branches": ["main"],
+                                                 "standing_ff": True, "new_branches": [], "tags": False})
+        self.assertEqual(ops.config_errors(s), [])
+        st = ops.status(s)
+        self.assertEqual(st["push"], [f"{bare}: branches main; standing fast-forward on; new branches none; tags refused"])
+        self.assertIn(f"Push: {bare}: branches main", ops.render_status(st))
+
+    def test_object_rule_standing_ff_defaults_off_whatever_the_site_says(self):
+        s, repo, bare = self._rule_fixture(site_wide={"standing_ff": True, "standing_ff_new_branches": True})
+        self._commit(repo, "def f():\n    return 2\n")
+        with self.assertRaisesRegex(DurehError, "--approval DECISION is required .*rule for .* has standing_ff off"):
+            ops.push(s, "desk", str(repo), "origin", "main", None)
+        dec = ops.push_approve(s, "desk", str(repo), "origin", "main", "approved")
+        ev = ops.push(s, "desk", str(repo), "origin", "main", dec["id"])  # no branches: every branch with a decision
+        self.assertEqual(ev["payload"]["rule"]["branches"], None)
+        self.assertEqual(self._remote_tip(bare), ev["payload"]["revision"])
+
+    def test_object_rule_new_branches(self):
+        s, repo, bare = self._rule_fixture(branches=["main", "integrate/*", "feature"], standing_ff=True,
+                                           new_branches=["integrate/*"])
+        subprocess.run(["git", "branch", "-q", "feature"], cwd=repo, check=True)
+        subprocess.run(["git", "branch", "-q", "integrate/a"], cwd=repo, check=True)
+        with self.assertRaisesRegex(DurehError, "new branch.*has new_branches integrate/\\*"):
+            ops.push(s, "desk", str(repo), "origin", "feature", None)
+        ev = ops.push(s, "desk", str(repo), "origin", "integrate/a", None)
+        self.assertTrue(ev["payload"]["new_branch"])
+        self.assertEqual(self._remote_tip(bare, "integrate/a"), ev["payload"]["revision"])
+        # a decision creates a listed branch the standing push may not
+        dec = ops.push_approve(s, "desk", str(repo), "origin", "feature", "approved")
+        ops.push(s, "desk", str(repo), "origin", "feature", dec["id"])
+        self.assertEqual(self._remote_tip(bare, "feature"), ev["payload"]["revision"])
+
+    def test_object_rule_tags(self):
+        s, repo, bare = self._rule_fixture(standing_ff=True)
+        subprocess.run(["git", "tag", "v1"], cwd=repo, check=True)
+        with self.assertRaisesRegex(DurehError, "refs/tags/v1 is a tag and .* has tags false"):
+            ops.push(s, "desk", str(repo), "origin", "refs/tags/v1", None)
+        with self.assertRaisesRegex(DurehError, "tags false"):
+            ops.push_approve(s, "desk", str(repo), "origin", "refs/tags/v1", "approved")
+        cfg = json.loads(s.config_path.read_text())
+        cfg["push"]["allowed_remotes"][0]["tags"] = True
+        s.config_path.write_text(json.dumps(cfg))
+        from dureh_core.site import Site
+        s = Site(self.site_root)
+        with self.assertRaisesRegex(DurehError, "a tag push needs a Director decision"):
+            ops.push(s, "desk", str(repo), "origin", "refs/tags/v1", None)
+        dec = ops.push_approve(s, "desk", str(repo), "origin", "refs/tags/v1", "approved")
+        ev = ops.push(s, "desk", str(repo), "origin", "refs/tags/v1", dec["id"])
+        self.assertEqual(ev["payload"]["ref"], "refs/tags/v1")
+        self.assertEqual(self._remote_tip(bare, "v1"), ev["payload"]["revision"])
+
+    def test_string_entries_keep_their_meaning_next_to_object_entries(self):
+        s, repo, bare = self._push_fixture(standing_ff=True)
+        cfg = json.loads(s.config_path.read_text())
+        cfg["push"]["allowed_remotes"] = [{"url": "git@example.org:other.git", "branches": ["x"]}, str(bare)]
+        s.config_path.write_text(json.dumps(cfg))
+        from dureh_core.site import Site
+        s = Site(self.site_root)
+        rev = self._commit(repo, "def f():\n    return 2\n")
+        ev = ops.push(s, "desk", str(repo), "origin", "main", None)
+        self.assertEqual(self._remote_tip(bare), rev)
+        self.assertEqual(ev["payload"]["rule"]["form"], "string")
+        self.assertIsNone(ev["payload"]["rule"]["branches"])
+        self.assertIn(f"{bare}: all branches; standing fast-forward on (site-wide)", ops.status(s)["push"])
+
+    def test_push_object_entry_shape_is_checked(self):
+        s, _repo, _bare = self._push_fixture()
+        cfg = json.loads(s.config_path.read_text())
+        cfg["push"]["allowed_remotes"] = [{"branches": "main"}, {"url": "u", "standing_ff": "yes", "tags": 1,
+                                                                 "new_branches": [3], "deny": []}, 7]
+        s.config_path.write_text(json.dumps(cfg))
+        from dureh_core.site import Site
+        errs = ops.config_errors(Site(self.site_root))
+        for want in ("allowed_remotes[0].url is required", "allowed_remotes[0].branches must be a list",
+                     "allowed_remotes[1].standing_ff must be true or false", "allowed_remotes[1].tags must be true",
+                     "allowed_remotes[1].new_branches must be a list", "allowed_remotes[1] has unknown key(s) deny",
+                     "allowed_remotes[2] must be a remote URL string or an object"):
+            self.assertTrue(any(want in e for e in errs), (want, errs))
+        cfg["push"]["allowed_remotes"] = "u"
+        s.config_path.write_text(json.dumps(cfg))
+        self.assertTrue(any("allowed_remotes must be a list" in e for e in ops.config_errors(Site(self.site_root))))
+
     def test_slurm_submit_records_run_with_fake_scheduler(self):
         fake = self.tmp / "fakebin"
         fake.mkdir()

@@ -1313,7 +1313,8 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--dry-run", action="store_true")
     x.add_argument("--actor")
     x = add(sub, "push", cmd_push, "push an approved revision to an allowlisted remote; without --approval only a "
-                                   "fast-forward of an existing branch under config push.standing_ff (release 58)")
+                                   "fast-forward of an existing branch under config push.standing_ff (release 58) or the remote's "
+                                   "push.allowed_remotes rule (release 82: branches, standing_ff, new_branches, tags)")
     x.add_argument("--repo", required=True)
     x.add_argument("--remote", required=True)
     x.add_argument("--ref", required=True)
