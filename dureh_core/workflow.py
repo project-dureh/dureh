@@ -1093,10 +1093,17 @@ def dispatch_stop(site: Site, actor: str, wi: str, reason: str) -> dict:
 
 # --------------------------------------------------------------- staging
 def wi_stage(site: Site, actor: str, wi: str, summary: str) -> dict:
+    """Mark committed work ready for the checker.
+
+    Release 81 (UR-20261023-01 and its findings 1368f671/cc00d3b9): a worktree whose head is still its dispatch
+    base (nothing committed past it) is refused, so no `wi.staged` names the base; and a staged item whose head
+    moved since its last `wi.staged` (the worker committed after staging) is staged again at the new head
+    (staged -> staged), while the same head is refused."""
     led = Ledger(site)
     rec = led.get("work-item", wi)
     if actor != rec["payload"]["role"] and actor != "desk":
         fail(f"{wi} is owned by {rec['payload']['role']}, not {actor}")
+    st = led.wi_status(wi)["status"]
     head = None
     wt = site.worktrees / wi
     if wt.is_dir():
@@ -1104,7 +1111,18 @@ def wi_stage(site: Site, actor: str, wi: str, summary: str) -> dict:
         dirty = git(["status", "--porcelain"], wt)
         if dirty:
             fail(f"{wi} worktree has uncommitted changes; commit them on its branch before staging:\n{dirty}")
-    return led.event("wi.staged", actor, wi, {"summary": summary[:4000], "head": head})
+        base = _base_of(site, wi)
+        if base and head == base:
+            fail(f"{wi}: the branch head {head[:12]} is its dispatch base (nothing committed past it); commit the"
+                 f" work on the WI branch in {wt} first, then run `wi stage` again. Nothing was recorded.")
+    if st == "staged":
+        last = [e for e in led.events(wi) if e["type"] == "wi.staged"][-1]
+        if last["payload"].get("head") == head:
+            at = f"head {head[:12]}" if head else "no worktree"
+            fail(f"{wi} is already staged at {at}; commit the new work first (re-staging records a new head only)")
+    return led.event("wi.staged", actor, wi, {"summary": summary[:4000], "head": head,
+                                              **({"restaged_from": last["id"]} if st == "staged" else {})})
+
 
 
 # ------------------------------------------------------------- verify WI

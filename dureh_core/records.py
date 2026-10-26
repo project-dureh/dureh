@@ -39,7 +39,7 @@ TRANSITIONS = {
     "proposed": {"approved", "stopped"},
     "approved": {"dispatched", "stopped"},
     "dispatched": {"dispatched", "staged", "stopped", "rework"},  # re-dispatch resumes a finished agent's item
-    "staged": {"verified", "rework", "stopped"},
+    "staged": {"staged", "verified", "rework", "stopped"},  # release 81: re-staged at a new head (wi_stage)
     "rework": {"dispatched", "stopped"},
     "verified": {"promoted", "rework", "stopped", "approved"},  # -> approved only by wi.reopened
     "promoted": {"reverted"},

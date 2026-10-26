@@ -30,6 +30,18 @@ dureh wi amend --wi <WI> --memo "<Director's words>" --requirements notes/<file>
 See docs/workday.md ("What the plan approval covers"): a verified item that is not promoted goes back to
 `approved` with a `wi.reopened` event; promoted items never change.
 
+## Staging needs a commit; re-staging at a new head (release 81, UR-20261023-01)
+
+Measured 2026-10-23 at a company site: `wi stage` accepted two items whose branch head was still the dispatch base
+(nothing committed yet), and the worker's later commit could not be staged (`staged -> staged` was refused), so
+the stage record named the base while verify measured the commit.
+
+- `wi stage` refuses a WI worktree whose `HEAD` equals its dispatch base (`dispatch.prepared` base, or the base
+  of a later `wi amend --rebase`): "commit the work on the WI branch first". Nothing is recorded.
+- A staged item whose head moved since its last `wi.staged` is staged again at the new head (`staged -> staged`,
+  the new `wi.staged` carries `restaged_from`); the same head is refused ("already staged"). A verify job
+  submitted at the old head is superseded as before (release 61).
+
 ## Gate 2 and a merge conflict: `wi.promote-failed` (release 60, UR-20261013-01)
 
 Before release 60 a `wi promote` whose merge conflicted left the target's main tree mid-merge (unmerged files,

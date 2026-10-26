@@ -3,7 +3,7 @@ one line (only that line counts toward the 2048-byte limit); dispatch and verify
 file changed or vanished since it was pinned, until it is restored or re-pinned with `wi amend --requirements`."""
 import os
 
-from helpers import SiteCase
+from helpers import SiteCase, commit_work
 
 from dureh_core import workflow as wf
 from dureh_core.cli import main
@@ -41,6 +41,7 @@ class RequirementsFile(SiteCase):
         wi = self.new()
         wf.dispatch_brief(self.s, wi, "desk")
         self.led.event("wi.dispatched", "desk", wi, {"role": "doc-writer"})
+        commit_work(self.s, wi)
         wf.wi_stage(self.s, "desk", wi, "done")
         self.req.write_text("R1 changed\n")
         n = len(self.led.load("run"))

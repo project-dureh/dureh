@@ -3,7 +3,7 @@ every check matches config `checks.local_allow`, so a trivial grep check is not 
 spawns. Without the key nothing changes. Fake sbatch/sacct only."""
 import os
 
-from helpers import SiteCase
+from helpers import SiteCase, commit_work
 
 from test_verify_slurm import VerifyChecksJob
 
@@ -44,6 +44,7 @@ class LocalChecks(SiteCase):
         wf.wi_approve(self.s, "desk", wi, "ok")
         wf.dispatch_brief(self.s, wi, "pm-modules")
         self.led.event("wi.dispatched", "desk", wi, {"role": "py-writer", "brief": "1" * 16, "by": "desk"})
+        commit_work(self.s, wi)
         wf.wi_stage(self.s, "py-writer", wi, "done")
         return wi
 
