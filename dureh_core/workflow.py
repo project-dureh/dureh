@@ -2163,7 +2163,7 @@ def wi_promote(site: Site, actor: str, wi: str, memo: str) -> dict:
                                                     "compensation": "revert each child merge; append wi.reverted"},
                          [dec["id"]])
     wt = site.worktrees / wi
-    merge = None
+    merge = env = None
     if wt.is_dir():
         head = git(["rev-parse", "HEAD"], wt)
         if head != verified["payload"].get("head") or git(["status", "--porcelain", "--untracked-files=no"], wt):
@@ -2189,14 +2189,46 @@ def wi_promote(site: Site, actor: str, wi: str, memo: str) -> dict:
             git(["merge", "--abort"], root, check=False)
             _promote_failed(led, actor, wi, rec, root, base, head, target_head, sorted(unmerged), "merge", str(exc))
         merge = git(["rev-parse", "HEAD"], root)
+        env = _promote_env(site, led, actor, wi, root, rec["payload"]["target"], target_head, merge)
     dec = led.append("decision", "gate2", actor, wi, {"subject": f"Gate 2 {wi}", "disposition": "approve",
                                                         "by": "desk", "memo": memo,
                                                         "binding": {"head": verified["payload"].get("head"), "merge": merge}})
     ev = led.event("wi.promoted", actor, wi, {"merge": merge, "decision": dec["id"],
                                               "action_class": "compensatable" if merge else "reversible",
-                                              "compensation": f"git revert -m 1 {merge}" if merge else "append wi.reverted"},
+                                              "compensation": f"git revert -m 1 {merge}" if merge else "append wi.reverted",
+                                              **({"env": env} if env else {})},
                    [dec["id"]])
     return ev
+
+
+DEPENDENCY_FILES = re.compile(r"^(?:pyproject\.toml|uv\.lock|setup\.py|setup\.cfg|requirements[^/]*\.txt)$")
+
+
+def _promote_env(site: Site, led: Ledger, actor: str, wi: str, root: Path, target: str, before: str,
+                 after: str) -> dict | None:
+    """Release 81 (finding c3350543: a module's main `.venv` was stale after every promote and the desk rebuilt it
+    by hand): after the merge, the main tree's environment is checked as `worktree repair --target` checks it
+    (_repair_env: interpreter, and `uv sync --check` when env_rebuild is a `uv sync`) and rebuilt only when stale;
+    when the merge changed a top-level dependency file (pyproject.toml, uv.lock, setup.py/cfg, requirements*.txt)
+    and env_rebuild is not a `uv sync` (no lock check to ask), it is rebuilt. Only for a module or project target
+    with env_rebuild whose main tree has a `.venv` (none is created here); else None and nothing runs. A failed
+    rebuild does not undo the promotion (the merge stands): the result says `error` and names the repair."""
+    cmd = _env_rebuild_command(site, target) if _env_target(target) else None
+    if not cmd or not (root / ".venv").is_dir():
+        return None
+    deps = sorted(n for n in git(["diff", "--name-only", f"{before}..{after}"], root, check=False).splitlines()
+                  if DEPENDENCY_FILES.match(n))
+    force = bool(deps) and lock_check_command(cmd) is None
+    try:
+        r = _repair_env(site, root, target, force=force)
+    except DurehError as exc:
+        return {"env": "error", "error": str(exc)[-600:], **({"deps_changed": deps} if deps else {}),
+                "next": f"dureh worktree repair --target {target}"}
+    if r["env"] == "rebuilt":
+        led.event("env.repaired", actor, wi, {"target": target, "after_promote": True,
+                                              **{k: v for k, v in r.items() if k != "hint"}})
+    return {"env": r["env"], **({"deps_changed": deps} if deps else {}), **({"forced": True} if force else {}),
+            **{k: r[k] for k in ("stale_interpreter", "stale_lock", "lock_check", "hint") if r.get(k)}}
 
 
 def _merge_conflicts(root: Path, target_head: str, branch: str) -> list[str] | None:

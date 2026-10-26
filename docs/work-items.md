@@ -67,6 +67,21 @@ with a worktree:
   promotes. `wi.promote-failed` changes no status (it is not in the lifecycle projection); the item is verified
   until it is re-opened.
 
+## Gate 2 and the main tree's environment (release 81)
+
+Measured 2026-10-23 at a company site: a module's main `.venv` no longer matched the module after a promotion,
+twice in one day, and the desk rebuilt it by hand (`worktree repair --target`). Now, after a successful merge
+into a module or project whose config entry has `env_rebuild` and whose main tree has a `.venv`, `wi promote`
+checks that environment as `worktree repair --target` does: the interpreter, and `uv sync --check` when
+env_rebuild is one `uv sync` (release 51). A stale environment is rebuilt from scratch with env_rebuild (one
+`env.repaired` with `after_promote: true`); a matching one is left alone. When env_rebuild is not a `uv sync`
+(nothing to ask), the environment is rebuilt only if the merge changed a top-level dependency file
+(`pyproject.toml`, `uv.lock`, `setup.py`, `setup.cfg`, `requirements*.txt`). The result is in the `wi.promoted`
+payload as `env` (`ok`, `rebuilt` or `error`, with `deps_changed`, `stale_lock`, `lock_check`) and on the
+`main env:` line `wi promote` prints. A failed rebuild does not undo the promotion: `env: error` names the
+repair (`dureh worktree repair --target <target>`). Without env_rebuild, or without a main `.venv` (none is
+created here), nothing runs.
+
 ## WI titles for the Director (UR-20261008-02)
 
 Director, 2026-10-08: whenever a WI is named to the Director, a short title goes with it, for example
