@@ -69,7 +69,7 @@ Every `gh` call goes through one runner that reads the token at call time and pa
 | `github watch [--interval 120] [--once]` | desk, as a Monitor in working hours | one line per Decision change, per new comment and per newly opened issue not marked as the desk's; nothing else |
 | `github item add --wi WI [--status S] [--project P] [--layer 1-3] [--units N] [--priority P0-P3] [--start D] [--target D] [--repo R \| --url U]` | desk | an issue for the work item (its title and goal only) in `office_repo` or `--repo` (or the existing issue `--url`), added to the board with its fields; desk rule: Priority P2 unless asked |
 | `github item set (--wi WI \| --url U) [--status] [--project] [--layer] [--units] [--decision] [--priority] [--start] [--target]` | desk | change a linked item's fields; `--decision` only on a layer 1-2 item; `--priority P0..P3` matches the board option `P1 ...`; `--start`/`--target` YYYY-MM-DD set the `Start date`/`Target date` fields (#31) |
-| `github item ask --title T --body-file F [--options O1 O2 O3] [--layer 3] [--fail-closed] [--wi WI] [--project P]` | desk | a decision ask: a `kind:decision` issue with the options and the Decision line; layer 3: assigned to `director_login`, Status Needs approval; `--fail-closed` (release 78): label `fail-closed`, a "no fallback" line, a body or option naming a fallback option is refused, the record keeps `fail_closed: true` (`day decide --ask <url>` then refuses a provisional choice) |
+| `github item ask --title T --body-file F [--options O1 O2 O3] [--layer 3] [--decide D --recommend R --otherwise O] [--fail-closed] [--wi WI] [--project P]` | desk | a decision ask: a `kind:decision` issue with the options and the Decision line; layer 3: assigned to `director_login`, Status Needs approval, and (release 80) it opens with three lines **결정할 것** / **추천** / **답이 없으면** from `--decide`/`--recommend`/`--otherwise` (required on layer 3; on a fail-closed ask `--otherwise` names no fallback option), the body following as background; `--fail-closed` (release 78): label `fail-closed`, a "no fallback" line, a body or option naming a fallback option is refused, the record keeps `fail_closed: true` (`day decide --ask <url>` then refuses a provisional choice) |
 | `github item comment (--wi WI \| --url U) [--file F]` | desk | the desk's comment, carrying the marker `<!-- dureh-desk -->` |
 | `github item close (--wi WI \| --url U) [--comment C]` | desk | close the item's issue (desk rule: at promote), the comment marked as the desk's; records `github.item.closed` (#34) |
 | `github sweep [--dry-run]` | desk | close every open issue of the organization whose Status is Done and that carries no `waiting-director`, `needs-review` or `needs-approval` label (desk rule: before `day close`); records `github.sweep.done` {closed, kept} (#34) |
@@ -147,6 +147,13 @@ measured cost the expected budget is checked against.
 GitHub does not report who changed a field value; the Decision column's authority rests on the board's permissions
 (only the Director should set Decision on a layer-3 item).
 
+
+Follow-up reminder (release 80, project-dureh/dureh-team#63): when a Decision the desk must act on (Approved,
+Option 1-3) is seen, the watch keeps it in `watch.json` `followups`; if the item is still open 20 minutes later and no
+new comment carries the desk marker, it prints once
+`followup: <ref> <title> -> <Decision> N min ago, still open and no desk comment since: ...`. The desk comments on the
+item: what it did, or what blocks it and the Director's step. The first poll tracks nothing; a closed item or a
+changed Decision drops the reminder. An empty board answer is a skipped poll (the state is kept).
 ## Records
 
 | event | payload |
