@@ -864,7 +864,7 @@ def cmd_github(a):
                                a.priority, a.start, a.target))
     elif a.item_command == "set":
         _print(github.item_set(site, _actor(a), a.wi, a.url, a.status, a.project, a.layer, a.units, a.decision,
-                               a.priority, a.start, a.target))
+                               a.priority, a.start, a.target, a.on_hold))
     elif a.item_command == "ask":
         body = Path(a.body_file).read_text(encoding="utf-8")
         _print(github.item_ask(site, _actor(a), a.title, body, a.options, a.layer, a.wi, a.project, a.repo, a.units,
@@ -1615,6 +1615,8 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--layer", type=int, choices=[1, 2, 3])
     x.add_argument("--units", type=float)
     x.add_argument("--decision", help="layer 1-2 only: Approved, Option 1..3, Rejected, Later")
+    x.add_argument("--on-hold", action="store_true", help="release 82: Status Today plus the label on-hold (a later "
+                   "--status 'In progress' removes it); frees an In progress slot (at most 2 per company)")
     x.add_argument("--priority", help="P0..P3 (the board's Priority; desk rule: P2 on new items unless asked)")
     x.add_argument("--start", help="Start date, YYYY-MM-DD (from DUREH's roadmap)")
     x.add_argument("--target", help="Target date, YYYY-MM-DD (from DUREH's roadmap)")

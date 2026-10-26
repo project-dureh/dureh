@@ -627,6 +627,61 @@ class Items(GithubBase):
         self.assertEqual(code, 0, err)
         self.assertEqual([e["type"] for e in self.events()].count(github.UPDATED), 2)
 
+    def test_wip_limit_on_in_progress_and_on_hold(self):
+        """Release 82 (dureh-team#74): a third open In progress item of the company is refused; --on-hold moves an
+        item back to Today with the label on-hold, which a later In progress removes."""
+        from dureh_core import workflow as wf
+
+        self.run_cli("item", "add", "--wi", "WI-0001")
+        wf.wi_new(self.site(), "desk", "second", "g", "doc-writer", "modules/demo", ["ok"])
+        mine = f"https://github.com/{ORG}/office/issues/11"
+        self.gh.items = [node("I1", 1, "first run", status="In progress"), node("I2", 2, "second run", status="In progress"),
+                         node("I3", 3, "closed run", status="In progress", state="CLOSED"),
+                         node("I4", 4, "other company", status="In progress", repo="other-org/x"),
+                         node("PVTI_11", 11, "mine", status="Today", labels=["on-hold"])]
+        self.gh.calls.clear()
+        code, _, err = self.run_cli("item", "set", "--wi", "WI-0001", "--status", "In progress")
+        self.assertEqual(code, 2)
+        self.assertIn("2 open items In progress", err)
+        self.assertIn("office#1 first run", err)
+        self.assertIn("office#2 second run", err)
+        self.assertNotIn("office#3", err)
+        self.assertIn("--status Today --on-hold", err)
+        self.assertNotIn(["project", "item-edit"], self.gh.commands())
+        code, _, err = self.run_cli("item", "add", "--wi", "WI-0002", "--status", "In progress")
+        self.assertEqual(code, 2)
+        self.assertIn("2 open items In progress", err)
+        # move one back: Today + on-hold
+        self.gh.next_issue = 20  # the fake names the board item after the last issue number
+        self.run_cli("item", "add", "--wi", "WI-0002", "--url", f"https://github.com/{ORG}/office/issues/2")
+        self.gh.calls.clear()
+        code, out, err = self.run_cli("item", "set", "--url", f"https://github.com/{ORG}/office/issues/2", "--on-hold")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["fields"], {"Status": "Today"})
+        edit = [c["argv"][1:] for c in self.gh.calls if c["argv"][1:3] == ["issue", "edit"]]
+        self.assertEqual(edit, [["issue", "edit", f"https://github.com/{ORG}/office/issues/2", "--add-label", "on-hold"]])
+        self.assertIn(["label", "create"], self.gh.commands())
+        code, _, err = self.run_cli("item", "set", "--wi", "WI-0001", "--on-hold", "--status", "Done")
+        self.assertEqual(code, 2)
+        self.assertIn("--on-hold sets Status Today", err)
+        # one slot free: In progress goes through and drops on-hold
+        self.gh.items[1] = node("I2", 2, "second run", status="Today", labels=["on-hold"])
+        self.gh.calls.clear()
+        code, out, err = self.run_cli("item", "set", "--wi", "WI-0001", "--status", "in progress")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["labels"], {"remove": ["on-hold"]})
+        edit = [c["argv"][1:] for c in self.gh.calls if c["argv"][1:3] == ["issue", "edit"]]
+        self.assertEqual(edit, [["issue", "edit", mine, "--remove-label", "on-hold"]])
+        self.assertEqual(self.events()[-1]["payload"]["labels"], {"remove": ["on-hold"]})
+        # an item already In progress may be set again (it is not counted against itself)
+        self.gh.items[1] = node("I2", 2, "second run", status="In progress")
+        self.gh.items[4] = node("PVTI_11", 11, "mine", status="In progress")
+        code, _, err = self.run_cli("item", "set", "--wi", "WI-0001", "--status", "In progress")
+        self.assertEqual(code, 2, "two others are running")
+        self.gh.items[0] = node("I1", 1, "first run", status="Done")
+        code, _, err = self.run_cli("item", "set", "--wi", "WI-0001", "--status", "In progress")
+        self.assertEqual(code, 0, err)
+
     def test_item_priority_and_roadmap_dates(self):
         """#31: the desk sets Priority (P0-P3) and the roadmap's Start/Target dates through the harness."""
         code, _, err = self.run_cli("item", "add", "--wi", "WI-0001", "--priority", "p2")
