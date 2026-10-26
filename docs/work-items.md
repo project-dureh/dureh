@@ -42,6 +42,16 @@ the stage record named the base while verify measured the commit.
   the new `wi.staged` carries `restaged_from`); the same head is refused ("already staged"). A verify job
   submitted at the old head is superseded as before (release 61).
 
+## A read-only sweep is staged without a dispatch (release 81, UR-20261023-02)
+
+An item owned by a role with the verify capability (the checker) that has no worktree, for example a read-only
+readiness sweep, has no worker and no worker output. Before release 81 it reached `staged` only through
+`dispatched`, which only a member run records, so each sweep (and each rework after a FAIL) cost a no-op codex
+job. Now `wi stage --wi <WI>` takes such an item from `approved` and from `rework` (the ledger allows
+`approved -> staged` and `rework -> staged` for it only; any other item still needs a dispatch). The desk runs
+`wi stage`, then `dispatch brief --wi <WI> --role checker` and the checker run once. Re-staging a staged sweep is
+refused (it has no head to move).
+
 ## Gate 2 and a merge conflict: `wi.promote-failed` (release 60, UR-20261013-01)
 
 Before release 60 a `wi promote` whose merge conflicted left the target's main tree mid-merge (unmerged files,

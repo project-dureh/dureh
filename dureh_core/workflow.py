@@ -1098,7 +1098,9 @@ def wi_stage(site: Site, actor: str, wi: str, summary: str) -> dict:
     Release 81 (UR-20261023-01 and its findings 1368f671/cc00d3b9): a worktree whose head is still its dispatch
     base (nothing committed past it) is refused, so no `wi.staged` names the base; and a staged item whose head
     moved since its last `wi.staged` (the worker committed after staging) is staged again at the new head
-    (staged -> staged), while the same head is refused."""
+    (staged -> staged), while the same head is refused. Release 81 (UR-20261023-02 option 1): an item owned by a
+    role with the verify capability that has no worktree (a read-only sweep, no worker) is staged directly from
+    approved or rework, without a no-op member run to reach dispatched."""
     led = Ledger(site)
     rec = led.get("work-item", wi)
     if actor != rec["payload"]["role"] and actor != "desk":
@@ -1115,6 +1117,9 @@ def wi_stage(site: Site, actor: str, wi: str, summary: str) -> dict:
         if base and head == base:
             fail(f"{wi}: the branch head {head[:12]} is its dispatch base (nothing committed past it); commit the"
                  f" work on the WI branch in {wt} first, then run `wi stage` again. Nothing was recorded.")
+    elif st in ("approved", "rework") and not led.checker_item(wi):
+        fail(f"{wi} is {st}; only an item owned by a role with the verify capability and without a worktree (a"
+             " read-only sweep) is staged before it is dispatched")
     if st == "staged":
         last = [e for e in led.events(wi) if e["type"] == "wi.staged"][-1]
         if last["payload"].get("head") == head:
