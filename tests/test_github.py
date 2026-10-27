@@ -244,9 +244,9 @@ class Status(GithubBase):
         res = github.status(self.site())
         self.assertEqual(list(res["groups"]), ["Today", "Waiting for Director", "(no status)"])
         row = res["groups"]["Waiting for Director"][0]
-        self.assertEqual((row["decision"], row["layer"], row["number"]), ("Option 1", "3 Director", 2))
+        self.assertEqual((row["decision"], row["layer"], row["number"]), ("Approve 1", "3 Director", 2))  # old name
         code, out, _ = self.run_cli("status")
-        self.assertIn("office#2 second [decision: Option 1] [layer: 3 Director]", out)
+        self.assertIn("office#2 second [decision: Approve 1] [layer: 3 Director]", out)
         code, out, _ = self.run_cli("status", "--json")
         self.assertEqual(json.loads(out)["count"], 3)
 
@@ -279,7 +279,7 @@ class Watch(GithubBase):
                          node("I2", 2, "second", "Today", "Approved")]
         first = self.lines()
         self.assertEqual(len(first), 1)  # the Decision already set; old comments taken as seen
-        self.assertTrue(first[0].startswith("decision: office#2 second -> Approved (was none)"), first)
+        self.assertTrue(first[0].startswith("decision: office#2 second -> Approve 1 (was none)"), first)
         self.assertEqual(self.lines(), [])
         self.gh.items[0] = node("I1", 1, "first", "Waiting for Director", "Option 2", "3 Director",
                                 [("C1", "example-director", "old opinion"),
@@ -287,24 +287,26 @@ class Watch(GithubBase):
                                  ("C3", "example-director", "one more\nthought")])
         got = self.lines()
         self.assertEqual(len(got), 2, got)
-        self.assertTrue(got[0].startswith("decision: office#1 first -> Option 2 (was none) [layer 3 Director]"))
+        self.assertTrue(got[0].startswith("decision: office#1 first -> Approve 2 (was none) [layer 3 Director]"))
+        self.assertTrue(got[0].endswith(f"| Director: one more https://github.com/{ORG}/office/issues/1#C3 "
+                                        "(+1 earlier)"), got[0])
         self.assertEqual(got[1], f"comment: office#1 by example-director: one more thought "
                                  f"https://github.com/{ORG}/office/issues/1#C3")
         decided = [e for e in self.events() if e["type"] == github.DECIDED]
         self.assertEqual([(e["payload"]["from"], e["payload"]["to"]) for e in decided],
-                         [(None, "Approved"), (None, "Option 2")])
+                         [(None, "Approve 1"), (None, "Approve 2")])
 
     def test_state_survives_a_restart(self):
         self.gh.items = [node("I1", 1, "first", "Today", "Later")]
         self.assertEqual(len(self.lines()), 1)
         state = json.loads(github.state_path(self.site()).read_text())
-        self.assertEqual(state["decisions"], {"I1": "Later"})
+        self.assertEqual(state["decisions"], {"I1": "Discuss"})  # Later is read as Discuss
         self.assertTrue(str(github.state_path(self.site())).startswith(str(self.site_root / "cache")))
         code, out, _ = self.run_cli("watch", "--once")  # a new process: nothing new
         self.assertEqual((code, out), (0, ""))
         self.gh.items = [node("I1", 1, "first", "Today", "Rejected")]
         code, out, _ = self.run_cli("watch", "--once")
-        self.assertIn("-> Rejected (was Later)", out)
+        self.assertIn("-> Rejected (was Discuss)", out)
         self.assertEqual(len(out.strip().splitlines()), 1)
 
     def test_followup_after_twenty_minutes_without_a_desk_comment(self):
@@ -326,10 +328,57 @@ class Watch(GithubBase):
         clock[0] += 11 * 60
         got = self.lines()
         self.assertEqual(len(got), 1, got)
-        self.assertTrue(got[0].startswith("followup: office#1 push -> Approved 21 min ago, still open"), got)
+        self.assertTrue(got[0].startswith("followup: office#1 push -> Approve 1 21 min ago, still open"), got)
         self.assertIn("대표님 조치 필요", got[0])
         clock[0] += 60 * 60
         self.assertEqual(self.lines(), [], "once")
+
+    def test_migrated_value_is_no_change(self):
+        """Director 2026-10-27: the boards' options are renamed (Approved -> Approve 1 ...); a stored old value read as
+        its new name is no Decision change: no line, no record."""
+        self.gh.items = [node("I1", 1, "first", "Today", "Approved"), node("I2", 2, "second", "Today", "Later")]
+        self.assertEqual(len(self.lines()), 2)
+        state = json.loads(github.state_path(self.site()).read_text())
+        state["decisions"] = {"I1": "Approved", "I2": "Later"}  # a state saved by an older release
+        github.state_path(self.site()).write_text(json.dumps(state))
+        self.gh.items = [node("I1", 1, "first", "Today", "Approve 1"), node("I2", 2, "second", "Today", "Discuss")]
+        self.assertEqual(self.lines(), [])
+        self.assertEqual(len([e for e in self.events() if e["type"] == github.DECIDED]), 2)
+
+    def test_discuss_is_a_hold_with_the_directors_comments(self):
+        clock = [1000.0]
+        p = mock.patch.object(github, "_clock", lambda: clock[0])
+        p.start()
+        self.addCleanup(p.stop)
+        self.gh.items = [node("I1", 1, "push", "Needs approval", None, "3 Director")]
+        self.lines()
+        said = [("C1", "example-director", "before the last answer"),
+                ("C2", "example-director", "ANSWER: Approve 1 (Director, Decision column) <!-- dureh -->"),
+                ("C3", "someone-else", "drive-by"),
+                ("C4", "example-director", "<!-- dureh --> DUREH note"),
+                ("C5", "example-director", "\n비용이 얼마인가요?\n두 번째 줄")]
+        self.gh.items = [node("I1", 1, "push", "Needs approval", "Discuss", "3 Director", said)]
+        got = self.lines()
+        self.assertEqual(got[0], "decision: office#1 push -> Discuss (was none) [layer 3 Director] "
+                                 f"https://github.com/{ORG}/office/issues/1 | Discuss: hold, the work does not proceed; "
+                                 "answer the Director in the item's comments | Director: 비용이 얼마인가요? "
+                                 f"https://github.com/{ORG}/office/issues/1#C5")
+        ev = [e for e in self.events() if e["type"] == github.DECIDED][-1]
+        self.assertEqual(ev["payload"]["to"], "Discuss")
+        self.assertEqual(ev["payload"]["director_comments"], [f"https://github.com/{ORG}/office/issues/1#C5"])
+        self.assertNotIn("비용", json.dumps(ev))  # no text in the record
+        clock[0] += 21 * 60
+        got = self.lines()
+        self.assertEqual(len(got), 1, got)
+        self.assertTrue(got[0].startswith("followup: office#1 push -> Discuss 21 min ago"), got)
+        self.assertIn("answer the Director's comments on the item", got[0])
+        code, out, _ = self.run_cli("status")
+        self.assertIn("    Discuss: hold; the work does not proceed; answer the Director in the item's comments", out)
+        self.assertIn(f"    Director: 비용이 얼마인가요? https://github.com/{ORG}/office/issues/1#C5", out)
+        code, out, _ = self.run_cli("status", "--json")
+        rows = json.loads(out)["groups"]["Needs approval"]
+        self.assertEqual(rows[0]["director_comments"], [{"text": "비용이 얼마인가요?",
+                                                         "url": f"https://github.com/{ORG}/office/issues/1#C5"}])
 
     def test_followup_skips_closed_and_first_poll(self):
         clock = [1000.0]
@@ -385,7 +434,7 @@ class Watch(GithubBase):
         self.assertEqual(len([g for g in got if "rate limited" in g]), 1, got)
         self.assertTrue(got[0].startswith("github watch: rate limited by GitHub; backing off (next poll in 120 s"), got)
         self.assertEqual(got[1], "github watch: resumed after 5 rate-limited polls")
-        self.assertTrue(got[2].startswith("decision: office#1 first -> Approved"), got)
+        self.assertTrue(got[2].startswith("decision: office#1 first -> Approve 1"), got)
         self.assertEqual(len(got), 3, got)
 
     def test_rate_limit_honours_retry_after(self):
@@ -614,6 +663,26 @@ class Items(GithubBase):
         self.assertIn("no option 'no-such-project'", err)
         self.assertNotIn(["issue", "create"], self.gh.commands())
 
+    def test_decision_values_both_sets(self):
+        """Director 2026-10-27: new names, old names read as new; a board not yet migrated gets its old option."""
+        dv = github.decision_value
+        for old, new in (("Approved", "Approve 1"), ("Option 1", "Approve 1"), ("option 2", "Approve 2"),
+                         ("Option 3", "Approve 3"), ("Rejected", "Rejected"), ("Reject", "Rejected"), ("Later", "Discuss"),
+                         ("Discuss", "Discuss")):
+            self.assertEqual(dv(old), new)
+        self.assertIsNone(dv(""))
+        self.assertTrue(github.is_approval("Option 2"))
+        self.assertFalse(github.is_approval("Later"))
+        self.assertEqual(github._fields(decision="option 3"), {"Decision": "Approve 3"})
+        with self.assertRaises(DurehError):
+            github._fields(decision="Maybe")
+        old = {"fields": {"Decision": {"id": "F_D", "options": {n: f"O_{n}" for n in github.DECISION_ALIASES}}}}
+        self.assertEqual(github._option(old, "Decision", "Approve 2"), ("F_D", "O_Option 2"))
+        self.assertEqual(github._option(old, "Decision", "Discuss"), ("F_D", "O_Later"))
+        self.assertIn(github._option(old, "Decision", "Approve 1")[1], ("O_Approved", "O_Option 1"))
+        new = {"fields": {"Decision": {"id": "F_D", "options": {n: f"O_{n}" for n in github.DECISIONS}}}}
+        self.assertEqual(github._option(new, "Decision", "Reject"), ("F_D", "O_Rejected"))
+
     def test_item_set_status_and_decision_by_layer(self):
         self.run_cli("item", "add", "--wi", "WI-0001", "--layer", "3")
         self.gh.calls.clear()
@@ -681,6 +750,49 @@ class Items(GithubBase):
         self.gh.items[0] = node("I1", 1, "first run", status="Done")
         code, _, err = self.run_cli("item", "set", "--wi", "WI-0001", "--status", "In progress")
         self.assertEqual(code, 0, err)
+
+    def test_layer_1_2_ask_keeps_the_wip_limit(self):
+        """Release 83 (the release-82 WIP limit, dureh-team#74): a layer 1-2 ask opens In progress, so it is refused
+        while two open items of the company are In progress, before anything is created; --on-hold opens it Today
+        with the label on-hold; a layer-3 ask (Needs approval) is not counted and takes no --on-hold."""
+        body = self.tmp / "ask.md"
+        body.write_text("Which order?")
+        ask = lambda *extra: self.run_cli("item", "ask", "--title", "Order", "--body-file", str(body), *extra)  # noqa: E731
+        self.gh.items = [node("I1", 1, "first run", status="In progress"), node("I2", 2, "second run", status="In progress"),
+                         node("I4", 4, "other company", status="In progress", repo="other-org/x")]
+        self.gh.calls.clear()
+        for layer in ("1", "2"):
+            code, _, err = ask("--layer", layer)
+            self.assertEqual(code, 2, layer)
+            self.assertIn("2 open items In progress", err)
+            self.assertIn("office#1 first run", err)
+            self.assertIn("office#2 second run", err)
+            self.assertIn("--on-hold", err)
+        self.assertNotIn(["issue", "create"], self.gh.commands())
+        self.assertNotIn(["project", "item-add"], self.gh.commands())
+        self.assertFalse([e for e in self.events() if e["type"] == github.ASKED])
+        # --on-hold: Status Today and the label, the limit untouched
+        self.gh.calls.clear()
+        code, out, err = ask("--layer", "2", "--on-hold")
+        self.assertEqual(code, 0, err)
+        res = json.loads(out)
+        self.assertEqual(res["fields"]["Status"], "Today")
+        self.assertEqual(res["labels"], {"add": ["on-hold"]})
+        argv = next(c["argv"] for c in self.gh.calls if c["argv"][1:3] == ["issue", "create"])
+        self.assertEqual([argv[i + 1] for i, a in enumerate(argv) if a == "--label"], ["kind:decision", "on-hold"])
+        self.assertEqual([e for e in self.events() if e["type"] == github.ASKED][-1]["payload"]["labels"],
+                         {"add": ["on-hold"]})
+        # layer 3 opens Needs approval: not refused by the limit, and --on-hold does not apply
+        code, _, err = ask("--layer", "3", *THREE)
+        self.assertEqual(code, 0, err)
+        code, _, err = ask("--layer", "3", "--on-hold", *THREE)
+        self.assertEqual(code, 2)
+        self.assertIn("--on-hold is for a layer 1-2 ask", err)
+        # one slot free: the layer-2 ask opens In progress
+        self.gh.items[0] = node("I1", 1, "first run", status="Done")
+        code, out, err = ask("--layer", "2")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["fields"]["Status"], "In progress")
 
     def test_item_priority_and_roadmap_dates(self):
         """#31: the desk sets Priority (P0-P3) and the roadmap's Start/Target dates through the harness."""
@@ -835,8 +947,12 @@ class Items(GithubBase):
         self.assertEqual(argv[argv.index("--assignee") + 1], "example-director")
         self.assertEqual(argv[argv.index("--label") + 1], "kind:decision")
         self.assertTrue(create["input"].rstrip().endswith(github.DESK_MARK))
-        self.assertIn("**Option 2**: first B", create["input"])
-        self.assertIn("Approved, Option 1, Option 2, Rejected, Later", create["input"])
+        self.assertIn("- **Approve 2**: first B", create["input"])
+        self.assertIn("- **Rejected**:", create["input"])
+        self.assertIn("- **Discuss**: hold; nothing proceeds, the desk answers your comments", create["input"])
+        self.assertIn("Decision** column: Approve 1, Approve 2, Rejected, Discuss.", create["input"])
+        self.assertIn("your comments on this item are read with it", create["input"])
+        self.assertNotIn("Option 1", create["input"].split("**배경 · Background**")[1])
         self.assertIn(["label", "create"], self.gh.commands())
         edits = [c["argv"] for c in self.gh.calls if c["argv"][1:3] == ["project", "item-edit"]]
         self.assertIn("O_S3", [e[-1] for e in edits])  # Needs approval

@@ -474,6 +474,14 @@ class Workday(SiteCase):
                                                                  "to": "Approved", "layer": 3, "first_poll": False})
         with self.assertRaisesRegex(DurehError, "is Later"):
             workday.end(self.s, "desk", "done", "", [], early="x", approval=later["id"])
+        rej = led.event("github.decision.changed", "desk", None, {"item_id": "I1", "url": url, "from": "Approved",
+                                                                  "to": "Rejected", "layer": 3, "first_poll": False})
+        with self.assertRaisesRegex(DurehError, "is Rejected .*not Approve 1"):
+            workday.end(self.s, "desk", "done", "", [], early="x", approval=rej["id"])
+        with self.assertRaisesRegex(DurehError, r"is Later \(= Discuss\)"):
+            workday.end(self.s, "desk", "done", "", [], early="x", approval=later["id"])
+        ok = led.event("github.decision.changed", "desk", None, {"item_id": "I1", "url": url, "from": "Rejected",
+                                                                 "to": "Approve 1", "layer": 3, "first_poll": False})
         rec = workday.end(self.s, "desk", "done", "", [], early="board", approval="project-dureh/office#40")
         self.assertEqual((rec["payload"]["early_close"]["approval"]["id"],
                           rec["payload"]["early_close"]["approval"]["kind"]), (ok["id"], "github"))

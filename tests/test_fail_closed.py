@@ -30,7 +30,8 @@ def run(site_root, *argv):
 class FallbackLines(unittest.TestCase):
     def test_named_fallbacks_are_found(self):
         for text in ("Fallback after 30 minutes: Option 2", "30-minute fallback: Option 1 (keep the old dataset)",
-                     "30분 무응답이면 Option 2로 진행", "폴백: 2번", "If no answer, Option 1 applies"):
+                     "30분 무응답이면 Option 2로 진행", "폴백: 2번", "If no answer, Option 1 applies",
+                     "30-minute fallback: Approve 2"):
             self.assertTrue(fallback_lines(text), text)
 
     def test_no_fallback_lines_pass(self):

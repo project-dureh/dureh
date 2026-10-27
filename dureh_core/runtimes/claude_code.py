@@ -48,6 +48,15 @@ BRIEF_RE = re.compile(r"DUREH-BRIEF (WI-\d{4,}) role=([a-z0-9-]+) brief=([0-9a-f
 WRITE_TOOLS = {"Write", "Edit", "MultiEdit", "NotebookEdit"}
 SPAWN_TOOLS = {"Agent", "Task"}
 SPAWN_HOOK_TIMEOUT = 180  # seconds; Claude Code lets a tool through when its hook times out (UR-20261015-01)
+# UR-20261026-02 (a company site, 2026-10-26): Claude Code runs a tool unchecked and without the hook's rewrite when its
+# PreToolUse hook times out. Three `bin/dureh` calls of two managers hit the 30 s timeout on a busy ledger
+# (`hook_cancelled`, timedOut, in their transcripts), ran without DUREH_ACTOR/DUREH_AGENT_ID and were recorded as the
+# desk, whatever their cwd or path spelling. The guard hook now has GUARD_HOOK_TIMEOUT and answers within
+# GUARD_BUDGET_SHARE of it (measured from the hook process's start): past that it refuses the call and records
+# guard.denied, so a timeout no longer turns an agent's call into an unchecked desk call.
+GUARD_HOOK_TIMEOUT = 60  # seconds, the PreToolUse guard (Write/Edit/Bash/Web/Read) hook
+LEGACY_GUARD_TIMEOUT = 30  # settings generated before release 83 give no --timeout: their hook timeout was 30 s
+GUARD_BUDGET_SHARE = 0.8
 NETWORK_TOOLS = {"WebFetch", "WebSearch"}
 DEFAULT_SCHEDULER_ONLY = ["apptainer", "singularity", "docker", "podman"]
 ALWAYS_DENY_FIRST = {
@@ -360,7 +369,12 @@ def _github_rule(site: Site, dureh) -> str:
             " set that Decision yourself; a review"
             " request is Status Needs approval too, with the request letter; a step only the Director does (a command, a"
             " dataset, a login) is Status Waiting for Director. DUREH passes on every Decision (ANSWER, labels, Status)"
-            " and sends you a notice; act on the notice. A `followup:` line from the watch (release 80) means a"
+            " and sends you a notice; act on the notice. Decision values (Director 2026-10-27): Approve 1, Approve 2,"
+            " Approve 3 (approve that option; a review: accept, accept + follow-up, rework), Rejected (no; a review:"
+            " revert), Discuss (a hold: nothing proceeds; answer the Director's comments on the item with `github item"
+            " comment`, then he decides again); old names Approved/Option N/Later are read as Approve N/Discuss. Read"
+            " every Decision together with the Director's comments on the item since the ask (the watch line and"
+            " `github status` show the latest). A `followup:` line from the watch (release 80) means a"
             " Decision you must act on is 20 minutes old, its item still open, with no comment of yours since: comment"
             " on that item now, what you did or what blocks it and the Director's step (대표님 조치 필요)."
             f" During working hours run `{dureh} github watch` as a Monitor (every 120 s by default; never lower it: the"
@@ -681,7 +695,7 @@ def _claude_md(site: Site) -> str:
               " The day runs to its end time even when the plan is done: stay on duty (idle is fine), keep upstream messages and running work in view."
               f" Never end or close the day before its end without the Director's recorded approval (release 74, 2026-10-19: a desk closed four hours early reading the local end as UTC):"
               f" check `{dureh} day status` first; it shows the end in local time with UTC beside it, and every time the harness prints is local unless marked UTC."
-              f" An early end needs `{dureh} day end|close --early --approval <id> --reason \"<Director's words>\"`, <id> a recorded approval (an `approve` decision by the Director or DUREH, or a board Decision = Approved); otherwise both are refused."
+              f" An early end needs `{dureh} day end|close --early --approval <id> --reason \"<Director's words>\"`, <id> a recorded approval (an `approve` decision by the Director or DUREH, or a board Decision = Approve 1); otherwise both are refused."
               " When everything is idle, propose the next work: if it fits the goals the Director set (the plan's goal, the package's purpose, the Director's standing priorities),"
               f" proceed on your own recommendation, record it with `{dureh} day decide`, and report it at the end; otherwise list it for the end report."
               " Where the Director would decide, choose something easy to change, call it provisional in the record, and keep going."
@@ -764,7 +778,7 @@ def _hook_command(site: Site) -> str:
 
 def _settings(site: Site) -> dict:
     cmd = _hook_command(site)
-    hook = lambda timeout=30: [{"type": "command", "command": cmd, "timeout": timeout}]
+    hook = lambda timeout=30, extra="": [{"type": "command", "command": cmd + extra, "timeout": timeout}]
     desk_model = _model_id(site.model_for_tier("desk"))
     dureh = str(site.root / "bin" / "dureh")
     env = site.env()  # Claude Code does not expand variables in settings env: store the expanded values
@@ -788,7 +802,9 @@ def _settings(site: Site) -> dict:
             "SessionEnd": [{"hooks": hook(120)}],
             # release 46: Read|Grep only when the package declares a no-read path, so other sites pay nothing
             "PreToolUse": [{"matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash|WebFetch|WebSearch"
-                            + ("|Read|Grep" if has_no_read(site) else ""), "hooks": hook()},
+                            + ("|Read|Grep" if has_no_read(site) else ""),
+                            # UR-20261026-02: the guard answers (refusing) within its budget instead of timing out
+                            "hooks": hook(GUARD_HOOK_TIMEOUT, f" --timeout {GUARD_HOOK_TIMEOUT}")},
                            # UR-20261015-01: a spawn hook past its budget lets the spawn through unrecorded
                            {"matcher": "Agent|Task", "hooks": hook(SPAWN_HOOK_TIMEOUT)}],
             "PostToolUse": [{"matcher": "Write|Edit|MultiEdit", "hooks": hook()}],
@@ -1708,6 +1724,11 @@ def _bind(led: Ledger, role: str, data: dict, at: str) -> str | None:
     agent_id = data.get("agent_id")
     if not agent_id:
         return None
+    # UR-20261026-02: a bound agent (the usual case after its first tool call) needs no lock: its `agent.started`
+    # with a WI is create-only and final, so waiting for the ledger lock behind other hooks only spends the budget
+    bound = _agent_wi(led, agent_id)
+    if bound:
+        return bound
     digest = _brief_in_transcript(data)
     with led.lock():
         bound = _agent_wi(led, agent_id)
@@ -1874,6 +1895,111 @@ def _audit_denial(site: Site, data: dict, out: dict | None) -> dict | None:
         except DurehError:
             pass
     return out
+
+
+def process_age() -> float:
+    """Seconds since this process was started (by the runtime: `bin/dureh` and the harness `exec`, keeping the pid),
+    from /proc; 0 where that cannot be read."""
+    try:
+        with open("/proc/self/stat", encoding="ascii") as fh:
+            fields = fh.read().rsplit(")", 1)[1].split()
+        with open("/proc/uptime", encoding="ascii") as fh:
+            uptime = float(fh.read().split()[0])
+        return max(0.0, uptime - int(fields[19]) / os.sysconf("SC_CLK_TCK"))
+    except (OSError, ValueError, IndexError):
+        return 0.0
+
+
+def _over_budget(site: Site, data: dict, budget: float) -> dict:
+    """UR-20261026-02: the guard's answer when its checks did not finish in time: a refusal, recorded as guard.denied
+    without reading the ledger (reading it is what was slow)."""
+    out = _deny(f"the harness checks did not finish within {budget:.0f} s (busy ledger), so this call was not run; run"
+                " the same command again (your identity is kept: nothing ran as the desk)")
+    role = _role_of(site, data)
+    ti = data.get("tool_input") or {}
+    target = ti.get("file_path") or ti.get("command") or ti.get("url") or ti.get("path") or ""
+    payload = {"tool": data.get("tool_name"), "role": role, "agent_id": data.get("agent_id"),
+               "target": str(target)[:4000], "reason": out["hookSpecificOutput"]["permissionDecisionReason"][:500],
+               "over_budget": True, "budget_s": round(budget, 1)}
+    try:
+        Ledger(site).event("guard.denied", role if role in site.org.roles else "desk", None, payload)
+    except DurehError:
+        pass
+    return out
+
+
+def guarded(event: str | None, tool: str | None) -> bool:
+    """The hooks that answer within a budget: PreToolUse checks other than a spawn (a spawn records its dispatch,
+    which must not be cut off; it has its own longer timeout and the late-spawn record, UR-20261015-01)."""
+    return event == "PreToolUse" and (tool or "") not in SPAWN_TOOLS
+
+
+def handle_within(site: Site, data: dict, timeout: float | None = None, age: float | None = None) -> dict | None:
+    """`handle`, answering within GUARD_BUDGET_SHARE of the hook's timeout for a guarded event (UR-20261026-02).
+
+    The checks run in a forked child that keeps no handle on the runtime's pipes and always finishes its work (a
+    record it is writing, a binding); the parent waits for its answer until the budget is spent and then refuses on
+    its own, so the runtime never sees a timeout and never runs the call unchecked."""
+    if not guarded(data.get("hook_event_name"), data.get("tool_name")) or not hasattr(os, "fork"):
+        return handle(site, data)
+    budget = float(timeout or LEGACY_GUARD_TIMEOUT) * GUARD_BUDGET_SHARE
+    left = budget - (process_age() if age is None else age)
+    if left <= 0:
+        return _over_budget(site, data, budget)
+    import select
+    import time
+
+    sys.stdout.flush()
+    sys.stderr.flush()
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:  # the child: run the checks, hand the answer over, never return into the caller
+        try:
+            os.close(r)
+            null = os.open(os.devnull, os.O_RDWR)
+            for fd in (0, 1, 2):
+                os.dup2(null, fd)
+            try:
+                answer = {"out": handle(site, data)}
+            except BaseException as exc:  # noqa: BLE001 - every failure becomes the parent's fail-closed answer
+                answer = {"error": str(exc) or type(exc).__name__}
+            blob = json.dumps(answer, ensure_ascii=False).encode("utf-8")
+            while blob:
+                blob = blob[os.write(w, blob):]
+        except BaseException:  # noqa: BLE001 - the parent has gone (EPIPE) or the answer could not be written
+            pass
+        finally:
+            os._exit(0)
+    os.close(w)
+    chunks, deadline, done = [], time.monotonic() + left, False
+    try:
+        while True:
+            wait = deadline - time.monotonic()
+            if wait <= 0:
+                break
+            ready, _, _ = select.select([r], [], [], wait)
+            if not ready:
+                break
+            chunk = os.read(r, 65536)
+            if not chunk:
+                done = True
+                break
+            chunks.append(chunk)
+    finally:
+        os.close(r)
+    if not done:
+        return _over_budget(site, data, budget)  # the child finishes on its own; nothing waits for it
+    try:
+        os.waitpid(pid, 0)
+    except ChildProcessError:
+        pass
+    try:
+        answer = json.loads(b"".join(chunks).decode("utf-8"))
+    except ValueError:
+        answer = {"error": "the checks gave no answer"}
+    if "error" in answer:
+        return _deny(f"harness error, failing closed: {answer['error']}")
+    return answer.get("out")
 
 
 def handle(site: Site, data: dict) -> dict | None:

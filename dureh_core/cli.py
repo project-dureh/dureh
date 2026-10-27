@@ -31,14 +31,31 @@ def _actor(args) -> str:
     env = os.environ.get("DUREH_ACTOR")
     given = getattr(args, "actor", None)
     if env and given and env != given:
-        fail(f"--actor {given} conflicts with the harness-assigned identity {env}")
+        _identity_refused(args, env, f"--actor {given} conflicts with the harness-assigned identity {env}")
     if not env and os.environ.get("DUREH_AGENT_ID"):
         # project-dureh/dureh#35: a process an agent started (a script, an absolute or relative path the hook did not
         # rewrite) carries the agent id but no identity; it is that agent, never the desk
         env = _agent_role(args, os.environ["DUREH_AGENT_ID"])
         if given and env != given:
-            fail(f"--actor {given} conflicts with the identity of agent {os.environ['DUREH_AGENT_ID']} ({env})")
+            _identity_refused(args, env, f"--actor {given} conflicts with the identity of agent"
+                                         f" {os.environ['DUREH_AGENT_ID']} ({env})")
     return env or given or "desk"
+
+
+def _identity_refused(args, role: str | None, reason: str) -> None:
+    """UR-20261026-02: a refusal on the identity path leaves a `guard.denied` event (tool `cli`), as the hook's do."""
+    from .records import Ledger
+
+    try:
+        site = _site(args)
+        if not site.observe:
+            known = role if role and role in site.org.roles else "desk"
+            Ledger(site).event("guard.denied", known, None, {
+                "tool": "cli", "role": role or "unknown", "agent_id": os.environ.get("DUREH_AGENT_ID"),
+                "target": " ".join(["dureh", *sys.argv[1:]])[:4000], "reason": f"DUREH: {reason}"[:500]})
+    except DurehError:
+        pass
+    fail(reason)
 
 
 def _agent_role(args, agent_id: str) -> str:
@@ -52,8 +69,9 @@ def _agent_role(args, agent_id: str) -> str:
     except DurehError:
         roles = []
     if not roles or roles[-1] == "desk":
-        fail(f"this process belongs to agent {agent_id}, which has no recorded role; run the harness as"
-             " `bin/dureh <command>` written out in your own command so the hook sets your identity")
+        _identity_refused(args, None, f"this process belongs to agent {agent_id}, which has no recorded role; run the"
+                                      " harness as `bin/dureh <command>` written out in your own command so the hook"
+                                      " sets your identity")
     return roles[-1]
 
 
@@ -144,7 +162,8 @@ def cmd_hook(a):
     except json.JSONDecodeError:
         data = {}
     try:
-        out = claude_code.handle(_site(a), data)
+        # UR-20261026-02: a guard check answers within its budget (a refusal past it), never by timing out
+        out = claude_code.handle_within(_site(a), data, a.timeout)
     except Exception as exc:  # noqa: BLE001 - a hook must fail closed on PreToolUse
         if data.get("hook_event_name") == "PreToolUse":
             out = claude_code._deny(f"harness error, failing closed: {exc}")
@@ -869,7 +888,7 @@ def cmd_github(a):
         body = Path(a.body_file).read_text(encoding="utf-8")
         _print(github.item_ask(site, _actor(a), a.title, body, a.options, a.layer, a.wi, a.project, a.repo, a.units,
                                fail_closed=a.fail_closed, decide=a.decide, recommend=a.recommend,
-                               otherwise=a.otherwise))
+                               otherwise=a.otherwise, on_hold=a.on_hold))
     elif a.item_command == "close":
         _print(github.item_close(site, _actor(a), a.wi, a.url, a.comment))
     else:
@@ -1026,7 +1045,7 @@ def _early_args(x, what: str) -> None:
                         "in local time and UTC)" + (", or past it with plan items still open (--reason alone)"
                                                    if what == "end" else ""))
     x.add_argument("--approval", help="with --early: the recorded approval (a Director/DUREH `approve` decision id, or "
-                                      "a board Decision = Approved: its github.decision.changed event id, issue URL or "
+                                      "a board Decision = Approve 1: its github.decision.changed event id, issue URL or "
                                       "org/repo#N)")
     x.add_argument("--reason", help="with --early: why the day ends early (the Director's words)")
 
@@ -1063,6 +1082,8 @@ def parser() -> argparse.ArgumentParser:
 
     h = add(sub, "hook", cmd_hook, "runtime hook entry point (reads the event JSON on stdin)")
     h.add_argument("runtime", choices=["claude-code"])
+    h.add_argument("--timeout", type=float, help="the runtime's timeout for this hook in seconds (the generated "
+                   "settings pass it); a PreToolUse check answers within 80%% of it, refusing past that")
 
     wi = sub.add_parser("wi", help="work items").add_subparsers(dest="wi_command", required=True)
     x = add(wi, "new", cmd_wi_new, "create a work item (desk)")
@@ -1574,10 +1595,12 @@ def parser() -> argparse.ArgumentParser:
     gp = sub.add_parser("github", help="the company's GitHub board (release 69; organization, board, office repository "
                          "and token file come from config `github`; docs/github.md): status, watch, and the desk's "
                          "board items").add_subparsers(dest="github_command", required=True)
-    x = add(gp, "status", cmd_github, "the board's items grouped by Status, with Decision, Project and Layer; read-only")
+    x = add(gp, "status", cmd_github, "the board's items grouped by Status, with Decision, Project and Layer and the "
+                                      "Director's latest comment since the ask on a decided or waiting item; read-only")
     x.add_argument("--json", action="store_true")
     x = add(gp, "watch", cmd_github, "desk: poll the board and the organization's open issues; print one line per "
-                                     "Decision change, per new comment and per newly opened issue (a kind:request one "
+                                     "Decision change (with the Director's latest comment since the ask), per new "
+                                     "comment and per newly opened issue (a kind:request one "
                                      "is a work request) not marked as the desk's, nothing else (for Monitor); a failed "
                                      "poll is skipped, a rate-limited one backs off (one line, then one \"resumed\" "
                                      "line); records github.decision.changed and github.issue.opened")
@@ -1614,7 +1637,8 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--project")
     x.add_argument("--layer", type=int, choices=[1, 2, 3])
     x.add_argument("--units", type=float)
-    x.add_argument("--decision", help="layer 1-2 only: Approved, Option 1..3, Rejected, Later")
+    x.add_argument("--decision", help="layer 1-2 only: Approve 1..3, Rejected, Discuss (old names Approved, Option "
+                                      "1..3, Later, Reject are read as the new ones)")
     x.add_argument("--on-hold", action="store_true", help="release 82: Status Today plus the label on-hold (a later "
                    "--status 'In progress' removes it); frees an In progress slot (at most 2 per company)")
     x.add_argument("--priority", help="P0..P3 (the board's Priority; desk rule: P2 on new items unless asked)")
@@ -1626,7 +1650,8 @@ def parser() -> argparse.ArgumentParser:
                                    "column (`github watch`/`status`); records github.ask.created")
     x.add_argument("--title", required=True)
     x.add_argument("--body-file", required=True)
-    x.add_argument("--options", nargs="+", default=[], help="up to 3 options (Option 1..3 in the Decision column)")
+    x.add_argument("--options", nargs="+", default=[], help="up to 3 options (Approve 1..3 in the Decision column; "
+                                                              "Rejected and Discuss are always offered)")
     x.add_argument("--layer", type=int, choices=[1, 2, 3], default=3)
     x.add_argument("--fail-closed", action="store_true",
                    help="release 78: a fail-closed kind (no 30-minute fallback, no timeout approval): label fail-closed; "
@@ -1634,6 +1659,9 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--decide", help="release 80: 결정할 것, one sentence (required on a layer-3 ask)")
     x.add_argument("--recommend", help="release 80: 추천, the recommended choice and why (required on layer 3)")
     x.add_argument("--otherwise", help="release 80: 답이 없으면, what happens without an answer (required on layer 3)")
+    x.add_argument("--on-hold", action="store_true",
+                   help="release 83, layer 1-2: open the ask with Status Today and the label on-hold instead of In "
+                        "progress (a layer 1-2 ask is refused while 2 items of the company are In progress)")
     x.add_argument("--wi", help="the work item the ask belongs to")
     x.add_argument("--project")
     x.add_argument("--units", type=float)

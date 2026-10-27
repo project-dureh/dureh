@@ -30,7 +30,7 @@ Installation requires an absent or empty destination and a startup package with 
 | Contract | Claude Code mechanism |
 |---|---|
 | spawn | The desk or a manager runs `dureh dispatch brief --wi <WI>` and passes the recorded brief to the Agent tool. The PreToolUse hook admits only a recorded, unconsumed brief from an authorized caller and appends `wi.dispatched`. Depth is desk -> manager -> worker. |
-| identity | Hook input carries the subagent's `agent_type`; the main session is the desk. The hook injects `DUREH_ACTOR` into `dureh` commands and refuses impersonation. |
+| identity | Hook input carries the subagent's `agent_type`; the main session is the desk. The hook injects `DUREH_ACTOR` into `dureh` commands and refuses impersonation. Claude Code runs a tool unchecked when its hook times out, so the PreToolUse guard (timeout 60 s) answers within 80% of it and refuses past that, recorded as `guard.denied` (release 83, UR-20261026-02); a refusal on the CLI identity path (unknown agent, conflicting `--actor`, a dispatch the caller's role may not make) is recorded as `guard.denied` with tool `cli`. |
 | writes | Write/Edit are checked against the role's scopes, WI worktrees, read-only references, append-only records, and generated files. Bash is screened for writes, background work, scheduler bypass, pushes, and recursive deletes. |
 | status | SubagentStart/Stop record `agent.started`, `agent.finished`, and an agent run with transcript token usage. |
 | session | SessionStart injects persona, handoff, status, and checks; SessionEnd records the session and saves state. |
