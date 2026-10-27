@@ -31,14 +31,31 @@ def _actor(args) -> str:
     env = os.environ.get("DUREH_ACTOR")
     given = getattr(args, "actor", None)
     if env and given and env != given:
-        fail(f"--actor {given} conflicts with the harness-assigned identity {env}")
+        _identity_refused(args, env, f"--actor {given} conflicts with the harness-assigned identity {env}")
     if not env and os.environ.get("DUREH_AGENT_ID"):
         # project-dureh/dureh#35: a process an agent started (a script, an absolute or relative path the hook did not
         # rewrite) carries the agent id but no identity; it is that agent, never the desk
         env = _agent_role(args, os.environ["DUREH_AGENT_ID"])
         if given and env != given:
-            fail(f"--actor {given} conflicts with the identity of agent {os.environ['DUREH_AGENT_ID']} ({env})")
+            _identity_refused(args, env, f"--actor {given} conflicts with the identity of agent"
+                                         f" {os.environ['DUREH_AGENT_ID']} ({env})")
     return env or given or "desk"
+
+
+def _identity_refused(args, role: str | None, reason: str) -> None:
+    """UR-20261026-02: a refusal on the identity path leaves a `guard.denied` event (tool `cli`), as the hook's do."""
+    from .records import Ledger
+
+    try:
+        site = _site(args)
+        if not site.observe:
+            known = role if role and role in site.org.roles else "desk"
+            Ledger(site).event("guard.denied", known, None, {
+                "tool": "cli", "role": role or "unknown", "agent_id": os.environ.get("DUREH_AGENT_ID"),
+                "target": " ".join(["dureh", *sys.argv[1:]])[:4000], "reason": f"DUREH: {reason}"[:500]})
+    except DurehError:
+        pass
+    fail(reason)
 
 
 def _agent_role(args, agent_id: str) -> str:
@@ -52,8 +69,9 @@ def _agent_role(args, agent_id: str) -> str:
     except DurehError:
         roles = []
     if not roles or roles[-1] == "desk":
-        fail(f"this process belongs to agent {agent_id}, which has no recorded role; run the harness as"
-             " `bin/dureh <command>` written out in your own command so the hook sets your identity")
+        _identity_refused(args, None, f"this process belongs to agent {agent_id}, which has no recorded role; run the"
+                                      " harness as `bin/dureh <command>` written out in your own command so the hook"
+                                      " sets your identity")
     return roles[-1]
 
 
@@ -144,7 +162,8 @@ def cmd_hook(a):
     except json.JSONDecodeError:
         data = {}
     try:
-        out = claude_code.handle(_site(a), data)
+        # UR-20261026-02: a guard check answers within its budget (a refusal past it), never by timing out
+        out = claude_code.handle_within(_site(a), data, a.timeout)
     except Exception as exc:  # noqa: BLE001 - a hook must fail closed on PreToolUse
         if data.get("hook_event_name") == "PreToolUse":
             out = claude_code._deny(f"harness error, failing closed: {exc}")
@@ -1063,6 +1082,8 @@ def parser() -> argparse.ArgumentParser:
 
     h = add(sub, "hook", cmd_hook, "runtime hook entry point (reads the event JSON on stdin)")
     h.add_argument("runtime", choices=["claude-code"])
+    h.add_argument("--timeout", type=float, help="the runtime's timeout for this hook in seconds (the generated "
+                   "settings pass it); a PreToolUse check answers within 80%% of it, refusing past that")
 
     wi = sub.add_parser("wi", help="work items").add_subparsers(dest="wi_command", required=True)
     x = add(wi, "new", cmd_wi_new, "create a work item (desk)")

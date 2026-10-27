@@ -710,7 +710,13 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None) -> 
     role = org.role(as_role or p["role"])
     caller = org.role(by)
     if role.name not in caller.may_dispatch:
-        fail(f"{by} may not dispatch {role.name}")
+        why = f"{by} may not dispatch {role.name}"
+        if not site.observe:  # UR-20261026-02: a dispatch refused for the caller's identity leaves guard.denied
+            led.event("guard.denied", by, wi, {"tool": "cli", "role": by,
+                                               "agent_id": os.environ.get("DUREH_AGENT_ID"),
+                                               "target": f"dispatch brief --wi {wi}" + (f" --role {as_role}" if as_role else ""),
+                                               "reason": f"DUREH: {why}"})
+        fail(why)
     if caller.is_manager:
         bundle = wi if checking and p["role"] == caller.name else p.get("parent")
         if not bundle or led.get("work-item", bundle)["payload"]["role"] != caller.name:
