@@ -869,7 +869,7 @@ def cmd_github(a):
         body = Path(a.body_file).read_text(encoding="utf-8")
         _print(github.item_ask(site, _actor(a), a.title, body, a.options, a.layer, a.wi, a.project, a.repo, a.units,
                                fail_closed=a.fail_closed, decide=a.decide, recommend=a.recommend,
-                               otherwise=a.otherwise))
+                               otherwise=a.otherwise, on_hold=a.on_hold))
     elif a.item_command == "close":
         _print(github.item_close(site, _actor(a), a.wi, a.url, a.comment))
     else:
@@ -1634,6 +1634,9 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--decide", help="release 80: 결정할 것, one sentence (required on a layer-3 ask)")
     x.add_argument("--recommend", help="release 80: 추천, the recommended choice and why (required on layer 3)")
     x.add_argument("--otherwise", help="release 80: 답이 없으면, what happens without an answer (required on layer 3)")
+    x.add_argument("--on-hold", action="store_true",
+                   help="release 83, layer 1-2: open the ask with Status Today and the label on-hold instead of In "
+                        "progress (a layer 1-2 ask is refused while 2 items of the company are In progress)")
     x.add_argument("--wi", help="the work item the ask belongs to")
     x.add_argument("--project")
     x.add_argument("--units", type=float)

@@ -682,6 +682,49 @@ class Items(GithubBase):
         code, _, err = self.run_cli("item", "set", "--wi", "WI-0001", "--status", "In progress")
         self.assertEqual(code, 0, err)
 
+    def test_layer_1_2_ask_keeps_the_wip_limit(self):
+        """Release 83 (the release-82 WIP limit, dureh-team#74): a layer 1-2 ask opens In progress, so it is refused
+        while two open items of the company are In progress, before anything is created; --on-hold opens it Today
+        with the label on-hold; a layer-3 ask (Needs approval) is not counted and takes no --on-hold."""
+        body = self.tmp / "ask.md"
+        body.write_text("Which order?")
+        ask = lambda *extra: self.run_cli("item", "ask", "--title", "Order", "--body-file", str(body), *extra)  # noqa: E731
+        self.gh.items = [node("I1", 1, "first run", status="In progress"), node("I2", 2, "second run", status="In progress"),
+                         node("I4", 4, "other company", status="In progress", repo="other-org/x")]
+        self.gh.calls.clear()
+        for layer in ("1", "2"):
+            code, _, err = ask("--layer", layer)
+            self.assertEqual(code, 2, layer)
+            self.assertIn("2 open items In progress", err)
+            self.assertIn("office#1 first run", err)
+            self.assertIn("office#2 second run", err)
+            self.assertIn("--on-hold", err)
+        self.assertNotIn(["issue", "create"], self.gh.commands())
+        self.assertNotIn(["project", "item-add"], self.gh.commands())
+        self.assertFalse([e for e in self.events() if e["type"] == github.ASKED])
+        # --on-hold: Status Today and the label, the limit untouched
+        self.gh.calls.clear()
+        code, out, err = ask("--layer", "2", "--on-hold")
+        self.assertEqual(code, 0, err)
+        res = json.loads(out)
+        self.assertEqual(res["fields"]["Status"], "Today")
+        self.assertEqual(res["labels"], {"add": ["on-hold"]})
+        argv = next(c["argv"] for c in self.gh.calls if c["argv"][1:3] == ["issue", "create"])
+        self.assertEqual([argv[i + 1] for i, a in enumerate(argv) if a == "--label"], ["kind:decision", "on-hold"])
+        self.assertEqual([e for e in self.events() if e["type"] == github.ASKED][-1]["payload"]["labels"],
+                         {"add": ["on-hold"]})
+        # layer 3 opens Needs approval: not refused by the limit, and --on-hold does not apply
+        code, _, err = ask("--layer", "3", *THREE)
+        self.assertEqual(code, 0, err)
+        code, _, err = ask("--layer", "3", "--on-hold", *THREE)
+        self.assertEqual(code, 2)
+        self.assertIn("--on-hold is for a layer 1-2 ask", err)
+        # one slot free: the layer-2 ask opens In progress
+        self.gh.items[0] = node("I1", 1, "first run", status="Done")
+        code, out, err = ask("--layer", "2")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["fields"]["Status"], "In progress")
+
     def test_item_priority_and_roadmap_dates(self):
         """#31: the desk sets Priority (P0-P3) and the roadmap's Start/Target dates through the harness."""
         code, _, err = self.run_cli("item", "add", "--wi", "WI-0001", "--priority", "p2")

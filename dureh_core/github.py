@@ -897,7 +897,7 @@ def _in_progress(cfg: dict, items: list[dict], exclude_url: str | None = None) -
             and not (exclude_url and it.get("url") == exclude_url)]
 
 
-def _refuse_wip(cfg: dict, items: list[dict], url: str | None) -> None:
+def _refuse_wip(cfg: dict, items: list[dict], url: str | None, also: str = "") -> None:
     """Release 82 (dureh-team#74): a third In progress item of the company is refused, naming the running ones."""
     running = _in_progress(cfg, items, url)
     if len(running) >= WIP_IN_PROGRESS:
@@ -905,7 +905,7 @@ def _refuse_wip(cfg: dict, items: list[dict], url: str | None) -> None:
                           for it in running)
         fail(f"refused: the board already has {len(running)} open items In progress for {cfg['org']} (limit"
              f" {WIP_IN_PROGRESS}, Director 2026-10-26): {names}. Finish one, or move one back with"
-             f" `dureh github item set --url <url> --status Today --on-hold`")
+             f" `dureh github item set --url <url> --status Today --on-hold`{also}")
 
 
 def item_set(site: Site, actor: str, wi: str | None = None, url: str | None = None, status=None, project=None,
@@ -962,7 +962,7 @@ def item_set(site: Site, actor: str, wi: str | None = None, url: str | None = No
 def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] | None = None, layer: int = 3,
              wi: str | None = None, project=None, repo: str | None = None, units=None,
              fail_closed: bool = False, decide: str | None = None, recommend: str | None = None,
-             otherwise: str | None = None) -> dict:
+             otherwise: str | None = None, on_hold: bool = False) -> dict:
     """A decision ask: a `kind:decision` issue (layer 3: assigned to config github.director_login, Status Waiting for
     Director), on the board with its Layer; the answer is the board's Decision, read by `watch`/`status`.
     Release 80 (dureh-team#30 Option 1, the Director's three-line ask of dureh-team#49): a layer-3 ask opens with three
@@ -970,11 +970,16 @@ def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] |
     (`otherwise`); the body follows as background. A layer-3 ask without them is refused.
     `fail_closed` (release 78, v0.4 bundle 1): the ask also carries the `fail-closed` label and a line saying it has
     no fallback; a body or option naming a fallback option is refused before anything is created, and the record
-    keeps `fail_closed: true` so `day decide --ask <url>` refuses a provisional choice on it."""
+    keeps `fail_closed: true` so `day decide --ask <url>` refuses a provisional choice on it.
+    Release 83 (the release-82 WIP limit, dureh-team#74): a layer 1-2 ask opens In progress, so it is refused like
+    `item set --status "In progress"` while the company already has WIP_IN_PROGRESS open items In progress (one
+    board read, before anything is created); `on_hold` opens it with Status Today and the label `on-hold` instead."""
     from .records import FAIL_CLOSED_LABEL, fallback_lines
 
     _require_desk(site, actor)
     cfg = config(site)
+    if on_hold and int(layer) == 3:
+        fail("--on-hold is for a layer 1-2 ask (it would open In progress); a layer-3 ask opens Needs approval")
     options = [o.strip() for o in options or [] if o.strip()]
     if len(options) > 3:
         fail("at most 3 options (the Decision column has Option 1, Option 2 and Option 3)")
@@ -1010,7 +1015,10 @@ def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] |
     text += (f"\n\nLayer {layer} ({who}). Decide in the board's **Decision** column: {', '.join(choices)}. "
              f"Comments are opinions; the Decision column is the decision.\n\n{DESK_MARK}")
     text = _clean(text, "the issue body")
-    fields = _fields("Needs approval" if int(layer) == 3 else "In progress", project, layer, units)
+    status = "Needs approval" if int(layer) == 3 else "Today" if on_hold else "In progress"
+    fields = _fields(status, project, layer, units)
+    if status == "In progress":  # release 83: the release-82 limit, before anything is created
+        _refuse_wip(cfg, board(cfg)["items"], None, ", or file this ask with `--on-hold` (Status Today)")
     meta = _meta(cfg)
     _edits(meta, fields)
     if FIELD_DECISION not in meta["fields"]:
@@ -1020,6 +1028,10 @@ def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] |
     gh(cfg, ["label", "create", DECISION_LABEL, "--repo", repo_name, "--color", "5319e7", "--description",
              "a decision asked on the board's Decision column", "--force"])
     labels = [DECISION_LABEL]
+    if on_hold:
+        gh(cfg, ["label", "create", ON_HOLD_LABEL, "--repo", repo_name, "--color", "fbca04", "--description",
+                 "moved back to Today: waits for a free In progress slot", "--force"])
+        labels.append(ON_HOLD_LABEL)
     if fail_closed:
         gh(cfg, ["label", "create", FAIL_CLOSED_LABEL, "--repo", repo_name, "--color", "b60205", "--description",
                  "no fallback, no timeout approval: waits for an explicit answer", "--force"])
@@ -1031,6 +1043,8 @@ def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] |
            "options": len(options), "assignee": assignee, "fields": fields, "chars": len(text)}
     if fail_closed:
         rec["fail_closed"] = True
+    if on_hold:
+        rec["labels"] = {"add": [ON_HOLD_LABEL]}
     Ledger(site).event(ASKED, actor, wi, rec, [wi] if wi else None)
     return {"asked": True, "wi": wi, **rec}
 
