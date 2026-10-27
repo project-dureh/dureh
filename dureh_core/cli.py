@@ -1045,7 +1045,7 @@ def _early_args(x, what: str) -> None:
                         "in local time and UTC)" + (", or past it with plan items still open (--reason alone)"
                                                    if what == "end" else ""))
     x.add_argument("--approval", help="with --early: the recorded approval (a Director/DUREH `approve` decision id, or "
-                                      "a board Decision = Approved: its github.decision.changed event id, issue URL or "
+                                      "a board Decision = Approve 1: its github.decision.changed event id, issue URL or "
                                       "org/repo#N)")
     x.add_argument("--reason", help="with --early: why the day ends early (the Director's words)")
 
@@ -1595,10 +1595,12 @@ def parser() -> argparse.ArgumentParser:
     gp = sub.add_parser("github", help="the company's GitHub board (release 69; organization, board, office repository "
                          "and token file come from config `github`; docs/github.md): status, watch, and the desk's "
                          "board items").add_subparsers(dest="github_command", required=True)
-    x = add(gp, "status", cmd_github, "the board's items grouped by Status, with Decision, Project and Layer; read-only")
+    x = add(gp, "status", cmd_github, "the board's items grouped by Status, with Decision, Project and Layer and the "
+                                      "Director's latest comment since the ask on a decided or waiting item; read-only")
     x.add_argument("--json", action="store_true")
     x = add(gp, "watch", cmd_github, "desk: poll the board and the organization's open issues; print one line per "
-                                     "Decision change, per new comment and per newly opened issue (a kind:request one "
+                                     "Decision change (with the Director's latest comment since the ask), per new "
+                                     "comment and per newly opened issue (a kind:request one "
                                      "is a work request) not marked as the desk's, nothing else (for Monitor); a failed "
                                      "poll is skipped, a rate-limited one backs off (one line, then one \"resumed\" "
                                      "line); records github.decision.changed and github.issue.opened")
@@ -1635,7 +1637,8 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--project")
     x.add_argument("--layer", type=int, choices=[1, 2, 3])
     x.add_argument("--units", type=float)
-    x.add_argument("--decision", help="layer 1-2 only: Approved, Option 1..3, Rejected, Later")
+    x.add_argument("--decision", help="layer 1-2 only: Approve 1..3, Rejected, Discuss (old names Approved, Option "
+                                      "1..3, Later, Reject are read as the new ones)")
     x.add_argument("--on-hold", action="store_true", help="release 82: Status Today plus the label on-hold (a later "
                    "--status 'In progress' removes it); frees an In progress slot (at most 2 per company)")
     x.add_argument("--priority", help="P0..P3 (the board's Priority; desk rule: P2 on new items unless asked)")
@@ -1647,7 +1650,8 @@ def parser() -> argparse.ArgumentParser:
                                    "column (`github watch`/`status`); records github.ask.created")
     x.add_argument("--title", required=True)
     x.add_argument("--body-file", required=True)
-    x.add_argument("--options", nargs="+", default=[], help="up to 3 options (Option 1..3 in the Decision column)")
+    x.add_argument("--options", nargs="+", default=[], help="up to 3 options (Approve 1..3 in the Decision column; "
+                                                              "Rejected and Discuss are always offered)")
     x.add_argument("--layer", type=int, choices=[1, 2, 3], default=3)
     x.add_argument("--fail-closed", action="store_true",
                    help="release 78: a fail-closed kind (no 30-minute fallback, no timeout approval): label fail-closed; "

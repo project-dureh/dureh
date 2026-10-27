@@ -278,7 +278,7 @@ Director's recorded approval; check `day status` first; times are local.**
 - `<id>` is a recorded approval, at most 24 h old: a `decision` record with disposition `approve` by `Director` or
   `DUREH` (approval layer 2), not one bound to another action (`gate1`, `gate2`, `push-approval`, `day-choice`),
   e.g. `dureh ledger add decision --disposition approve --by Director --summary "early close" --memo "<words>"`;
-  or a board Decision = Approved recorded by `dureh github watch` (`github.decision.changed`), named by its event
+  or a board Decision = Approve 1 (old name Approved or Option 1) recorded by `dureh github watch` (`github.decision.changed`), named by its event
   id, the issue URL or `org/repo#N`.
 - The end report and `day.closed` carry `early_close` (`planned_end`, `planned_end_utc`, `left`, `approval`,
   `reason`) and reference the approval. A close after an end report that recorded an early approval is covered by

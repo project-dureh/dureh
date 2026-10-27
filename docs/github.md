@@ -10,13 +10,36 @@ organization with
     (Today = decided work queued; In progress = agents working on it now, at most 2 open items per company, enforced by `item set`/`item add` since release 82 and by a layer 1-2 `item ask` since release 83)
   - **Project**: single select, one option per project
   - **Layer**: 1 (company), 2 (DUREH), 3 (Director)
-  - **Decision**: Approved, Option 1, Option 2, Option 3, Rejected, Later
+  - **Decision**: Approve 1, Approve 2, Approve 3, Rejected, Discuss (Director 2026-10-27; see Decision values)
   - **Units**: number
 - and the views All, Today, Director, Projects.
 
-**The Director decides only through the Decision column.** Comments are opinions, never instructions. Approval layers
+**The Director decides in the Decision column, and the Decision is read with his replies on the item.** Wherever
+the desk reads a Decision (`github watch`, `github status`) it also reads the Director's comments on the item since the
+ask (after the last `ANSWER:` comment; by `director_login`, without the desk's or DUREH's marker) and shows the latest
+one. Approval layers
 (CHARTER): layer 1, the company decides; layer 2, DUREH decides after one delegation; layer 3, the Director decides each
 time. Layers 1 and 2 are recorded on the board by the desk; a layer-3 Decision is set only by the Director.
+
+### Decision values (Director 2026-10-27)
+
+| value | meaning (a decision ask) | meaning (a review) |
+|---|---|---|
+| Approve 1 | approve option 1 (the recommended one) | accept |
+| Approve 2 | approve option 2 | accept, the follow-up from the replies next |
+| Approve 3 | approve option 3 | rework before accepting |
+| Rejected | no; nothing proceeds | revert |
+| Discuss | hold: nothing proceeds; the desk answers the Director's comments on the item, then he decides again | the same |
+
+Discuss is neither an approval nor a rejection: the watch line says "hold" and, 20 minutes later without a desk
+comment, a `followup` line asks the desk to answer in the comments; a fail-closed ask with Discuss still counts as
+undecided (`item set --status Done`, `item close` and `sweep` keep it). Until every board is migrated the harness
+reads the other names as the new ones (`github.decision_value`): Approved and Option 1 -> Approve 1, Option 2 ->
+Approve 2, Option 3 -> Approve 3, Reject -> Rejected, Later -> Discuss; a stored old value is no Decision change, and
+`item set --decision` picks the board's old option of the same meaning while the board has no new one.
+`item ask` writes the choices as a multiple choice in these names (`Approve 1..N` for its options, then Rejected and
+Discuss). The early-close guard (`day end|close --early --approval`) accepts a board Decision of Approve 1 (or its old
+names Approved / Option 1).
 
 Slack (docs/slack.md) is unchanged and is switched off per company by config later. While both are on, the desk asks
 on GitHub; Slack keeps the day thread reports, and the Slack opinions and consult paths drop out of the desk text.
@@ -66,8 +89,8 @@ Every `gh` call goes through one runner that reads the token at call time and pa
 
 | command | who | what |
 |---|---|---|
-| `github status [--json]` | anyone; allowed with `--observe` | the board's items grouped by Status, each with its Decision, Project and Layer |
-| `github watch [--interval 120] [--once]` | desk, as a Monitor in working hours | one line per Decision change, per new comment and per newly opened issue not marked as the desk's; nothing else |
+| `github status [--json]` | anyone; allowed with `--observe` | the board's items grouped by Status, each with its Decision, Project and Layer; under a decided or waiting item the Director's latest comment since the ask (`Director: ...`) and, on Discuss, the hold line; `--json` rows carry `director_comments` |
+| `github watch [--interval 120] [--once]` | desk, as a Monitor in working hours | one line per Decision change (with ` | Director: <latest comment since the ask> <url>`, or `none`), per new comment and per newly opened issue not marked as the desk's; nothing else |
 | `github item add --wi WI [--status S] [--project P] [--layer 1-3] [--units N] [--priority P0-P3] [--start D] [--target D] [--repo R \| --url U]` | desk | an issue for the work item (its title and goal only) in `office_repo` or `--repo` (or the existing issue `--url`), added to the board with its fields; desk rule: Priority P2 unless asked |
 | `github item set (--wi WI \| --url U) [--status] [--project] [--layer] [--units] [--decision] [--priority] [--start] [--target] [--on-hold]` | desk | change a linked item's fields; `--decision` only on a layer 1-2 item; `--priority P0..P3` matches the board option `P1 ...`; `--start`/`--target` YYYY-MM-DD set the `Start date`/`Target date` fields (#31). Release 82 (WIP limit, Director 2026-10-26, dureh-team#74): `--status "In progress"` reads the board once and is refused while 2 open items of the company (a repository of `org`, or a draft) other than this one are In progress, naming both and the way out (finish one, or `item set --url <url> --status Today --on-hold`); `item add --status "In progress"` is refused the same way. `--on-hold` sets Status Today and adds the label `on-hold` (created when missing); a later move to In progress removes it. The record carries `labels` {add, remove} when labels changed |
 | `github item ask --title T --body-file F [--options O1 O2 O3] [--layer 3] [--decide D --recommend R --otherwise O] [--fail-closed] [--on-hold] [--wi WI] [--project P]` | desk | a decision ask: a `kind:decision` issue with the options and the Decision line; layer 3: assigned to `director_login`, Status Needs approval, and (release 80) it opens with three lines **결정할 것** / **추천** / **답이 없으면** from `--decide`/`--recommend`/`--otherwise` (required on layer 3; on a fail-closed ask `--otherwise` names no fallback option), the body following as background; `--fail-closed` (release 78): label `fail-closed`, a "no fallback" line, a body or option naming a fallback option is refused, the record keeps `fail_closed: true` (`day decide --ask <url>` then refuses a provisional choice); `--wi` names the WI the ask is about, never the WI's board link (release 81): `item set/close/comment --wi` keep acting on the WI's own item, and the ask is changed only by `--url`; on a fail-closed ask (label or record) whose Decision is empty, `item set --url <ask> --status Done` and `item close --url <ask>` are refused, naming the Decision column (other undecided asks stay allowed by hand). Release 83: a layer 1-2 ask opens In progress, so it reads the board once and is refused like `item set --status "In progress"` while 2 open items of the company are In progress (nothing is created); `--on-hold` (layer 1-2 only) opens it with Status Today and the label `on-hold`, which a later `item set --url <ask> --status "In progress"` removes |
@@ -86,7 +109,7 @@ token can list, when it can; release 79: the newest 20 open issues of each, the 
 every 600 s), and prints
 
 ```
-decision: office#12 WI-0007 example item -> Option 1 (was none) [layer 3] https://github.com/example-org/office/issues/12
+decision: office#12 WI-0007 example item -> Approve 1 (was none) [layer 3] https://github.com/example-org/office/issues/12 | Director: 1번으로, 테스트 먼저 https://github.com/example-org/office/issues/12#issuecomment-1
 comment: office#12 by example-director: please also check the edge case https://github.com/example-org/office/issues/12#issuecomment-1
 work request office#14 by example-director: rerun the example analysis | https://github.com/example-org/office/issues/14
 issue example-project#3 by example-director: the plot axis is wrong | https://github.com/example-org/example-project/issues/3
@@ -149,11 +172,11 @@ GitHub does not report who changed a field value; the Decision column's authorit
 (only the Director should set Decision on a layer-3 item).
 
 
-Follow-up reminder (release 80, project-dureh/dureh-team#63): when a Decision the desk must act on (Approved,
-Option 1-3) is seen, the watch keeps it in `watch.json` `followups`; if the item is still open 20 minutes later and no
+Follow-up reminder (release 80, project-dureh/dureh-team#63): when a Decision the desk must act on (Approve 1-3,
+or Discuss: an answer in the comments) is seen, the watch keeps it in `watch.json` `followups`; if the item is still open 20 minutes later and no
 new comment carries the desk marker, it prints once
 `followup: <ref> <title> -> <Decision> N min ago, still open and no desk comment since: ...`. The desk comments on the
-item: what it did, or what blocks it and the Director's step. The first poll tracks nothing; a closed item or a
+item: what it did, or what blocks it and the Director's step (Discuss: the answer to his comments). The first poll tracks nothing; a closed item or a
 changed Decision drops the reminder. An empty board answer is a skipped poll (the state is kept).
 ## Records
 
@@ -163,7 +186,7 @@ changed Decision drops the reminder. An empty board answer is a skipped poll (th
 | `github.item.updated` | `{item_id, url, fields}` |
 | `github.ask.created` | `{url, repo, number, item_id, layer, options, assignee, fields, chars}` (the WI when given; `fail_closed: true` with `--fail-closed`, release 78) |
 | `github.comment.posted` | `{url, chars}` |
-| `github.decision.changed` | `{item_id, url, from, to, layer, first_poll}` |
+| `github.decision.changed` | `{item_id, url, from, to, layer, first_poll, director_comments}` (`to`/`from` in the current names; `director_comments` = the URLs of his comments since the ask, never text) |
 | `github.issue.opened` | `{issue_id, repo, number, url, author, request, created}` |
 
 No record carries issue or comment text. `github.*` events are written only by `dureh github` (`event add` refuses them).

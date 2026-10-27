@@ -157,7 +157,7 @@ FAIL_CLOSED_RULE = ("Fail-closed asks (release 78): " + "; ".join(FAIL_CLOSED_KI
                     " --fail-closed` (or `--ask <url>`): `--action provisional` is refused, and an `acted` choice needs the"
                     " approver in `--by`.")
 _FALLBACK_CUE = re.compile(r"fall\s*-?\s*back|폴백|대체\s*선택|30\s*-?\s*min|30\s*분|무응답|무답|no answer", re.I)
-_OPTION_NAME = re.compile(r"\bOption\s*[1-9A-C](?![0-9A-Za-z])|선택지\s*[1-9A-C]|옵션\s*[1-9A-C]|(?<![\d.])[1-9]\s*번(?!째)", re.I)
+_OPTION_NAME = re.compile(r"\bApprove\s*[1-3](?![0-9A-Za-z])|\bOption\s*[1-9A-C](?![0-9A-Za-z])|선택지\s*[1-9A-C]|옵션\s*[1-9A-C]|(?<![\d.])[1-9]\s*번(?!째)", re.I)
 _NO_FALLBACK = re.compile(r"\bnone\b|\bno fallback\b|\bnot? apply\b|없음|없다|없습니다|적용하지 않|기다린다|기다립니다|wait",
                           re.I)
 

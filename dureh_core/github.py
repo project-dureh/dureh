@@ -17,7 +17,14 @@ always, every repository the token can list when it can) that the desk did not w
 
 Release 79 (v0.4 bundle 1 step 3): the watch asks small pages and scans the other repositories every
 ORG_SCAN_INTERVAL; every watch query reports its GraphQL cost to cache/github/usage.jsonl (M1) and a rate-limit hit
-adds an `exhausted` line (M2)."""
+adds an `exhausted` line (M2).
+
+Decision values (Director 2026-10-27): Approve 1, Approve 2, Approve 3, Rejected, Discuss. The other names Approved /
+Option N / Reject / Later are read as the current names until every board is migrated (`decision_value`): Approved and Option 1 ->
+Approve 1, Option 2/3 -> Approve 2/3, Reject -> Rejected, Later -> Discuss. Discuss is a hold: the work does not
+proceed and the desk answers the Director in the item's comments; it is neither an approval nor a rejection. Wherever
+the desk reads a Decision (`watch`, `status`) it also reads the Director's comments on the item since the ask
+(`director_comments`)."""
 from __future__ import annotations
 
 import json
@@ -41,7 +48,13 @@ REQUEST_LABEL = "kind:request"
 # dureh-team#28 A (Director 2026-10-20): Needs approval = the Director approves, chooses or comments (decision asks,
 # review requests); Waiting for Director = a step only the Director does
 STATUSES = ("Backlog", "Today", "In progress", "Needs approval", "Waiting for Director", "Done")
-DECISIONS = ("Approved", "Option 1", "Option 2", "Option 3", "Rejected", "Later")
+DECISIONS = ("Approve 1", "Approve 2", "Approve 3", "Rejected", "Discuss")  # Director 2026-10-27, the board's names
+APPROVE = DECISIONS[:3]
+REJECT, DISCUSS = "Rejected", "Discuss"
+DECISION_ALIASES = {"Approved": "Approve 1", "Option 1": "Approve 1", "Option 2": "Approve 2", "Option 3": "Approve 3",
+                    "Reject": "Rejected", "Later": "Discuss"}  # other names, read until every board is migrated
+_DECISION_CANON = {**{v.lower(): v for v in DECISIONS}, **{k.lower(): v for k, v in DECISION_ALIASES.items()}}
+TEAM_MARK = "<!-- dureh -->"  # DUREH's own comments (it posts as the Director's account)
 LAYERS = {1: "company", 2: "DUREH", 3: "Director"}
 FIELD_STATUS, FIELD_PROJECT, FIELD_LAYER, FIELD_DECISION, FIELD_UNITS = "Status", "Project", "Layer", "Decision", "Units"
 # #31: roadmap fields; a Priority of P1 matches an option named "P1" or "P1 ..."; dates are YYYY-MM-DD
@@ -64,6 +77,47 @@ HOLD_LABELS = ("waiting-director", "needs-review", "needs-approval")
 # an item moved back to Today with `item set --on-hold` carries ON_HOLD_LABEL until it is In progress again
 WIP_IN_PROGRESS = 2
 ON_HOLD_LABEL = "on-hold"
+
+
+def decision_value(value) -> str | None:
+    """The Decision's current name for a board value of either set; None when empty; an unknown value unchanged."""
+    if value is None or not str(value).strip():
+        return None
+    text = " ".join(str(value).split())
+    return _DECISION_CANON.get(text.lower(), text)
+
+
+def is_approval(value) -> bool:
+    return decision_value(value) in APPROVE
+
+
+def director_comments(it: dict, director: str | None) -> list[dict]:
+    """The Director's comments on the item since the ask (Director 2026-10-27: a Decision is read with them): the
+    comments after the last `ANSWER:` pass-on comment (else all of the item's last 30), by `director` (config
+    github.director_login; any author when it is unset) and not marked as the desk's or DUREH's. Oldest first, as
+    {"text": first non-empty line (at most 200 characters), "url"}."""
+    cs = it.get("comments") or []
+    start = 0
+    for i, c in enumerate(cs):
+        if (c.get("body") or "").lstrip().startswith("ANSWER:"):
+            start = i + 1
+    out = []
+    for c in cs[start:]:
+        body = c.get("body") or ""
+        if DESK_MARK in body or TEAM_MARK in body or (director and c.get("author") != director):
+            continue
+        first = next((ln.strip() for ln in body.splitlines() if ln.strip()), "")
+        out.append({"text": _one_line(first, 200), "url": c.get("url") or it.get("url")})
+    return out
+
+
+def replies_text(replies: list[dict]) -> str:
+    """` | Director: <latest> <url> (+N earlier)`, or that there is none."""
+    if not replies:
+        return " | Director's comments: none"
+    r = replies[-1]
+    more = f" (+{len(replies) - 1} earlier)" if len(replies) > 1 else ""
+    return f" | Director: {r['text']} {r['url'] or ''}".rstrip() + more
 
 
 class GhError(DurehError):
@@ -262,7 +316,8 @@ def _parse_item(node: dict) -> dict:
             "url": c.get("url"), "state": c.get("state"), "repo": (c.get("repository") or {}).get("nameWithOwner"),
             "assignees": [a.get("login") for a in (c.get("assignees") or {}).get("nodes") or [] if a],
             "labels": [n.get("name") for n in (c.get("labels") or {}).get("nodes") or [] if n],
-            "status": values.get(FIELD_STATUS), "decision": values.get(FIELD_DECISION),
+            "status": values.get(FIELD_STATUS), "decision": decision_value(values.get(FIELD_DECISION)),
+            "decision_raw": values.get(FIELD_DECISION),
             "project": values.get(FIELD_PROJECT), "layer": values.get(FIELD_LAYER), "units": values.get(FIELD_UNITS),
             "comments": comments}
 
@@ -293,6 +348,7 @@ def status(site: Site) -> dict:
         row = {k: it[k] for k in ("number", "repo", "title", "url", "status", "decision", "project", "layer", "units",
                                   "assignees")}
         row["comments"] = len(it["comments"])
+        row["director_comments"] = director_comments(it, cfg.get("director_login"))
         groups.setdefault(it["status"] or "(no status)", []).append(row)
     return {"org": cfg["org"], "project": cfg["project"], "title": b["meta"]["title"],
             "groups": {k: v for k, v in groups.items() if v}, "count": len(b["items"])}
@@ -310,6 +366,12 @@ def status_lines(res: dict) -> list[str]:
         for r in rows:
             extra = "".join(f" [{k}: {r[k]}]" for k in ("decision", "project", "layer") if r.get(k) not in (None, ""))
             lines.append(f"  {_ref(r)} {r['title'] or ''}{extra}")
+            said = r.get("director_comments") or []
+            if r.get("decision") == DISCUSS:
+                lines.append("    Discuss: hold; the work does not proceed; answer the Director in the item's comments")
+            if said and (r.get("decision") or r.get("status") in ("Needs approval", "Waiting for Director")):
+                more = f" (+{len(said) - 1} earlier)" if len(said) > 1 else ""
+                lines.append(f"    Director: {said[-1]['text']} {said[-1]['url'] or ''}".rstrip() + more)
     return lines
 
 
@@ -504,7 +566,7 @@ def _issue_lines(site: Site, actor: str, cfg: dict, old: dict | None,
 
 
 FOLLOWUP_AFTER = 20 * 60  # release 80 (project-dureh/dureh-team#63): seconds after a Decision before the reminder
-FOLLOWUP_DECISIONS = ("Approved", "Option 1", "Option 2", "Option 3")
+FOLLOWUP_DECISIONS = (*APPROVE, DISCUSS)  # Discuss: the desk owes the Director an answer in the comments
 
 
 def _clock() -> float:
@@ -512,14 +574,15 @@ def _clock() -> float:
 
 
 def _followups(items: list[dict], pending: dict, first: bool, changed: set) -> tuple[list[str], dict]:
-    """Release 80 (dureh-team#63 part 3): a Decision the desk must act on (Approved / Option N) whose item is still
-    open 20 minutes later with no new desk comment gets one line: report the follow-up, or the block and the
-    Director's step, on that item. `pending` is {item id: {"at", "decision", "before": [comment ids]}}."""
+    """Release 80 (dureh-team#63 part 3): a Decision the desk must act on (Approve 1-3, or Discuss: an answer in
+    the comments) whose item is still open 20 minutes later with no new desk comment gets one line: report the
+    follow-up, or the block and the Director's step, on that item (Discuss: answer the Director's comments). `pending`
+    is {item id: {"at", "decision", "before": [comment ids]}}."""
     now, out, keep = _clock(), [], {}
     by_id = {it["id"]: it for it in items}
     for iid, p in pending.items():
         it = by_id.get(iid)
-        if not it or it.get("state") not in (None, "OPEN") or it.get("decision") != p.get("decision"):
+        if not it or it.get("state") not in (None, "OPEN") or it.get("decision") != decision_value(p.get("decision")):
             continue
         before = set(p.get("before") or [])
         if any(c.get("id") not in before and DESK_MARK in (c.get("body") or "") for c in it["comments"]):
@@ -527,9 +590,12 @@ def _followups(items: list[dict], pending: dict, first: bool, changed: set) -> t
         if now - float(p.get("at") or now) < FOLLOWUP_AFTER:
             keep[iid] = p
             continue
-        out.append(f"followup: {_ref(it)} {it['title'] or ''} -> {p['decision']} {int((now - p['at']) // 60)} min ago, "
-                   f"still open and no desk comment since: report the follow-up on the item, or the block with the "
-                   f"Director's step (대표님 조치 필요) {it['url'] or ''}".rstrip())
+        dec = decision_value(p["decision"])
+        todo = ("answer the Director's comments on the item (Discuss: a hold, the work does not proceed)"
+                if dec == DISCUSS else "report the follow-up on the item, or the block with the Director's step "
+                                       "(대표님 조치 필요)")
+        out.append(f"followup: {_ref(it)} {it['title'] or ''} -> {dec} {int((now - p['at']) // 60)} min ago, "
+                   f"still open and no desk comment since: {todo} {it['url'] or ''}".rstrip())
     if not first:
         for it in items:
             if it["id"] in changed and it.get("decision") in FOLLOWUP_DECISIONS and it.get("state") in (None, "OPEN"):
@@ -554,7 +620,8 @@ def poll(site: Site, actor: str, cfg: dict) -> list[str]:
         # and comment as new on the next poll. A failed read: the poll is skipped and the state kept.
         raise GhError(f"the board {cfg['org']}/{cfg['project']} answered with no items; kept the last state")
     first = old is None
-    seen_dec = {} if first else dict(old.get("decisions") or {})
+    # stored values of either set read as the current names: a migrated option (Approved -> Approve 1) is no change
+    seen_dec = {} if first else {k: decision_value(v) for k, v in (old.get("decisions") or {}).items()}
     seen_com = {} if first else {k: set(v) for k, v in (old.get("comments") or {}).items()}
     lines, links, led = [], None, Ledger(site)
     new_dec, new_com, changed = {}, {}, set()
@@ -568,10 +635,14 @@ def poll(site: Site, actor: str, cfg: dict) -> list[str]:
             was = seen_dec.get(iid)
             layer = f" [layer {it['layer']}]" if it.get("layer") else ""
             wi = f" {link['wi']}" if link.get("wi") and link["wi"] not in (it["title"] or "") else ""
+            said = director_comments(it, cfg.get("director_login")) if dec else []
+            hold = (" | Discuss: hold, the work does not proceed; answer the Director in the item's comments"
+                    if dec == DISCUSS else "")
             lines.append(f"decision: {_ref(it)}{wi} {it['title'] or ''} -> {dec or 'none'} (was {was or 'none'})"
-                         f"{layer} {it['url'] or ''}".rstrip())
+                         f"{layer} {it['url'] or ''}".rstrip() + (hold + replies_text(said) if dec else ""))
             led.event(DECIDED, actor, link.get("wi"), {"item_id": iid, "url": it["url"], "from": was, "to": dec,
-                                                        "layer": it.get("layer"), "first_poll": first})
+                                                        "layer": it.get("layer"), "first_poll": first,
+                                                        "director_comments": [c["url"] for c in said]})
         ids = [c["id"] for c in it["comments"] if c.get("id")]
         before = seen_com.get(iid, set())
         if not first:
@@ -725,6 +796,10 @@ def _option(meta: dict, field: str, value) -> tuple[str, str]:
         n = name.strip().lower()
         if n == want or (field in (FIELD_LAYER, FIELD_PRIORITY) and re.match(rf"^{re.escape(want)}\b", n)):
             return f["id"], oid
+    if field == FIELD_DECISION:  # a board not yet migrated: the old option of the same meaning (Approve 1 = Approved)
+        for name, oid in f["options"].items():
+            if decision_value(name) == decision_value(value):
+                return f["id"], oid
     fail(f"the board's {field} has no option {value!r} (options: {', '.join(f['options']) or 'none'})")
 
 
@@ -767,10 +842,11 @@ def _fields(status=None, project=None, layer=None, units=None, decision=None, pr
     if units is not None:
         out[FIELD_UNITS] = units
     if decision is not None:
-        match = [d for d in DECISIONS if d.lower() == str(decision).strip().lower()]
-        if not match:
-            fail(f"--decision must be one of {', '.join(DECISIONS)}, not {decision!r}")
-        out[FIELD_DECISION] = match[0]
+        canon = decision_value(decision)
+        if canon not in DECISIONS:
+            fail(f"--decision must be one of {', '.join(DECISIONS)} (old names Approved, Option 1-3, Later and Reject "
+                 f"are read as Approve 1, Approve 1-3, Rejected, Discuss; Reject as Rejected), not {decision!r}")
+        out[FIELD_DECISION] = canon
     if priority is not None:
         want = str(priority).strip().upper()
         if want not in PRIORITIES:
@@ -982,7 +1058,7 @@ def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] |
         fail("--on-hold is for a layer 1-2 ask (it would open In progress); a layer-3 ask opens Needs approval")
     options = [o.strip() for o in options or [] if o.strip()]
     if len(options) > 3:
-        fail("at most 3 options (the Decision column has Option 1, Option 2 and Option 3)")
+        fail("at most 3 options (the Decision column has Approve 1, Approve 2 and Approve 3)")
     if fail_closed:
         named = fallback_lines("\n".join([body or "", *options]))
         if named:
@@ -1005,15 +1081,18 @@ def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] |
         head = "\n".join(f"**{k}:** {_clean(v, '--' + n, 500)}" for k, v, n in
                          (("결정할 것", decide, "decide"), ("추천", recommend, "recommend"), ("답이 없으면", otherwise, "otherwise")))
         text = f"{head}\n\n---\n**배경 · Background**\n\n{text}"
-    if options:
-        text += "\n\n**Options**\n" + "\n".join(f"- **Option {i}**: {o}" for i, o in enumerate(options, 1))
-    choices = ["Approved", *[f"Option {i}" for i in range(1, len(options) + 1)], "Rejected", "Later"]
+    # Director 2026-10-27: a multiple choice in the Decision column's own names
+    approves = [f"- **Approve {i}**: {o}" for i, o in enumerate(options, 1)] or ["- **Approve 1**: approve as asked"]
+    text += ("\n\n**Options · 선택지** (Decision column)\n" + "\n".join(approves)
+             + "\n- **Rejected**: no; nothing here proceeds"
+             + "\n- **Discuss**: hold; nothing proceeds, the desk answers your comments on this item")
+    choices = [*[f"Approve {i}" for i in range(1, max(len(options), 1) + 1)], REJECT, DISCUSS]
     who = "the Director" if int(layer) == 3 else LAYERS.get(int(layer), "?")
     if fail_closed:
         text += (f"\n\n**Fail-closed**: no 30-minute fallback and no timeout approval; nothing here proceeds until "
                  f"{who} answers.")
     text += (f"\n\nLayer {layer} ({who}). Decide in the board's **Decision** column: {', '.join(choices)}. "
-             f"Comments are opinions; the Decision column is the decision.\n\n{DESK_MARK}")
+             f"The Decision column is the decision; your comments on this item are read with it.\n\n{DESK_MARK}")
     text = _clean(text, "the issue body")
     status = "Needs approval" if int(layer) == 3 else "Today" if on_hold else "In progress"
     fields = _fields(status, project, layer, units)
@@ -1074,9 +1153,9 @@ def _refuse_open_fail_closed(site: Site, cfg: dict, url: str | None, what: str) 
         return
     it = next((i for i in board(cfg)["items"] if i.get("url") == url.strip()), None)
     labelled = bool(it) and FAIL_CLOSED_LABEL in (it.get("labels") or [])
-    if not (labelled or ask_fail_closed(site, url)) or (it and it.get("decision")):
+    if not (labelled or ask_fail_closed(site, url)) or (it and it.get("decision") not in (None, DISCUSS)):
         return
-    fail(f"refused: {url} is a fail-closed ask and its {FIELD_DECISION} column is empty; the desk cannot {what} it"
+    fail(f"refused: {url} is a fail-closed ask and its {FIELD_DECISION} column is empty or Discuss; the desk cannot {what} it"
          f" until the answer is in the board's {FIELD_DECISION} column (no fallback, no timeout approval)")
 
 
@@ -1107,7 +1186,7 @@ def _sweep_keeps(it: dict, fail_closed_urls: set[str], asks: set[str]) -> bool:
     labels = set(it.get("labels") or [])
     if labels & set(HOLD_LABELS) or FAIL_CLOSED_LABEL in labels or it["url"] in fail_closed_urls:
         return True
-    return (DECISION_LABEL in labels or it["url"] in asks) and not it.get("decision")
+    return (DECISION_LABEL in labels or it["url"] in asks) and it.get("decision") in (None, DISCUSS)  # Discuss: no answer yet
 
 
 def sweep(site: Site, actor: str, dry_run: bool = False) -> dict:

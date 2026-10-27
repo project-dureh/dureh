@@ -1270,11 +1270,12 @@ def end(site: Site, actor: str, done: str, problems: str, overtime: list[str], e
 # the local end time as UTC; Director: "무단퇴근입니다"): `day end` and `day close` before the day's planned end are
 # refused unless `--early --approval <id> --reason R` names a recorded approval. An approval is a decision record
 # with disposition `approve` by the Director or DUREH (approval layer 2), not one bound to another action, or a
-# GitHub board Decision recorded as Approved (`github.decision.changed`, by its event id or the issue's URL or
+# GitHub board Decision recorded as Approve 1 (old name Approved or Option 1; Director 2026-10-27)
+# (`github.decision.changed`, by its event id or the issue's URL or
 # `org/repo#N`), recorded within EARLY_APPROVAL_AGE.
 EARLY_APPROVAL_AGE = timedelta(hours=24)
 BOUND_DECISIONS = ("gate1", "gate2", "push-approval", DAY_CHOICE)  # decisions that approve something else
-EARLY_HINT = ("record the Director's approval first (a board Decision = Approved seen by `dureh github watch`, or "
+EARLY_HINT = ("record the Director's approval first (a board Decision = Approve 1 seen by `dureh github watch`, or "
               "`dureh ledger add decision --disposition approve --by Director --summary \"early close\" --memo "
               "\"<the Director's words>\"`), then `--early --approval <id> --reason \"<why>\"`")
 
@@ -1315,9 +1316,11 @@ def early_approval(site: Site, ident: str) -> dict:
                       or (want and (e["payload"].get("url") or "").rstrip("/").endswith(want)))]
         if board:
             rec = board[-1]
-            if rec["payload"].get("to") != "Approved":
-                fail(f"the board Decision {ident} is {rec['payload'].get('to') or 'empty'} ({rec['id']}), not Approved; "
-                     f"{EARLY_HINT}")
+            from .github import decision_value
+            to = rec["payload"].get("to")
+            if decision_value(to) != "Approve 1":
+                shown = f"{to} (= {decision_value(to)})" if to and decision_value(to) != to else (to or "empty")
+                fail(f"the board Decision {ident} is {shown} ({rec['id']}), not Approve 1; {EARLY_HINT}")
             found = {"id": rec["id"], "kind": "github", "type": rec["type"], "by": "Director", "ts": rec["ts"],
                      "url": rec["payload"].get("url")}
     if rec is None:
