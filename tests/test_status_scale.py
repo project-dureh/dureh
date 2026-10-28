@@ -76,6 +76,31 @@ class StatusScale(SiteCase):
         path.unlink()
         self.assertNotIn(rec["id"], {r["id"] for r in led.load("event")})
 
+    def test_a_new_process_reads_only_files_written_since_the_pack(self):
+        Ledger(self.s).load("event")
+        pack = Ledger(self.s)._pack_path("event")
+        self.assertTrue(pack.is_file())
+        self.assertFalse(str(pack).startswith(str(self.site_root)), "the pack lives outside the site")
+        records._RECORD_CACHE.clear()  # as a new process sees it
+        self.reads = 0
+        before = Ledger(self.s).load("event")
+        self.assertEqual(self.reads, 0, "every record comes from the pack")
+        Ledger(self.s).event("note", "desk", None, {"n": "new"})
+        records._RECORD_CACHE.clear()
+        self.reads = 0
+        after = Ledger(self.s).load("event")
+        self.assertEqual(self.reads, 1, "only the new record file is opened")
+        self.assertEqual(len(after), len(before) + 1)
+
+    def test_a_damaged_or_foreign_pack_is_ignored(self):
+        Ledger(self.s).load("event")
+        pack = Ledger(self.s)._pack_path("event")
+        for text in ("not json\n", '{"v": 1, "dir": "/elsewhere"}\n', pack.read_text()[:200]):
+            pack.write_text(text)
+            records._RECORD_CACHE.clear()
+            n = len(Ledger(self.s).load("event"))
+            self.assertEqual(n, len(list(self.s.record_dir("event").glob("*.json"))))
+
     def test_observe_index_is_kept_between_calls(self):
         os.environ["DUREH_OBSERVE"] = "1"
         led = Ledger(self.s)

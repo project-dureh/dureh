@@ -195,6 +195,55 @@ def typed_line(typed: dict | None) -> str:
 
 
 _RECORD_CACHE: dict[str, dict[str, tuple[tuple[int, int], str]]] = {}  # dir -> file name -> (size, mtime), json
+PACK_VERSION = 1
+
+
+def _read_pack(pack: Path, directory: Path) -> dict[str, tuple[tuple[int, int], str]]:
+    """The checked records a previous process packed (release 84, harness check 2026-10-28: camri `--observe status`
+    spent 9.5 s of 28.5 s opening 26.6k record files on NFS, and every hook paid the same). An entry counts only
+    while its file keeps the size and mtime it had when packed, so a file changed in place is read again. A missing,
+    foreign or damaged pack is an empty one."""
+    out: dict[str, tuple[tuple[int, int], str]] = {}
+    try:
+        with open(pack, encoding="utf-8") as f:
+            head = json.loads(f.readline() or "null")
+            if not isinstance(head, dict) or head.get("v") != PACK_VERSION or head.get("dir") != str(directory):
+                return {}
+            end = None
+            for line in f:
+                if end is not None:
+                    return {}
+                if not line.endswith("\n"):
+                    return {}
+                if line.startswith("{"):
+                    end = json.loads(line)
+                    continue
+                name, size, mtime, text = line[:-1].split("\t", 3)
+                out[name] = ((int(size), int(mtime)), text)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(end, dict) or end.get("end") != len(out):
+        return {}  # cut short: a pack is whole or not used
+    return out
+
+
+def _write_pack(pack: Path, directory: Path, cache: dict[str, tuple[tuple[int, int], str]]) -> None:
+    """Replace the pack atomically; best effort (a read never fails because its pack cannot be written)."""
+    tmp = pack.with_name(f"{pack.name}.tmp-{os.getpid()}")
+    try:
+        pack.parent.mkdir(parents=True, exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(json.dumps({"v": PACK_VERSION, "dir": str(directory)}) + "\n")
+            for name in sorted(cache):
+                (size, mtime), text = cache[name]
+                f.write(f"{name}\t{size}\t{mtime}\t{text}\n")
+            f.write(json.dumps({"end": len(cache)}) + "\n")
+        os.replace(tmp, pack)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 class Ledger:
@@ -286,16 +335,20 @@ class Ledger:
         """All records of a kind, oldest first. A file read and checked once is kept in a per-process cache keyed
         by its size and mtime (records are create-only), so the many loads of one command (status reads the
         events a dozen times) cost a directory listing and a stat each, not a read of every file: measured
-        2026-10-05, `--observe status` at a site with 3355 events spent minutes in NFS reads."""
+        2026-10-05, `--observe status` at a site with 3355 events spent minutes in NFS reads. Release 84: the cache
+        also lives on between processes as a pack file beside the index, so a new process (a hook, a status) opens
+        only the files written since the last pack."""
         directory = self.site.record_dir(kind)
         if not directory.is_dir():
             fail(f"record store is missing: {directory}")
-        cache = _RECORD_CACHE.setdefault(str(directory), {})
-        rows, seen = [], set()
+        cache = _RECORD_CACHE.get(str(directory))
+        pack = self._pack_path(kind)
+        if cache is None:
+            cache = _RECORD_CACHE[str(directory)] = _read_pack(pack, directory)
+        rows, seen, opened = [], set(), 0
         with os.scandir(directory) as it:
             entries = sorted((e for e in it if e.name.endswith(".json")), key=lambda e: e.name)
         for entry in entries:
-            path = Path(entry.path)
             try:
                 st = entry.stat()
                 key = (st.st_size, st.st_mtime_ns)
@@ -305,7 +358,9 @@ class Ledger:
             if key is not None and hit is not None and hit[0] == key:
                 text = hit[1]
             else:
+                path = Path(entry.path)
                 rec = read_json(path)
+                opened += 1
                 if rec.get("id") != path.stem:
                     fail(f"record id does not match its file name: {path}")
                 check_record(rec)
@@ -314,10 +369,17 @@ class Ledger:
                     cache[entry.name] = (key, text)
             seen.add(entry.name)
             rows.append(json.loads(text))  # a fresh copy: callers may change what they get
-        for gone in set(cache) - seen:
-            del cache[gone]
+        gone = set(cache) - seen
+        for name in gone:
+            del cache[name]
+        if opened or gone:
+            _write_pack(pack, directory, cache)
         rows.sort(key=lambda r: (r["ts"], r["id"]))
         return rows
+
+    def _pack_path(self, kind: str) -> Path:
+        """The kind's record pack beside the index (outside the site; observe has its own private directory)."""
+        return self.site.index_path().parent / f"records-{kind}.pack"
 
     def work_item_payloads(self, events: list[dict] | None = None) -> dict[str, dict]:
         """Every work item's payload with its `wi.amended` fields applied (as `get` does), from one read of the
