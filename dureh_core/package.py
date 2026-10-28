@@ -260,6 +260,10 @@ def check(manifest: dict, root: Path | None = None) -> list[str]:
     if unknown:
         fail(f"startup.yaml: unknown top-level key(s) {', '.join(unknown)} (refused since release 49; known keys:"
              f" {', '.join(KNOWN_KEYS)})")
+    projects = manifest.get("projects")
+    if projects is not None and (not isinstance(projects, dict) or set(projects) - {"records"}
+                                 or not isinstance(projects.get("records", False), bool)):
+        fail(f"startup.yaml projects must be a mapping {{records: true|false}}, not {projects!r}")
     hmin = pkg.get("harness_min")
     if hmin is not None:
         try:

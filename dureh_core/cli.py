@@ -96,6 +96,25 @@ def cmd_install(a):
     print(f"State: {r['state'].get('backend')} revision {r['state'].get('revision')}")
 
 
+def _release_on_protected_branch(checkout: Path) -> None:
+    """#58 (Director 2026-10-21, Option 1): a release checkout (HEAD tagged rYYYY.MM.DD-N) runs at a site only when
+    its revision is on the protected branch its clone names as origin/HEAD; other checkouts are not checked."""
+    import re
+    import subprocess
+
+    def run(*args):
+        return subprocess.run(["git", *args], cwd=checkout, capture_output=True, text=True)
+
+    tags = run("tag", "--points-at", "HEAD").stdout.split()
+    if not any(re.match(r"^r\d{4}\.\d{2}\.\d{2}-\d+$", t) for t in tags):
+        return
+    branch = run("symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD").stdout.strip()
+    if not branch:
+        fail(f"{checkout} is a release checkout without origin/HEAD; cannot check it is on the protected branch")
+    if run("merge-base", "--is-ancestor", "HEAD", branch).returncode != 0:
+        fail(f"{checkout} ({', '.join(tags)}) is not on {branch}, the protected branch; refusing to switch to it")
+
+
 def cmd_adapter_sync(a):
     from .runtimes import claude_code
 
@@ -108,6 +127,7 @@ def cmd_adapter_sync(a):
         if not (other / "dureh_core").is_dir() or not os.access(exe, os.X_OK):
             fail(f"{other} is not a harness checkout (no executable dureh with dureh_core/)")
         if other != site.harness_root.resolve():
+            _release_on_protected_branch(other)
             os.execv(str(exe), [str(exe), "--site", str(site.root), "adapter", "sync",
                                 *(["--package-rev", a.package_rev] if a.package_rev else [])])
     old_root = (site.config.get("harness") or {}).get("root")
@@ -531,6 +551,8 @@ def cmd_site(a):
         _print(out)
         if out.get("summary"):
             print(out["summary"])
+    elif a.site_command == "new-project":
+        _print(sitelinks.new_project(site, _actor(a), a.id, a.purpose))
     else:
         _print(sitelinks.link_project(site, _actor(a), a.name, a.source))
 
@@ -868,6 +890,10 @@ def cmd_github(a):
     if not github.enabled(site):
         print(github.OFF_LINE)
         return
+    if c == "token":
+        from . import github_app
+
+        raise SystemExit(github_app.serve(site, a.every, a.once))
     if c == "status":
         res = github.status(site)
         if a.json:
@@ -1384,6 +1410,12 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--name", required=True)
     x.add_argument("--source", required=True)
     x.add_argument("--actor")
+    x = add(st, "new-project", cmd_site, "create a records project projects/<id> (git: research-notes/, reports/, "
+            "runs/; no data, no DataLad) where the package allows it (startup.yaml `projects: {records: true}`); "
+            "a plain directory already there is adopted")
+    x.add_argument("--id", required=True)
+    x.add_argument("--purpose")
+    x.add_argument("--actor")
 
     x = add(st, "workday", cmd_site_workday, "Director's switches: workday mode on|off, `set <device> on|off` "
                                               "(hours, weekday, usage, session), `black-company on|off`, calibrate, status")
@@ -1608,6 +1640,11 @@ def parser() -> argparse.ArgumentParser:
                    help="seconds between polls (default 120, at least 5; the team and the desks share one GitHub user)")
     x.add_argument("--once", action="store_true", help="one poll, then exit")
     x.add_argument("--actor")
+    x = add(gp, "token", cmd_github, "refresh the GitHub App installation token into config github.token_file "
+                                     "(config github.app; #56 step 5): once, or every --every seconds (the session "
+                                     "job runs it beside the session); one line per refresh, never the token")
+    x.add_argument("--every", type=int, default=1800)
+    x.add_argument("--once", action="store_true")
     x = add(gp, "sweep", cmd_github, "desk: close every open issue of the organization whose Status is Done and that "
                                      "carries no waiting-director, needs-review or needs-approval label (day close runs "
                                      "it); records github.sweep.done")

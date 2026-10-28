@@ -85,10 +85,17 @@ Every `gh` call goes through one runner that reads the token at call time and pa
 `GH_TOKEN` only (`GITHUB_TOKEN` from the environment is dropped). The token is never on a command line, never printed
 (gh's error text is redacted), never logged and never recorded. Text that carries a GitHub token prefix is refused.
 
+**Company GitHub App (release 84, dureh-team#56 step 5).** With `github.app: {app_id, installation_id, key_file}` (the
+App's private key, mode 600) the harness mints the App's installation token itself and writes it to `token_file`
+(mode 600): `dureh github token --once`, or `--every 1800`, which the session job runs beside the session, so the desk
+writes as `<app>[bot]` instead of the Director. The key is read by path only; neither key nor token is printed. While
+`app` is set, a missing token file is not an error (the first refresh writes it). Without `app` nothing changes.
+
 ## Commands
 
 | command | who | what |
 |---|---|---|
+| `github token [--every 1800] [--once]` | the session job (config `github.app`) | mint the company App's installation token into `token_file`; one line per refresh, never the token |
 | `github status [--json]` | anyone; allowed with `--observe` | the board's items grouped by Status, each with its Decision, Project and Layer; under a decided or waiting item the Director's latest comment since the ask (`Director: ...`) and, on Discuss, the hold line; `--json` rows carry `director_comments` |
 | `github watch [--interval 120] [--once]` | desk, as a Monitor in working hours | one line per Decision change (with ` | Director: <latest comment since the ask> <url>`, or `none`), per new comment and per newly opened issue not marked as the desk's; nothing else |
 | `github item add --wi WI [--status S] [--project P] [--layer 1-3] [--units N] [--priority P0-P3] [--start D] [--target D] [--repo R \| --url U]` | desk | an issue for the work item (its title and goal only) in `office_repo` or `--repo` (or the existing issue `--url`), added to the board with its fields; desk rule: Priority P2 unless asked |

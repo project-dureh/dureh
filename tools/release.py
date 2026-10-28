@@ -7,8 +7,9 @@ of the harness repository whose `origin` is the harness remote. Sites run that c
 changes a running company. Harness WIs of a site branch from the release it runs; their
 `contrib/c-<8 hex>` branches end up in that release clone, where upstream fetches them.
 
-    tools/release.py cut [--rev REV]            tag REV (default HEAD) as rYYYY.MM.DD-N, push the tag,
-                                                create <releases>/dureh-<tag>/ and make it read-only
+    tools/release.py cut [--rev REV] [--branch B]   tag REV (default HEAD) as rYYYY.MM.DD-N, push the tag,
+                                                create <releases>/dureh-<tag>/ and make it read-only; REV must
+                                                be on the protected branch (default: the current upstream)
     tools/release.py list                       releases, their tags and which sites run them
     tools/release.py prune [--dry-run]          delete releases no site runs, keeping for each release
                                                 in use the one cut just before it
@@ -98,8 +99,14 @@ def cmd_cut(a) -> None:
         sys.exit(f"release: {repo} has uncommitted changes; commit or stash them first")
     rev = git(["rev-parse", "--verify", f"{a.rev}^{{commit}}"], repo)
     remote = git(["remote", "get-url", "origin"], repo)
-    if not git(["branch", "-r", "--contains", rev], repo):
-        sys.exit(f"release: {rev[:12]} is on no remote branch; push it first so the tag is fetchable from {remote}")
+    # #58 (Director 2026-10-21, Option 1): a release is cut only from the protected branch, whose merges the
+    # Director reviews; a revision on some other pushed branch (a dev or contrib branch) is refused
+    branch = a.branch or git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"], repo, check=False)
+    if not branch:
+        sys.exit("release: the current branch has no upstream; name the protected branch with --branch")
+    branch = branch if branch.startswith("origin/") else f"origin/{branch}"
+    if subprocess.run(["git", "merge-base", "--is-ancestor", rev, branch], cwd=repo).returncode != 0:
+        sys.exit(f"release: {rev[:12]} is not on {branch} (the protected branch); merge and push it there first")
     existing = [t for t in git(["tag", "--points-at", rev], repo).splitlines() if TAG_RE.match(t)]
     tag = existing[0] if existing else next_tag(repo, dt.datetime.now(dt.timezone.utc).date())
     dest = releases / f"dureh-{tag}"
@@ -172,6 +179,8 @@ def main(argv=None) -> int:
     sub = p.add_subparsers(dest="command", required=True)
     c = sub.add_parser("cut", help="tag a revision, push the tag and create its read-only checkout")
     c.add_argument("--rev", default="HEAD")
+    c.add_argument("--branch", help="the protected branch the revision must be on (default: the upstream of the"
+                   " current branch, origin/phase-1-harness in the live tree)")
     c.set_defaults(func=cmd_cut)
     sub.add_parser("list", help="releases, their tags and which sites run them").set_defaults(func=cmd_list)
     d = sub.add_parser("prune", help="delete releases no site runs (keeps each in-use release and the one before it)")

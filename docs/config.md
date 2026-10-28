@@ -122,6 +122,7 @@ labels:
   layout: {staging: <dir>, final: <dir>, reports: <dir>}   # defaults: checkpoints, (none), reports
   item_grammar: {<level>: <regex with named groups>}       # --each item levels and fields
 templates: {project: templates/project}            # holds CLAUDE.md.template for linked projects
+projects: {records: true | false}                  # release 84: the desk may create records projects (`site new-project`)
 guards: {scheduler_only_commands: [...]}           # additive only
 scheduler_tools:                                   # the company's own scheduling commands (compute route B)
   - {name: <word>, commands: [<Bash command glob>, ...], exclude: [<glob>, ...], job_match: [<job-name glob>, ...],

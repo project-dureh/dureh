@@ -89,7 +89,17 @@ class Release(unittest.TestCase):
         self.assertIn("uncommitted", self.run_script("cut", ok=False))
         (self.repo / "dirty").unlink()
         self.commit("unpushed")
-        self.assertIn("no remote branch", self.run_script("cut", ok=False))
+        self.assertIn("not on origin/main", self.run_script("cut", ok=False))
+
+    def test_cut_refuses_a_revision_only_on_another_branch(self):
+        """#58 (Director 2026-10-21, Option 1): a pushed dev branch is not enough; the protected branch is."""
+        git(["checkout", "-q", "-b", "dev/x"], self.repo)
+        self.commit("dev only")
+        git(["push", "-q", "-u", "origin", "dev/x"], self.repo)
+        out = self.run_script("cut", "--branch", "main", ok=False)
+        self.assertIn("not on origin/main (the protected branch)", out)
+        self.assertFalse(self.releases.exists() and any(self.releases.iterdir()))
+        self.assertEqual(git(["ls-remote", "--tags", str(self.origin)], self.repo), "", "no tag pushed")
 
     def test_prune_keeps_in_use_and_previous_holds_attached(self):
         tags = []
