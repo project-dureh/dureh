@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import subprocess
+import time
 from pathlib import Path
 
 from .. import cluster, workday
@@ -426,6 +427,8 @@ def _squeue(site: Site, job: str) -> dict:
     except (OSError, subprocess.SubprocessError) as exc:
         return {"queued": None, "error": str(exc)}
     line = (proc.stdout or "").strip().splitlines()
+    if proc.returncode != 0 and not line and "Invalid job id" in (proc.stderr or ""):
+        return {"queued": False}  # Slurm has forgotten the job: it ended (harness check 2026-10-28, 6999586)
     if proc.returncode != 0 and not line:
         return {"queued": None, "error": (proc.stderr or "").strip()[-200:] or f"squeue exit {proc.returncode}"}
     if not line:
@@ -434,16 +437,117 @@ def _squeue(site: Site, job: str) -> dict:
     return {"queued": True, "state": state.strip(), "time_left": left.strip()}
 
 
+MEM_WARN = 0.8  # a running session job at this share of its --mem gets a warning (harness check H3, 2026-10-28)
+FAILED_ENDS = ("OUT_OF_MEMORY", "FAILED", "TIMEOUT", "NODE_FAIL", "PREEMPTED", "BOOT_FAIL", "DEADLINE")
+
+
+def _slurm(site: Site, argv: list[str]) -> str | None:
+    """stdout of a read-only Slurm query, None when it cannot answer."""
+    try:
+        proc = subprocess.run(argv, capture_output=True, text=True, timeout=60, env=site.env())
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _ended(site: Site, job: str) -> str | None:
+    """The final state sacct records for a job no longer in squeue (OUT_OF_MEMORY, COMPLETED, ...)."""
+    out = _slurm(site, ["sacct", "-n", "-X", "-P", "-j", str(job), "-o", "State"])
+    state = (out or "").strip().splitlines()
+    return state[0].split()[0] if state and state[0].strip() else None
+
+
+def _mem_bytes(text: str) -> int | None:
+    m = re.match(r"^\s*(\d+(?:\.\d+)?)\s*([KMGT]?)", text or "", re.I)
+    if not m:
+        return None
+    return int(float(m.group(1)) * 1024 ** (1 + "KMGT".index(m.group(2).upper() or "K")))  # no unit: K (sstat)
+
+
+def _mem_use(site: Site, job: str, requested: str) -> dict | None:
+    """Peak resident memory of the running job's batch step against its --mem (H3: 6999586 ended OUT_OF_MEMORY at
+    the 16G default while agents and their local builds shared it)."""
+    out = _slurm(site, ["sstat", "-n", "-P", "-j", f"{job}.batch", "-o", "MaxRSS"])
+    rss = _mem_bytes((out or "").strip().splitlines()[0]) if (out or "").strip() else None
+    req = _mem_bytes(requested if re.search(r"[KMGT]$", requested, re.I) else requested + "M")
+    if not rss or not req:
+        return None
+    return {"rss": rss, "mem": requested, "share": round(rss / req, 2)}
+
+
+MEM_REFUSE = 0.9  # past this share of the job's --mem the Bash guard refuses work other than dureh commands
+MEM_CACHE_SECONDS = 60
+
+
+def own_job_memory(site: Site) -> float | None:
+    """The calling Slurm job's peak memory as a share of its --mem ($SLURM_JOB_ID, $SLURM_MEM_PER_NODE in MB), read
+    with sstat at most once a minute (cached beside the index); None outside a job or when Slurm cannot answer."""
+    job, mem = os.environ.get("SLURM_JOB_ID"), os.environ.get("SLURM_MEM_PER_NODE")
+    if not job or not (mem or "").isdigit():
+        return None
+    cache = site.index_path().parent / f"memory-{job}.json"
+    try:
+        got = json.loads(cache.read_text())
+        if time.time() - got["at"] < MEM_CACHE_SECONDS:
+            return got["share"]
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    use = _mem_use(site, job, mem + "M")
+    share = use["share"] if use else None
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps({"at": time.time(), "share": share}))
+    except OSError:
+        pass
+    return share
+
+
+def unrecorded_jobs(site: Site, recorded: set[str]) -> list[dict] | None:
+    """Live jobs that look like this site's session but have no `session.started` record (harness check H4,
+    2026-10-28: after 6999586 ended the Director started 7001475 by hand; `site session status` and `day close`
+    saw only the dead job). A session job by name (`cc-<session name>[-purpose]` or the session name) whose work
+    directory is the site. None when squeue cannot answer."""
+    out = _slurm(site, ["squeue", "-h", "-u", os.environ.get("USER", ""), "-o", "%i|%j|%T|%L|%Z"])
+    if out is None:
+        return None
+    base = job_name(site)
+    found = []
+    for line in out.splitlines():
+        parts = line.strip().split("|")
+        if len(parts) != 5 or parts[0] in recorded:
+            continue
+        job, name, state, left, workdir = parts
+        if name != site.session_name and name != base and not name.startswith(base + "-"):
+            continue
+        try:
+            same = Path(workdir).resolve() == site.root.resolve()
+        except OSError:
+            same = False
+        if same:
+            found.append({"job_id": job, "name": name, "state": state, "time_left": left})
+    return found
+
+
 def status(site: Site) -> dict:
-    """Read-only: the last session dureh started, whether its job is still queued or running, and the day."""
+    """Read-only: the last session dureh started, whether its job is still queued or running (and how it ended,
+    its memory against --mem), session-like jobs of the site dureh did not start, and the day."""
     out = {"session": None, "job": None, "day": workday.day(site), "workday": workday.enabled(site)}
-    rec = last_started(site)
+    events = Ledger(site).events()
+    started = [e for e in events if e["type"] == workday.SESSION]
+    rec = started[-1] if started else None
     if rec:
         p = rec["payload"]
         out["session"] = {"record": rec["id"], "job_id": p.get("job_id"), "submitted_at": p.get("submitted_at") or rec["ts"],
                           "wall_time": p.get("wall_time"), "purpose": p.get("purpose")}
         if p.get("job_id"):
             out["job"] = _squeue(site, p["job_id"])
+            if out["job"].get("queued") is False:
+                out["job"]["ended"] = _ended(site, p["job_id"])
+            elif out["job"].get("state") == "RUNNING":
+                ss = (site.config.get("session") or {}).get("slurm") or {}
+                out["job"]["memory"] = _mem_use(site, p["job_id"], str(ss.get("mem") or DEFAULT_MEM))
+    recorded = {str((e.get("payload") or {}).get("job_id")) for e in started}
+    out["unrecorded"] = unrecorded_jobs(site, recorded)
     return out
 
 
@@ -458,9 +562,26 @@ def render_status(st: dict) -> str:
         if j.get("queued"):
             lines.append(f"job {s['job_id']}: {j['state']}, time left {j['time_left']}")
         elif j.get("queued") is False:
-            lines.append(f"job {s['job_id']}: not in squeue (finished or cancelled)")
+            ended = j.get("ended")
+            lines.append(f"job {s['job_id']}: not in squeue ({'ended ' + ended if ended else 'finished or cancelled'})")
+            if ended == "OUT_OF_MEMORY":
+                lines.append("⚠ the session job ran out of memory: heavy work ran inside the session instead of a"
+                             " Slurm job (the agreed rule: builds, tests at scale, training and data runs go through"
+                             " `dureh slurm submit` or the package's scheduler tool); find the work item and move it")
+            if ended in FAILED_ENDS:
+                lines.append("restart: `dureh site session start --force --memo \"<why>\"` (a hand-started job has no"
+                             " record, so `day close` cannot end it)")
         else:
             lines.append(f"job {s['job_id']}: squeue unavailable ({j.get('error', 'no job id')})")
+        mem = j.get("memory")
+        if mem and mem["share"] >= MEM_WARN:
+            lines.append(f"⚠ job {s['job_id']} uses {mem['share']:.0%} of its --mem {mem['mem']}: heavy work is running"
+                         " inside the session; stop it and run it as a Slurm job (the agreed rule)")
+    for u in st.get("unrecorded") or []:
+        lines.append(f"⚠ job {u['job_id']} ({u['name']}, {u['state']}, time left {u['time_left']}) runs in this site"
+                     " but was not started by dureh (no session.started record): `day close` cannot end it; the"
+                     f" Director ends it (`scancel {u['job_id']}`), and a restart goes through `dureh site session"
+                     " start --force --memo ...`")
     d = st["day"]
     line = f"day: {d['phase']}" if st["workday"] else f"day: workday mode off ({d['phase']})"
     if d.get("start"):
