@@ -40,7 +40,7 @@ from .records import Ledger, short_title
 from .site import Site
 from .util import DurehError, fail
 
-KEYS = ("enabled", "org", "project", "office_repo", "token_file", "director_login")
+KEYS = ("enabled", "org", "project", "office_repo", "token_file", "director_login", "app")
 DEFAULT_OFFICE = "office"
 DESK_MARK = "<!-- dureh-desk -->"
 DECISION_LABEL = "kind:decision"
@@ -176,12 +176,15 @@ def config_errors(site: Site, config: dict | None = None, startup=None) -> list[
         out.append("config github.token_file must be a path (the fine-grained token's file, mode 600)")
     if director is not None and (not isinstance(director, str) or not _LOGIN.match(director)):
         out.append(f"config github.director_login must be a GitHub login, not {director!r}")
+    from .github_app import app_errors
+
+    out += app_errors(site, raw.get("app"))
     if on:
         missing = [k for k, v in (("org", org), ("project", number), ("token_file", token_file)) if v is None]
         if missing:
             out.append(f"config github.enabled is true but {', '.join('github.' + k for k in missing)} "
                        f"{'is' if len(missing) == 1 else 'are'} missing (docs/github.md)")
-        if isinstance(token_file, str) and token_file.strip():
+        if isinstance(token_file, str) and token_file.strip() and raw.get("app") is None:  # an App token comes later
             problem = _mode_problem(site.expand(token_file))
             if problem:
                 out.append(f"config github.token_file: {problem}")

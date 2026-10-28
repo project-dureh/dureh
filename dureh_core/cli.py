@@ -890,6 +890,10 @@ def cmd_github(a):
     if not github.enabled(site):
         print(github.OFF_LINE)
         return
+    if c == "token":
+        from . import github_app
+
+        raise SystemExit(github_app.serve(site, a.every, a.once))
     if c == "status":
         res = github.status(site)
         if a.json:
@@ -1636,6 +1640,11 @@ def parser() -> argparse.ArgumentParser:
                    help="seconds between polls (default 120, at least 5; the team and the desks share one GitHub user)")
     x.add_argument("--once", action="store_true", help="one poll, then exit")
     x.add_argument("--actor")
+    x = add(gp, "token", cmd_github, "refresh the GitHub App installation token into config github.token_file "
+                                     "(config github.app; #56 step 5): once, or every --every seconds (the session "
+                                     "job runs it beside the session); one line per refresh, never the token")
+    x.add_argument("--every", type=int, default=1800)
+    x.add_argument("--once", action="store_true")
     x = add(gp, "sweep", cmd_github, "desk: close every open issue of the organization whose Status is Done and that "
                                      "carries no waiting-director, needs-review or needs-approval label (day close runs "
                                      "it); records github.sweep.done")

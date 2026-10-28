@@ -109,6 +109,12 @@ def _build(site: Site, purpose: str, prompt: str | None = None, no_prompt: bool 
     if limit is not None and limit.total_seconds() < wall * 3600:
         notes.append(f"partition {partition!r} time limit {part['time_limit']} is shorter than the requested --time")
     body = [f"export {k}={shlex.quote(v)}" for k, v in sorted(rt.env(site).items())]
+    if (site.config.get("github") or {}).get("app") is not None:
+        # dureh-team#56 step 5: the desk writes to GitHub as its company App; the job keeps the token fresh beside
+        # the session (an installation token lives one hour) and ends it with the job
+        dureh = shlex.quote(str(site.root / "bin" / "dureh"))
+        body += [f'{dureh} github token --every 1800 >> {shlex.quote(str(logs))}/github-token-"${{SLURM_JOB_ID:-local}}".log'
+                 ' 2>&1 &  # never prints the token', "TOKEN_PID=$!", 'trap \'kill "$TOKEN_PID" 2>/dev/null\' EXIT']
     body += _tmux_body(site, name, logs, argv)
     text = "\n".join([*head, *(f"# note: {n}" for n in notes), *body]) + "\n"
     return {"runtime": rt.name, "purpose": purpose, "name": name, "wall": cluster.hms(wall), "hours": hours,
