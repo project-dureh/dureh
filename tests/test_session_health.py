@@ -1,4 +1,4 @@
-"""Harness check 2026-10-28 (H3, H4): mokoji's session job 6999586 ended OUT_OF_MEMORY with heavy work inside it, and
+"""Harness check 2026-10-28 (H3, H4): a company's session job ended OUT_OF_MEMORY with heavy work inside it, and
 the job the Director started by hand afterwards (7001475) had no session record, so `site session status` and `day
 close` saw only the dead job. Status now names how a job ended, a session near its memory limit takes dureh commands
 only (the agreed rule: heavy work runs as Slurm jobs), and session-like jobs dureh did not start are shown."""
@@ -51,7 +51,7 @@ class SessionHealth(SiteCase):
         rows = (f"200|{self.s.session_name}|RUNNING|12:00:00|{root}\n"
                 f"201|cc-{self.s.session_name}-overtime|PENDING|1:00:00|{root}\n"
                 f"202|{self.s.session_name}|RUNNING|1:00:00|/elsewhere\n"
-                f"203|camri-run|RUNNING|1:00:00|{root}\n"
+                f"203|other-run|RUNNING|1:00:00|{root}\n"
                 f"100|cc-{self.s.session_name}|RUNNING|1:00:00|{root}\n")
         with self.fake(squeue_all=rows, squeue_one=done("RUNNING|1:00:00\n"), sstat="1000K\n"):
             st = sessions.status(self.s)

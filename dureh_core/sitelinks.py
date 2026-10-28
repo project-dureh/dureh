@@ -251,7 +251,7 @@ def records_projects(site: Site) -> bool:
 def new_project(site: Site, actor: str, name: str, purpose: str | None = None) -> dict:
     """Create a records project projects/<name>: a git repository with research-notes/, reports/ and runs/, no data
     and no DataLad source, registered in config `projects` with kind `records` (UR-20261027-01, Director 2026-10-28:
-    the projects-only-through-link-project rule was camri-org's data rule in the shared harness). Data projects keep
+    the projects-only-through-link-project rule was one company's data rule in the shared harness). Data projects keep
     `site link-project`. A plain directory already at projects/<name> (no .git, no .datalad) is adopted: its files
     are kept and go into the first commit."""
     if site.org.role(actor).kind != "desk":

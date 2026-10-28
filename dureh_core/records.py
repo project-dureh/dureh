@@ -199,7 +199,7 @@ PACK_VERSION = 1
 
 
 def _read_pack(pack: Path, directory: Path) -> dict[str, tuple[tuple[int, int], str]]:
-    """The checked records a previous process packed (release 84, harness check 2026-10-28: camri `--observe status`
+    """The checked records a previous process packed (release 84, harness check 2026-10-28: a site's `--observe status`
     spent 9.5 s of 28.5 s opening 26.6k record files on NFS, and every hook paid the same). An entry counts only
     while its file keeps the size and mtime it had when packed, so a file changed in place is read again. A missing,
     foreign or damaged pack is an empty one."""

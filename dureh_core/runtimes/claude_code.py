@@ -1399,7 +1399,7 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
 
     share = own_job_memory(site)
     if share is not None and share >= MEM_REFUSE and not all(w and _is_dureh(w[0], site, cwd) for w in words_only):
-        # harness check H3 (2026-10-28): mokoji's session ended OUT_OF_MEMORY with heavy work inside it; the agreed
+        # harness check H3 (2026-10-28): a company session ended OUT_OF_MEMORY with heavy work inside it; the agreed
         # rule (Director) is that heavy work runs as Slurm jobs, so a session near its limit takes dureh commands only
         return _deny(wait(f"the session job is at {share:.0%} of its memory: heavy work belongs in a Slurm job"
                           " (`dureh slurm submit` or the package's scheduler tool), not in the session; only dureh"
