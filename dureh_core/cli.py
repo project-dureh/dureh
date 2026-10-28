@@ -531,6 +531,8 @@ def cmd_site(a):
         _print(out)
         if out.get("summary"):
             print(out["summary"])
+    elif a.site_command == "new-project":
+        _print(sitelinks.new_project(site, _actor(a), a.id, a.purpose))
     else:
         _print(sitelinks.link_project(site, _actor(a), a.name, a.source))
 
@@ -1383,6 +1385,12 @@ def parser() -> argparse.ArgumentParser:
     x = add(st, "link-project", cmd_site, "DataLad-clone a project into projects/<name> without fetching data")
     x.add_argument("--name", required=True)
     x.add_argument("--source", required=True)
+    x.add_argument("--actor")
+    x = add(st, "new-project", cmd_site, "create a records project projects/<id> (git: research-notes/, reports/, "
+            "runs/; no data, no DataLad) where the package allows it (startup.yaml `projects: {records: true}`); "
+            "a plain directory already there is adopted")
+    x.add_argument("--id", required=True)
+    x.add_argument("--purpose")
     x.add_argument("--actor")
 
     x = add(st, "workday", cmd_site_workday, "Director's switches: workday mode on|off, `set <device> on|off` "

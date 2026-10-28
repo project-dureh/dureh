@@ -239,6 +239,65 @@ def link_project(site: Site, actor: str, name: str, source: str) -> dict:
     return entry
 
 
+RECORD_DIRS = ("research-notes", "reports", "runs")
+
+
+def records_projects(site: Site) -> bool:
+    """The package allows records projects (startup.yaml `projects: {records: true}`; UR-20261027-01)."""
+    projects = site.package_manifest().get("projects")
+    return isinstance(projects, dict) and projects.get("records") is True
+
+
+def new_project(site: Site, actor: str, name: str, purpose: str | None = None) -> dict:
+    """Create a records project projects/<name>: a git repository with research-notes/, reports/ and runs/, no data
+    and no DataLad source, registered in config `projects` with kind `records` (UR-20261027-01, Director 2026-10-28:
+    the projects-only-through-link-project rule was camri-org's data rule in the shared harness). Data projects keep
+    `site link-project`. A plain directory already at projects/<name> (no .git, no .datalad) is adopted: its files
+    are kept and go into the first commit."""
+    if site.org.role(actor).kind != "desk":
+        fail("only the desk (or the Director) creates projects")
+    if not records_projects(site):
+        fail("this package does not allow records projects (startup.yaml `projects: {records: true}`); a data"
+             " project comes in with `dureh site link-project`")
+    if not NAME.match(name):
+        fail(f"invalid project name: {name!r}")
+    if any(e.get("id") == name for e in site.config.get("projects") or []):
+        fail(f"project already registered: {name}")
+    dest = site.root / "projects" / name
+    adopted = dest.exists()
+    if adopted and (not dest.is_dir() or dest.is_symlink() or (dest / ".git").exists()
+                    or (dest / ".datalad").exists()):
+        fail(f"{dest} exists and is not a plain directory (only a plain directory without .git or .datalad is"
+             " adopted)")
+    dest.mkdir(parents=True, exist_ok=True)
+    readme = dest / "README.md"
+    if not readme.exists():
+        readme.write_text(f"# {name}\n\n{purpose or 'Records project.'}\n\nCreated by `dureh site new-project`:"
+                          " research-notes/ (design and theory notes), reports/ (comparison and run reports), runs/"
+                          " (run records). No data lives here.\n", encoding="utf-8")
+    for d in RECORD_DIRS:
+        (dest / d).mkdir(exist_ok=True)
+        if not any((dest / d).iterdir()):
+            (dest / d / ".gitkeep").write_text("", encoding="utf-8")
+    env = site.env()
+    ident = ["-c", "user.name=DUREH desk", "-c", "user.email=desk@dureh.invalid"]
+    git(["init", "-q", "-b", "main"], dest, env=env)
+    git(["add", "-A"], dest, env=env)
+    has_ident = subprocess.run(["git", "config", "user.name"], cwd=dest, capture_output=True, text=True,
+                               env=env).stdout.strip()
+    git(([] if has_ident else ident) + ["commit", "-q", "-m", f"{name}: records project from dureh site new-project"],
+        dest, env=env)
+    sha = git(["rev-parse", "HEAD"], dest)
+    entry = {"id": name, "path": f"projects/{name}", "kind": "records", "rev": sha, "data_fetched": False}
+    if purpose:
+        entry["purpose"] = purpose
+    _config_add(site, "projects", entry)
+    Ledger(site).event("site.project-created", actor, None, {**entry, "adopted": adopted})
+    entry = {**entry, "adopted": adopted}
+    entry["generated"] = _after_link(Site(site.root), name)
+    return entry
+
+
 def _after_link(site: Site, name: str) -> list[dict]:
     from . import projectgen
 

@@ -98,7 +98,7 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    needs no Director action, recorded with `--action provisional` too; the end report lists these choices under
    `provisional` (title, choice). The day plan names, for every choice it offers the Director, the fallback the
    desk takes after 30 minutes. **Fail-closed (release 78, improvement plan v0.4 bundle 1).** A fail-closed kind
-   (a push other than the standing fast-forward, a dataset or project link, a config change that changes running
+   (a push other than the standing fast-forward, a dataset or data project link (`site link-project`; a records project from `site new-project`, where the package allows one, is not one), a config change that changes running
    behaviour, GPU or Slurm above the caps, a harness merge or release, training data or fine-tuning, public or
    organization settings, a structural change, an early close, a data write or delete outside a WI worktree, anything
    about credentials) has no 30-minute fallback and no timeout approval: it waits for an explicit answer; independent

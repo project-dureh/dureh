@@ -143,7 +143,9 @@ def approver(by: str | None, allowed: tuple[str, ...] = APPROVER_ROLES, what: st
 # Release 78 (improvement plan v0.4 bundle 1, fail-closed kinds): a fail-closed ask never proceeds without an explicit
 # answer from its approver: no 30-minute fallback, no timeout approval, no provisional choice by the desk.
 FAIL_CLOSED_LABEL = "fail-closed"
-FAIL_CLOSED_KINDS = ("a push other than the standing fast-forward (new branch, new remote)", "a dataset or project link",
+FAIL_CLOSED_KINDS = ("a push other than the standing fast-forward (new branch, new remote)",
+                     "a dataset or data project link (`site link-project`; a records project from `site new-project`,"
+                     " where the package allows one, is not one)",
                      "a config change that changes running behaviour", "a GPU or Slurm request above the caps",
                      "a harness merge or release", "training data or a fine-tuning run",
                      "making anything public or changing organization settings", "a structural change",
