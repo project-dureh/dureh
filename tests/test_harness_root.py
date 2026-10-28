@@ -71,6 +71,42 @@ class HarnessRoot(SiteCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertEqual(log.read_text().split("\n")[:4], ["--site", str(self.site_root), "adapter", "sync"])
 
+    def release_clone(self, on_branch: bool) -> Path:
+        """A release checkout as release.py cut leaves it: a clone at a tagged revision with origin/HEAD set."""
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x.invalid", "GIT_COMMITTER_NAME": "t",
+               "GIT_COMMITTER_EMAIL": "t@x.invalid"}
+
+        def g(*args, cwd):
+            subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, env=env)
+
+        src = self.tmp / "src"
+        (src / "dureh_core").mkdir(parents=True)
+        (src / "dureh_core" / "__init__.py").write_text("")
+        (src / "dureh").write_text("#!/bin/sh\nexit 0\n")
+        (src / "dureh").chmod(0o755)
+        g("init", "-q", "-b", "main", cwd=src)
+        g("add", "-A", cwd=src)
+        g("commit", "-qm", "base", cwd=src)
+        if not on_branch:
+            g("checkout", "-q", "-b", "dev/x", cwd=src)
+            (src / "x").write_text("x")
+            g("add", "-A", cwd=src)
+            g("commit", "-qm", "dev only", cwd=src)
+        g("tag", "-a", "r2026.10.28-1", "-m", "r", cwd=src)
+        g("checkout", "-q", "main", cwd=src)
+        rel = self.tmp / "dureh-r2026.10.28-1"
+        g("clone", "-q", "--branch", "r2026.10.28-1", str(src), str(rel), cwd=self.tmp)
+        return rel
+
+    def test_sync_harness_refuses_a_release_off_the_protected_branch(self):
+        """#58 (Director 2026-10-21, Option 1): a tagged release checkout must be on its origin/HEAD branch."""
+        code, _, err = self.run_cli("adapter", "sync", "--harness", str(self.release_clone(on_branch=False)))
+        self.assertEqual(code, 2)
+        self.assertIn("is not on origin/main, the protected branch", err)
+
+    def test_sync_harness_accepts_a_release_on_the_protected_branch(self):
+        cli._release_on_protected_branch(self.release_clone(on_branch=True))  # no refusal
+
     def test_sync_harness_rejects_a_non_checkout(self):
         code, _, err = self.run_cli("adapter", "sync", "--harness", str(self.tmp))
         self.assertEqual(code, 2)

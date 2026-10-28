@@ -96,6 +96,25 @@ def cmd_install(a):
     print(f"State: {r['state'].get('backend')} revision {r['state'].get('revision')}")
 
 
+def _release_on_protected_branch(checkout: Path) -> None:
+    """#58 (Director 2026-10-21, Option 1): a release checkout (HEAD tagged rYYYY.MM.DD-N) runs at a site only when
+    its revision is on the protected branch its clone names as origin/HEAD; other checkouts are not checked."""
+    import re
+    import subprocess
+
+    def run(*args):
+        return subprocess.run(["git", *args], cwd=checkout, capture_output=True, text=True)
+
+    tags = run("tag", "--points-at", "HEAD").stdout.split()
+    if not any(re.match(r"^r\d{4}\.\d{2}\.\d{2}-\d+$", t) for t in tags):
+        return
+    branch = run("symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD").stdout.strip()
+    if not branch:
+        fail(f"{checkout} is a release checkout without origin/HEAD; cannot check it is on the protected branch")
+    if run("merge-base", "--is-ancestor", "HEAD", branch).returncode != 0:
+        fail(f"{checkout} ({', '.join(tags)}) is not on {branch}, the protected branch; refusing to switch to it")
+
+
 def cmd_adapter_sync(a):
     from .runtimes import claude_code
 
@@ -108,6 +127,7 @@ def cmd_adapter_sync(a):
         if not (other / "dureh_core").is_dir() or not os.access(exe, os.X_OK):
             fail(f"{other} is not a harness checkout (no executable dureh with dureh_core/)")
         if other != site.harness_root.resolve():
+            _release_on_protected_branch(other)
             os.execv(str(exe), [str(exe), "--site", str(site.root), "adapter", "sync",
                                 *(["--package-rev", a.package_rev] if a.package_rev else [])])
     old_root = (site.config.get("harness") or {}).get("root")
