@@ -2193,15 +2193,56 @@ def fast_forward(repo_path: Path, remote: str, dest: str, rev: str, env: dict | 
     return {"fast_forward": ff.returncode == 0, "remote_tip": tip, "new_branch": False}
 
 
-def push(site: Site, actor: str, repo: str, remote: str, ref: str, approval: str | None, dry_run: bool = False) -> dict:
+SQUASH_REFUSED = (re.compile(r"\bWI-\d+"), re.compile(r"co-authored-by|claude|anthropic", re.I))
+
+
+def squash_message_refusal(message: str | None) -> str | None:
+    """Release 85 (dureh-team#91, mokoji office#69): a squashed public commit carries no internal work-item ids and
+    no assistant trailers or session links. Why `message` is refused, or None."""
+    if not (message or "").strip():
+        return "--squash needs --message: the one commit message the public repository gets"
+    for rx in SQUASH_REFUSED:
+        m = rx.search(message)
+        if m:
+            return f"the squash message names {m.group(0)!r}: a public commit carries no WI ids or assistant trailers"
+    return None
+
+
+def _squash_commit(site: Site, repo_path: Path, remote: str, dest: str, rev: str, message: str) -> dict:
+    """One commit with `rev`'s tree on top of the remote tip of `dest` (an existing branch), so the push is a
+    fast-forward by construction and none of the local history goes out."""
+    env = site.env()
+    if not dest.startswith("refs/heads/"):
+        fail(f"--squash pushes to a branch, not {dest}")
+    ff = fast_forward(repo_path, remote, dest, rev, env)
+    if ff["new_branch"]:
+        fail(f"{dest} does not exist on {remote}: --squash goes on top of an existing branch")
+    tip, tree = ff["remote_tip"], git(["rev-parse", f"{rev}^{{tree}}"], repo_path, env=env)
+    if git(["rev-parse", f"{tip}^{{tree}}"], repo_path, env=env) == tree:
+        fail(f"nothing to push: {rev[:12]} has the same tree as the remote tip {tip[:12]}")
+    commit = git(["commit-tree", tree, "-p", tip, "-m", message], repo_path, env=env)
+    return {"commit": commit, "tree": tree, "parent": tip, "source": rev}
+
+
+def push(site: Site, actor: str, repo: str, remote: str, ref: str, approval: str | None, dry_run: bool = False,
+         squash: str | None = None) -> dict:
     """Push only to an allowlisted remote, with a Director decision bound to this exact revision, or (release 58)
     without one when the standing fast-forward switch is on and the push is a fast-forward of the destination branch
     (a new branch counts only when allowed); never forced. Release 82 (dureh-team#73): an object entry in
     `push.allowed_remotes` limits the remote's branches (`branches`), carries its own `standing_ff` (default false),
     the branches the desk may create (`new_branches`) and whether tags may be pushed (`tags`, with a decision); a
-    string entry keeps the earlier meaning. The record carries the matched rule."""
+    string entry keeps the earlier meaning. The record carries the matched rule.
+    Release 85 (dureh-team#91): `squash` (the commit message) pushes one new commit with the revision's tree on top of
+    the remote branch tip instead of the local history; it always needs a decision approved with the same message
+    (`push --approve --squash --message`), and the message carries no WI ids or assistant trailers."""
     if site.org.role(actor).kind != "desk":
         fail("only the desk pushes")
+    if squash is not None:
+        why = squash_message_refusal(squash)
+        if why:
+            fail(why)
+        if not approval:
+            fail(f"--squash needs --approval: a squashed push always takes a Director decision; {PUSH_APPROVAL_HINT}")
     led = Ledger(site)
     repo_path = Path(repo).resolve()
     url = git(["remote", "get-url", remote], repo_path, check=False) or remote
@@ -2214,6 +2255,9 @@ def push(site: Site, actor: str, repo: str, remote: str, ref: str, approval: str
         b = dec["payload"].get("binding") or {}
         if dec["payload"]["disposition"] != "approve" or b.get("revision") != rev or b.get("remote") not in (url, remote):
             fail(f"decision {approval} does not approve pushing {rev[:12]} to {url}")
+        if b.get("squash") != squash:
+            fail(f"decision {approval} approves " + (f"a squashed push with message {b['squash']!r}" if b.get("squash")
+                 else "pushing the history, not a squash") + "; approve this push as it will run")
         dest = _dest_ref(b.get("ref") or ref)
         refused = push_limit_refusal(rule, dest, True)
         if refused:
@@ -2242,14 +2286,23 @@ def push(site: Site, actor: str, repo: str, remote: str, ref: str, approval: str
                  f" forced; {PUSH_APPROVAL_HINT}")
         wi, refs = None, []
         extra = {"approval": STANDING_FF, "fast_forward": True, "remote_tip": ff["remote_tip"], "new_branch": ff["new_branch"]}
+    out_rev = rev
+    if squash is not None:
+        sq = _squash_commit(site, repo_path, remote, dest, rev, squash)
+        out_rev, extra = sq["commit"], {**extra, "squash": {**sq, "message": squash}, "fast_forward": True}
     if not dry_run:
-        git(["push", remote, f"{rev}:{dest}"], repo_path, env=site.env())
+        git(["push", remote, f"{out_rev}:{dest}"], repo_path, env=site.env())
     return led.event("push.completed" if not dry_run else "push.planned", actor, wi,
                      {"repo": str(repo_path), "remote": url, "revision": rev, "ref": dest, **extra,
                       "rule": rule, "action_class": "compensatable"}, refs)
 
 
-def push_approve(site: Site, actor: str, repo: str, remote: str, ref: str, memo: str, by: str = "Director") -> dict:
+def push_approve(site: Site, actor: str, repo: str, remote: str, ref: str, memo: str, by: str = "Director",
+                 squash: str | None = None) -> dict:
+    if squash is not None:
+        why = squash_message_refusal(squash)
+        if why:
+            fail(why + "; nothing was recorded")
     repo_path = Path(repo).resolve()
     rev = git(["rev-parse", ref], repo_path)
     url = git(["remote", "get-url", remote], repo_path, check=False) or remote
@@ -2258,8 +2311,10 @@ def push_approve(site: Site, actor: str, repo: str, remote: str, ref: str, memo:
     if refused:  # release 82: no decision for a push the remote's rule refuses anyway
         fail(refused + "; nothing was recorded")
     return Ledger(site).append("decision", "push-approval", actor, None,
-                               {"subject": f"push {rev[:12]} to {url}", "disposition": "approve", "by": by, "memo": memo,
-                                "binding": {"revision": rev, "remote": url, "ref": ref}})
+                               {"subject": f"push {rev[:12]} to {url}" + (" as one squashed commit" if squash else ""),
+                                "disposition": "approve", "by": by, "memo": memo,
+                                "binding": {"revision": rev, "remote": url, "ref": ref,
+                                            **({"squash": squash} if squash is not None else {})}})
 
 
 # -------------------------------------------------------------- path-refs

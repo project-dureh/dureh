@@ -246,6 +246,39 @@ class Ops(SiteCase):
         self.assertEqual(code, 0)
         self.assertEqual(self._remote_tip(bare), rev2)
 
+    def test_squash_push_sends_one_commit_on_the_remote_tip(self):
+        """Release 85 (dureh-team#91): --squash pushes the revision's tree as one commit on the remote tip, with a
+        decision approved for that message; no WI ids or assistant trailers in the message."""
+        s, repo, bare = self._push_fixture(standing_ff=True)
+        tip = self._remote_tip(bare)
+        self._commit(repo, "def f():\n    return 2\n")
+        rev = self._commit(repo, "def f():\n    return 3\n")
+        with self.assertRaisesRegex(DurehError, "WI-0001"):
+            ops.push_approve(s, "desk", str(repo), "origin", "main", "office#69", squash="viewer WI-0001")
+        with self.assertRaisesRegex(DurehError, "Co-Authored-By"):
+            ops.push_approve(s, "desk", str(repo), "origin", "main", "office#69",
+                             squash="viewer\n\nCo-Authored-By: x")
+        with self.assertRaisesRegex(DurehError, "needs --approval"):
+            ops.push(s, "desk", str(repo), "origin", "main", None, squash="viewer update")
+        plain = ops.push_approve(s, "desk", str(repo), "origin", "main", "office#69")
+        with self.assertRaisesRegex(DurehError, "not a squash"):
+            ops.push(s, "desk", str(repo), "origin", "main", plain["id"], squash="viewer update")
+        dec = ops.push_approve(s, "desk", str(repo), "origin", "main", "office#69", squash="viewer update")
+        with self.assertRaisesRegex(DurehError, "squashed push with message"):
+            ops.push(s, "desk", str(repo), "origin", "main", dec["id"], squash="other text")
+        with self.assertRaisesRegex(DurehError, "squashed push with message"):
+            ops.push(s, "desk", str(repo), "origin", "main", dec["id"])
+        ev = ops.push(s, "desk", str(repo), "origin", "main", dec["id"], squash="viewer update")
+        new = self._remote_tip(bare)
+        git = lambda *a: subprocess.run(["git", *a], cwd=bare, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(git("rev-parse", f"{new}^"), tip)
+        self.assertEqual(git("rev-parse", f"{new}^{{tree}}"),
+                         subprocess.run(["git", "rev-parse", f"{rev}^{{tree}}"], cwd=repo, capture_output=True,
+                                        text=True).stdout.strip())
+        self.assertEqual(git("log", "-1", "--format=%B", new), "viewer update")
+        self.assertEqual(ev["payload"]["squash"]["commit"], new)
+        self.assertEqual(ev["payload"]["revision"], rev)
+
     def test_standing_ff_push_refuses_a_non_fast_forward(self):
         s, repo, bare = self._push_fixture(standing_ff=True)
         remote_tip = self._remote_tip(bare)

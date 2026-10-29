@@ -522,13 +522,16 @@ def cmd_push(a):
     from . import ops
 
     site = _site(a)
+    if a.message is not None and not a.squash:
+        fail("--message goes with --squash")
     if a.approve:
         from .records import approver
 
         _print(ops.push_approve(site, _actor(a), a.repo, a.remote, a.ref, a.memo or "",
-                                approver(a.by, what="`push --approve`")))
+                                approver(a.by, what="`push --approve`"), (a.message or "") if a.squash else None))
     else:
-        _print(ops.push(site, _actor(a), a.repo, a.remote, a.ref, a.approval, a.dry_run))
+        _print(ops.push(site, _actor(a), a.repo, a.remote, a.ref, a.approval, a.dry_run,
+                        (a.message or "") if a.squash else None))
 
 
 def cmd_usage(a):
@@ -1373,6 +1376,11 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--approval", help="the Director's push-approval decision id; omitted, the push needs config "
                                       "push.standing_ff and must fast-forward the destination branch")
     x.add_argument("--approve", action="store_true", help="record the Director's approval bound to this revision")
+    x.add_argument("--squash", action="store_true", help="release 85: push one new commit (this revision's tree on top"
+                                                         " of the remote branch tip) instead of the history; needs"
+                                                         " --message and a decision approved with --squash and the"
+                                                         " same message")
+    x.add_argument("--message", help="with --squash: the public commit message (no WI ids, no assistant trailers)")
     x.add_argument("--memo")
     x.add_argument("--by", help="with --approve: who approved, Director, DUREH or desk (required, no default; "
                                 "release 78)")
