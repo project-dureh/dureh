@@ -76,6 +76,26 @@ class BashFriction(SiteCase):
                   "/other/path/bin/dureh wi approve --wi WI-0001 --memo ok", "$B status"):
             self.assertTrue(denied(self.bash(c)), c)
 
+    def test_literal_backticks_and_dollar_parens_are_not_substitutions(self):
+        # release 85: 110 of 178 refusals in a week were backticks in a quoted heredoc's markdown body
+        import os
+        f = os.path.join(os.environ["TMPDIR"], "a.md")
+        for c in (f"cat > {f} <<'EOF'\nUse `bin/dureh status` and $(not run).\nEOF",
+                  f'cat > {f} <<"EOF"\n`x`\nEOF',
+                  "echo 'a `literal` and $(literal)'",
+                  "printf 'fix `foo`\\n'"):
+            self.assertFalse(denied(self.bash(c)), c)
+        for c in (f"cat > {f} <<EOF\n`id`\nEOF",  # unquoted heredoc: the shell runs it
+                  'echo "`id`"', 'echo "$(id)"', "echo `id`",
+                  "echo 'x' `id`", "bash <<'EOF'\nid\nEOF"):
+            self.assertTrue(denied(self.bash(c)), c)
+
+    def test_searching_for_the_word_dureh_is_not_a_harness_call(self):
+        # release 85: workers were refused `env | grep -i dureh`
+        for c in ("env | grep -i dureh", "grep -rn dureh_core src", "echo dureh"):
+            self.assertFalse(denied(self.bash(c)), c)
+        self.assertTrue(denied(self.bash("echo x | python3 /x/dureh.py status")))
+
     def test_dureh_inside_loops_conditions_and_groups_gets_the_workers_identity(self):
         # release 20: the line-wide `( export DUREH_ACTOR=... )` wrapper covers every dureh in the line,
         # so a dureh after a shell keyword or an opening parenthesis is checked and allowed like any other

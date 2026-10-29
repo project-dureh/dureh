@@ -534,6 +534,12 @@ def member_rule(site: Site, dureh, caller=None) -> str:
             f" Codex roles need `{dureh} member canary --runtime codex` passed on the host first.")
 
 
+def _github_on(site: Site) -> bool:
+    from ..github import enabled
+
+    return enabled(site)
+
+
 def _claude_md(site: Site) -> str:
     persona = _persona(site)
     org = site.org
@@ -605,11 +611,13 @@ def _claude_md(site: Site) -> str:
               " Items whose target is `harness` or `package` are not merged: promotion leaves an opaque `contrib/c-<id>` branch for upstream to review"
               " (and notifies upstream through the mailbox when one is configured). WI branches are named `wi/<site-id>/<WI>`; older `wi/<WI>` branches keep working.",
               f"6. Findings are records, not work items: `{dureh} ledger add finding --summary ... --evidence-level measured|reviewed|inferred|proposed`.",
-              f"7. Before moving or deleting a path, run `{dureh} path-refs <path>`. Delete only through `{dureh} purge`."
+              f"7. Before moving or deleting a path, run `{dureh} path-refs <path>`. Delete only through `{dureh} purge`:"
+              " an approved deletion runs as that command (bound to the approved files), never as `rm`, `find -delete` or a script (release 85)."
               " Stray untracked or ignored files in a dispatched or staged WI's worktree (they fail verify's ownership check):"
               f" `{dureh} purge --wi <WI> --path <path relative to the worktree> --dry-run`, then without `--dry-run`; tracked files are refused."
               f" Files in a project cache (unpinned only): `{dureh} purge --project <name> --cache <cache> --path <file> --dry-run` (sizes, sha256),"
               " then, after the Director approved those files, `--approve --by Director --memo '<where approved>'` and `--approval <decision>`; there is no default approval."
+              f" Untracked or ignored files and directories a run left in a project (release 85): `{dureh} purge --project <name> --path <path> --dry-run`, then the same approval steps; tracked files and annexed content are refused."
               f" If a dispatch or verify reports a broken worktree, a stale `.venv` (for example after the site moved) or a missing worktree env, run `{dureh} worktree repair --wi <WI>`"
               f" (or `--target <target>` for a main tree's `.venv`); it rebuilds the environment with `env_rebuild` from config.json."
               f" After the site moved or was renamed, `{dureh} worktree repair --all` does this for every worktree and environment at once (`--dry-run` first)."
@@ -702,10 +710,16 @@ def _claude_md(site: Site) -> str:
               " Never stall on the Director (Director, 2026-10-12: 제가 바뻐서 못볼때 진행못하고 멈춰있는것을 근무시간으로 보는것은 어려울것같아요."
               " 가능하면 계속 업무가 수행되야하는거라): a question to the Director holds only the item that needs the Director's own action"
               " (a push, a link-project, a config change, an approval-exec item); every other item continues on an easy-to-change provisional choice"
-              f" recorded with `{dureh} day decide ... --action provisional`, and a question with no answer after 30 minutes proceeds the same way"
-              " on the option that needs no Director action (the end report lists these under `provisional`)."
-              " The day plan names, for every choice it offers the Director, the fallback the desk takes after 30 minutes (release 56),"
-              " except for a fail-closed choice, which has none. " + FAIL_CLOSED_RULE +
+              f" recorded with `{dureh} day decide ... --action provisional` (the end report lists these under `provisional`)."
+              " Every ask belongs to exactly one class (release 85; approval-balance plan, Director 2026-10-27), and there are no timeout approvals:"
+              " A, reversible and inside an approved plan or WI scope (design choices, order of work, rework): decide it yourself and report it in the unit's report;"
+              " B, reversible and inside the roadmap and the caps (day plans and addenda, work-unit reviews, a model or profile trial within budget,"
+              " a config change that does not change running behaviour, a candidate branch push and PR to a private repository, an approved unit's own run outputs under projects/):"
+              " apply it and show it as auto-applied (the Director reverts by a reply); a B ask that was escalated anyway applies its recommended option at the slot end;"
+              " C, irreversible, outside the lab, or a change of rule or direction (the fail-closed kinds below): a Needs approval item that waits for an explicit answer, while the work it blocks is re-planned, never stalled;"
+              " D, a step only the Director's hands can do (an App or web setting, a login, a command refused to you after approval, a dataset link):"
+              " a Waiting for Director item with the exact command"
+              + (f" (`{dureh} github item ask --class D --command \"...\"`). " if _github_on(site) else ". ") + FAIL_CLOSED_RULE +
               f" The plan lists every action only the Director can take (a dataset link, a push approval, a config change) with `{dureh} day plan --director-action \"<text>\"` (repeatable),"
               " so the Director handles them in one go at approval: `slack ask --kind day-plan` posts them under 대표님 조치 필요 (release 58)."
               " A wait is allowed only when the Director alone can act (a push, a dataset link, an approval-exec item): record it with"
@@ -935,8 +949,10 @@ _INTERPRETERS = {"bash", "sh", "zsh", "dash", "ksh", "fish", "python", "python3"
                  "ssh", "su", "sudo", "eval", "source", ".", "xargs", "parallel", "apptainer", "singularity"}
 
 
-def _strip_heredocs(command: str) -> str:
-    """Drop heredoc bodies (stdin data) and keep everything shells execute, tracking quotes and comments."""
+def _strip_heredocs(command: str, quoted_only: bool = False) -> str:
+    """Drop heredoc bodies (stdin data) and keep everything shells execute, tracking quotes and comments. With
+    `quoted_only` (release 85) only the bodies of quoted heredocs (`<<'EOF'`, `<<"EOF"`, `<<\\EOF`) go: the shell
+    expands nothing in them, while an unquoted body still runs `$(...)` and backticks."""
     out, i, n, quote, pending = [], 0, len(command), None, []
     while i < n:
         c = command[i]
@@ -967,31 +983,34 @@ def _strip_heredocs(command: str) -> str:
             j += strip
             while j < n and command[j] in " \t":
                 j += 1
-            k, word = j, []
+            k, word, quoted = j, [], False
             while k < n and command[k] not in " \t\n;&|<>()":
                 if command[k] in "'\"":
                     e = command.find(command[k], k + 1)
                     if e < 0:
                         break
                     word.append(command[k + 1:e])
-                    k = e + 1
+                    k, quoted = e + 1, True
                 else:
+                    quoted = quoted or command[k] == "\\"
                     word.append(command[k + 1] if command[k] == "\\" and k + 1 < n else command[k])
                     k += 2 if command[k] == "\\" else 1
             if word:
-                pending.append(("".join(word), strip))
+                pending.append(("".join(word), strip, quoted))
             out.append(command[i:k])
             i = k
             continue
         elif c == "\n" and pending:
             out.append(c)
             i += 1
-            for delim, strip in pending:
+            for delim, strip, quoted in pending:
                 while i < n:
                     e = command.find("\n", i)
                     line, i = command[i:e if e >= 0 else n], (e + 1 if e >= 0 else n)
                     if (line.lstrip("\t") if strip else line) == delim:
                         break
+                    if quoted_only and not quoted:
+                        out.append(line + "\n")
             pending = []
             continue
         out.append(c)
@@ -1182,6 +1201,29 @@ def _datalad_check(site: Site, words: list[str], cwd: Path, agent_wi: str | None
     return None
 
 
+def _expands(command: str) -> bool:
+    """Release 85: is there a `$(` or a backtick the shell would run? Quoted heredoc bodies and single-quoted text are
+    literal (10-22..10-29: 110 of 178 refusals were backticks in a `cat > f <<'EOF'` markdown body)."""
+    text, out, quote = _strip_heredocs(command, quoted_only=True), [], None
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if quote == "'":
+            quote = None if c == "'" else quote
+        elif c == "\\" and i + 1 < len(text):
+            out.append(text[i:i + 2])
+            i += 1
+        elif c == "'" and quote is None:
+            quote = "'"
+        else:
+            if c == '"':
+                quote = None if quote == '"' else '"'
+            out.append(c)
+        i += 1
+    rest = "".join(out)
+    return "`" in rest.replace("\\`", "") or "$(" in rest.replace("\\$(", "")
+
+
 # `$(cat <<'EOF' ... EOF)`: a quoted heredoc is literal text, the form Claude Code uses for commit messages.
 _LITERAL_SUBST = re.compile(r"\$\(\s*cat\s+<<-?\s*(['\"])(\w+)\1[ \t]*\n.*?\n[ \t]*\2[ \t]*\n?\s*\)", re.S)
 
@@ -1209,6 +1251,17 @@ def _strip_lead(words: list[str]) -> list[str]:
 def _names_harness(word: str) -> bool:
     w = word.rstrip(")")
     return os.path.basename(w) in ("dureh", "dureh.py") or "dureh_core" in w
+
+
+# Release 85: `env | grep -i dureh` was refused as a harness call (a company's workers, 10-26). For a search or print
+# command a bare word (no `/`) is a pattern or text, not a program it runs; a path to the harness still counts.
+_TEXT_TOOLS = {"grep", "egrep", "fgrep", "rg", "echo", "printf"}
+
+
+def _calls_harness_word(first: str, words: list[str]) -> bool:
+    if first in _TEXT_TOOLS:
+        words = [w for w in words[1:] if "/" in w]
+    return any(_names_harness(w) for w in words)
 
 
 # Release 27: whole-filesystem scans (WI-0115 left `find /` running for hours after its agent had finished).
@@ -1384,9 +1437,8 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
     if ti.get("run_in_background"):
         return _deny(wait("no hidden background work in the session; submit computation with `dureh slurm submit`",
                           original, always=True))
-    if "`" in command or "$(" in command:
-        if role != "desk":
-            return _deny(wait("command substitution cannot be checked; run the parts as separate commands", original))
+    if role != "desk" and ("`" in command or "$(" in command) and _expands(command):
+        return _deny(wait("command substitution cannot be checked; run the parts as separate commands", original))
     try:
         segs = _segments(command)
     except ValueError as exc:
@@ -1439,7 +1491,7 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
             if words[0].startswith("$"):
                 return _deny("a command named by a variable cannot be checked; write the command out"
                              " (for several work items: `bin/dureh wi show --wi A --wi B`)")
-            if not _is_dureh(words[0], site, cwd) and any(_names_harness(w) for w in words):
+            if not _is_dureh(words[0], site, cwd) and _calls_harness_word(first, words):
                 return _deny("call the harness only as `bin/dureh <command>`, written out (not through an interpreter "
                              "or another path), so the hook can set your identity")
         if role != "desk" and (first in _INTERPRETERS or re.match(r"python3?\.\d+$", first)) \

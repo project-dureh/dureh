@@ -78,6 +78,18 @@ MAX_FAILED_TESTS, FAILED_TAIL_LINES, FAILED_LINE_CHARS = 10, 5, 300
 _SEP = "=" * 70
 
 
+def unit_summary(report: str) -> str:
+    """unittest's closing lines (`Ran N tests in Xs | OK` or `... | FAILED (...)`). The job writes stdout and stderr to
+    one file, and block-buffered stdout from the tests lands after unittest's own report, so the last lines of the
+    file are not the summary (10-29: a JSON event line showed as the summary). Falls back to the last 3 lines."""
+    lines = report.strip().splitlines()
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].startswith("Ran ") and " test" in lines[i]:
+            rest = [ln for ln in lines[i + 1:] if ln.strip()]
+            return " | ".join([lines[i]] + rest[:1])
+    return " | ".join(lines[-3:])
+
+
 def unit_failures(stderr: str) -> list[dict]:
     """Release 71 (UR-20261016-02): each failing or erroring test of a unittest run, `{test, kind, tail}`: the test id
     (module.Class.method), FAIL or ERROR, and the last FAILED_TAIL_LINES lines of its report (each at most
@@ -120,10 +132,10 @@ def run_self(site: Site | None, actor: str = "checker", unit: bool = True, recor
         env = {k: v for k, v in os.environ.items() if k != "DUREH_OBSERVE"}
         proc = subprocess.run([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-t", "."],
                               cwd=HARNESS_ROOT, capture_output=True, text=True, timeout=1800, env=env)
-        tail = proc.stderr.strip().splitlines()[-3:]
-        counts["unit"] = {"exit": proc.returncode, "summary": " | ".join(tail)}
+        summary = unit_summary(proc.stderr)
+        counts["unit"] = {"exit": proc.returncode, "summary": summary}
         if proc.returncode != 0:
-            problems.append("unit tests failed: " + " | ".join(tail))
+            problems.append("unit tests failed: " + summary)
             failed = unit_failures(proc.stderr)
             kept = failed[:MAX_FAILED_TESTS]
             for f in kept:  # release 71: name each failing test with the end of its report
@@ -260,11 +272,11 @@ def collect_self(site: Site, actor: str, run_id: str | None = None) -> dict:
     text = exit_file.read_text().strip() if exit_file.is_file() else ""
     report = Path(f"{prefix}.unit.out")
     stderr = report.read_text(encoding="utf-8", errors="replace") if report.is_file() else ""
-    tail = stderr.strip().splitlines()[-3:]
-    unit = {"exit": int(text) if text.lstrip("-").isdigit() else "not-run", "summary": " | ".join(tail),
+    summary = unit_summary(stderr)
+    unit = {"exit": int(text) if text.lstrip("-").isdigit() else "not-run", "summary": summary,
             "job": {"job_id": str(p["job_id"]), "state": state}}
     if unit["exit"] != 0:
-        problems.append(f"unit tests failed (job {p['job_id']} {state}): " + (" | ".join(tail) or "no report"))
+        problems.append(f"unit tests failed (job {p['job_id']} {state}): " + (summary or "no report"))
         failed = unit_failures(stderr)
         kept = failed[:MAX_FAILED_TESTS]
         for f in kept:

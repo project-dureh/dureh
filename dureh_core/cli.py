@@ -278,7 +278,7 @@ def cmd_dispatch_brief(a):
     why = gate(site, a.wi, checking=bool(a.role) and site.org.has(a.role, "verify"))
     if why:
         fail(why)
-    r = dispatch_brief(site, a.wi, _actor(a), a.role)
+    r = dispatch_brief(site, a.wi, _actor(a), a.role, a.tier, a.reason)
     env = r.get("worktree_env") or {}
     if env.get("env") in ("shared", "rebuilt"):
         how = (f"shares {env.get('shared')}" if env["env"] == "shared"
@@ -494,10 +494,10 @@ def cmd_purge(a):
     from .workflow import purge, purge_cache, purge_cache_approve, purge_paths
 
     if bool(a.wi) == bool(a.project):
-        fail("purge takes --wi <WI> or --project <name> --cache <cache> (not both)")
-    if a.project:  # release 77 (#40): files in a project cache, with a bound Director approval
-        if not a.cache or not a.path:
-            fail("purge --project needs --cache <name> and at least one --path")
+        fail("purge takes --wi <WI> or --project <name> [--cache <cache>] (not both)")
+    if a.project:  # release 77 (#40): files in a project cache; release 85: untracked project paths without --cache
+        if not a.path:
+            fail("purge --project needs at least one --path")
         if a.approve:
             if a.approval or a.dry_run:
                 fail("--approve records the approval; it does not go with --approval or --dry-run")
@@ -522,13 +522,16 @@ def cmd_push(a):
     from . import ops
 
     site = _site(a)
+    if a.message is not None and not a.squash:
+        fail("--message goes with --squash")
     if a.approve:
         from .records import approver
 
         _print(ops.push_approve(site, _actor(a), a.repo, a.remote, a.ref, a.memo or "",
-                                approver(a.by, what="`push --approve`")))
+                                approver(a.by, what="`push --approve`"), (a.message or "") if a.squash else None))
     else:
-        _print(ops.push(site, _actor(a), a.repo, a.remote, a.ref, a.approval, a.dry_run))
+        _print(ops.push(site, _actor(a), a.repo, a.remote, a.ref, a.approval, a.dry_run,
+                        (a.message or "") if a.squash else None))
 
 
 def cmd_usage(a):
@@ -914,7 +917,8 @@ def cmd_github(a):
         body = Path(a.body_file).read_text(encoding="utf-8")
         _print(github.item_ask(site, _actor(a), a.title, body, a.options, a.layer, a.wi, a.project, a.repo, a.units,
                                fail_closed=a.fail_closed, decide=a.decide, recommend=a.recommend,
-                               otherwise=a.otherwise, on_hold=a.on_hold))
+                               otherwise=a.otherwise, on_hold=a.on_hold, ask_class=a.ask_class,
+                               command=a.command))
     elif a.item_command == "close":
         _print(github.item_close(site, _actor(a), a.wi, a.url, a.comment))
     else:
@@ -1181,6 +1185,8 @@ def parser() -> argparse.ArgumentParser:
     x = add(d, "brief", cmd_dispatch_brief, "prepare a recorded brief for spawning one agent")
     x.add_argument("--wi", required=True)
     x.add_argument("--role", help="checker, to verify a staged item")
+    x.add_argument("--tier", help="release 85: one of the role's tier_options (package) for this dispatch; needs --reason")
+    x.add_argument("--reason", help="with --tier: why this item needs that tier (recorded)")
     x.add_argument("--actor")
     x = add(d, "stop", cmd_dispatch_stop, "record a stop for a dispatched work item")
     x.add_argument("--wi", required=True)
@@ -1348,10 +1354,13 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--path", action="append", help="a path relative to the WI's worktree to remove (repeatable): "
                                                    "untracked or ignored only, never a tracked file or a path that "
                                                    "resolves outside the worktree; the WI must be dispatched or staged."
-                                                   " With --project: a file in projects/<name>/cache/<cache>/")
+                                                   " With --project --cache: a file in projects/<name>/cache/<cache>/;"
+                                                   " with --project alone (release 85): an untracked or ignored file or"
+                                                   " directory in projects/<name>/")
     x.add_argument("--project", help="release 77: delete files from projects/<name>/cache/<cache>/ (desk only; never a"
                                      " file pinned in config.json or the project manifest; needs --approval)")
-    x.add_argument("--cache", help="with --project: the cache directory name, e.g. containers")
+    x.add_argument("--cache", help="with --project: the cache directory name, e.g. containers; without it the paths"
+                                   " are untracked files or directories of the project (release 85)")
     x.add_argument("--approval", help="with --project: the Director's purge-approval decision id (bound to the files"
                                       " and their sha256); required, no default")
     x.add_argument("--approve", action="store_true", help="with --project: record the Director's approval for these"
@@ -1370,6 +1379,11 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--approval", help="the Director's push-approval decision id; omitted, the push needs config "
                                       "push.standing_ff and must fast-forward the destination branch")
     x.add_argument("--approve", action="store_true", help="record the Director's approval bound to this revision")
+    x.add_argument("--squash", action="store_true", help="release 85: push one new commit (this revision's tree on top"
+                                                         " of the remote branch tip) instead of the history; needs"
+                                                         " --message and a decision approved with --squash and the"
+                                                         " same message")
+    x.add_argument("--message", help="with --squash: the public commit message (no WI ids, no assistant trailers)")
     x.add_argument("--memo")
     x.add_argument("--by", help="with --approve: who approved, Director, DUREH or desk (required, no default; "
                                 "release 78)")
@@ -1699,6 +1713,11 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--on-hold", action="store_true",
                    help="release 83, layer 1-2: open the ask with Status Today and the label on-hold instead of In "
                         "progress (a layer 1-2 ask is refused while 2 items of the company are In progress)")
+    x.add_argument("--class", dest="ask_class", choices=["C", "D"],
+                   help="release 85 (approval classes): C a decision (Needs approval, the default form); D a step only"
+                        " the Director's hands do (Waiting for Director, label waiting-director, no options; needs"
+                        " --command)")
+    x.add_argument("--command", help="with --class D: the exact command or step the Director runs")
     x.add_argument("--wi", help="the work item the ask belongs to")
     x.add_argument("--project")
     x.add_argument("--units", type=float)

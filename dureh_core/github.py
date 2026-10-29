@@ -646,6 +646,8 @@ def poll(site: Site, actor: str, cfg: dict) -> list[str]:
             led.event(DECIDED, actor, link.get("wi"), {"item_id": iid, "url": it["url"], "from": was, "to": dec,
                                                         "layer": it.get("layer"), "first_poll": first,
                                                         "director_comments": [c["url"] for c in said]})
+            if not first:
+                lines += _follow_decision(site, actor, cfg, it, dec, said, link.get("wi"))
         ids = [c["id"] for c in it["comments"] if c.get("id")]
         before = seen_com.get(iid, set())
         if not first:
@@ -732,6 +734,34 @@ def rate_limited(err: Exception) -> bool:
 def _retry_after(err: Exception) -> float | None:
     m = re.search(r"retry[- ]after[:= ]*(\d+)", str(err), re.I)
     return float(m.group(1)) if m else None
+
+
+def decision_status(decision, status) -> str | None:
+    """Release 85 (a company's request, Director 2026-10-29 "제가 결정하면, 위치를 옮기는게 자동화되었으면"): the Status
+    a Decision moves an open item to, the boards' one rule: Approve 1-3 or Rejected -> Today unless the item is already
+    In progress, Waiting for Director or Done; Discuss or no Decision -> None (not moved)."""
+    dec = decision_value(decision)
+    if dec in (None, DISCUSS) or status in ("In progress", "Waiting for Director", "Done", "Today"):
+        return None
+    return "Today"
+
+
+def _follow_decision(site: Site, actor: str, cfg: dict, it: dict, dec, said: list, wi) -> list[str]:
+    """Move the item to `decision_status` when its Decision changes; a fail-closed ask moves only with a Director
+    comment beside the Decision (as the upstream heartbeat holds it). One line when moved or held; a failed write is
+    reported, never raised (the next decision line is not lost)."""
+    want = decision_status(dec, it.get("status"))
+    if not want or not it.get("id"):
+        return []
+    if decision_value(dec) != REJECT and ask_fail_closed(site, it.get("url") or "") and not said:
+        return [f"status: {_ref(it)} held: a fail-closed ask moves with a Director comment beside the Decision"]
+    try:
+        _edit(cfg, _meta(cfg), it["id"], {FIELD_STATUS: want})
+    except (GhError, DurehError) as e:
+        return [f"status: {_ref(it)} not moved to {want}: {e}"]
+    Ledger(site).event(UPDATED, actor, wi, {"item_id": it["id"], "url": it.get("url"), "fields": {FIELD_STATUS: want},
+                                            "by_decision": decision_value(dec)}, [wi] if wi else None)
+    return [f"status: {_ref(it)} -> {want} (Decision {decision_value(dec)})"]
 
 
 def watch(site: Site, actor: str, interval: float = WATCH_INTERVAL, emit=print, sleep=time.sleep,
@@ -1038,10 +1068,42 @@ def item_set(site: Site, actor: str, wi: str | None = None, url: str | None = No
             **({"labels": labels} if labels else {})}
 
 
+WAITING_LABEL = "waiting-director"
+DIRECTOR_STEP = "github.director-step.created"
+
+
+def _director_step(site: Site, actor: str, title: str, body: str, command: str | None, wi: str | None, project,
+                   repo: str | None) -> dict:
+    """Release 85 (`item ask --class D`, approval-balance plan 3.1/3.4): a step only the Director's hands can do (an App
+    or web setting, a login, a command refused to the desk after approval, a dataset link). No Decision options: the
+    issue opens with 현재 상태 and 대표님이 하실 일 (the exact command), is assigned to the Director, carries the label
+    waiting-director and Status Waiting for Director, and is closed by the desk once the step is done."""
+    if not (command or "").strip():
+        fail("--class D needs --command: the exact command or step the Director runs (one block he can paste)")
+    cfg = config(site)
+    title = _clean(title, "the title", 256)
+    text = (f"## 현재 상태\n\n{_clean(body, 'the body')}\n\n## 대표님이 하실 일\n\n```\n{_clean(command, '--command', 4000)}\n```"
+            f"\n\nWhen it is done, reply here; the desk checks the result and closes this item.\n\n{DESK_MARK}")
+    fields = _fields("Waiting for Director", project, 3, None)
+    meta = _meta(cfg)
+    _edits(meta, fields)
+    repo_name = _repo(cfg, repo)
+    gh(cfg, ["label", "create", WAITING_LABEL, "--repo", repo_name, "--color", "d93f0b", "--description",
+             "a step only the Director's hands can do", "--force"])
+    url = _create_issue(cfg, repo_name, title, text, labels=[WAITING_LABEL], assignee=cfg.get("director_login"))
+    item_id = _add_to_board(cfg, meta, url, fields)
+    _, number = _issue_number(cfg, url)
+    rec = {"url": url, "repo": repo_name, "number": number, "item_id": item_id, "class": "D",
+           "assignee": cfg.get("director_login"), "fields": fields, "chars": len(text)}
+    Ledger(site).event(DIRECTOR_STEP, actor, wi, rec, [wi] if wi else None)
+    return rec
+
+
 def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] | None = None, layer: int = 3,
              wi: str | None = None, project=None, repo: str | None = None, units=None,
              fail_closed: bool = False, decide: str | None = None, recommend: str | None = None,
-             otherwise: str | None = None, on_hold: bool = False) -> dict:
+             otherwise: str | None = None, on_hold: bool = False, ask_class: str | None = None,
+             command: str | None = None) -> dict:
     """A decision ask: a `kind:decision` issue (layer 3: assigned to config github.director_login, Status Waiting for
     Director), on the board with its Layer; the answer is the board's Decision, read by `watch`/`status`.
     Release 80 (dureh-team#30 Option 1, the Director's three-line ask of dureh-team#49): a layer-3 ask opens with three
@@ -1056,6 +1118,13 @@ def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] |
     from .records import FAIL_CLOSED_LABEL, fallback_lines
 
     _require_desk(site, actor)
+    if ask_class is not None and ask_class not in ("C", "D"):
+        fail(f"--class takes C (a decision: Needs approval) or D (a step only the Director's hands do), not {ask_class!r};"
+             " classes A and B are not asked (approval-balance plan 3.1)")
+    if ask_class == "D":
+        return _director_step(site, actor, title, body, command, wi, project, repo)
+    if command:
+        fail("--command goes with --class D")
     cfg = config(site)
     if on_hold and int(layer) == 3:
         fail("--on-hold is for a layer 1-2 ask (it would open In progress); a layer-3 ask opens Needs approval")

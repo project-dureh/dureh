@@ -188,6 +188,11 @@ dureh purge --project <name> --cache <cache> --path <file> ... --approval <decis
   used.
 - The purge records one `cache.purged` event (refs: the decision) with `files` (path, size, sha256), `bytes` and
   `removed`.
+- Untracked project files (release 85, dureh-team#91): without `--cache`, each `--path` is a file or a directory in
+  `projects/<name>/` that git does not track (untracked or ignored), e.g. run outputs or checkpoints a WI left in a
+  linked project. A directory stands for every regular file under it (each bound by path and sha256) and is removed
+  once empty. Refused besides the cache rules: a tracked file (`git ls-files`), any symlink inside a directory
+  (annexed content), `.git/` and `.datalad/`. Same approval, same `cache.purged` event (`cache` null).
 
 ## Stray untracked files in an active WI: `purge --path` (release 72, project-dureh/dureh#23)
 

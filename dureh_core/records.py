@@ -150,7 +150,9 @@ FAIL_CLOSED_KINDS = ("a push other than the standing fast-forward (new branch, n
                      "a harness merge or release", "training data or a fine-tuning run",
                      "making anything public or changing organization settings", "a structural change",
                      "closing the day early", "writing or deleting data outside a WI worktree (dataset save, cache or "
-                     "image deletion)", "anything about credentials")
+                     "image deletion, project file deletion; release 85: the outputs and run records an approved unit's"
+                     " own run writes under projects/ are not one: they are class B, reported in the unit's report)",
+                     "anything about credentials")
 FAIL_CLOSED_RULE = ("Fail-closed asks (release 78): " + "; ".join(FAIL_CLOSED_KINDS) + ". For these there is no 30-minute"
                     " fallback and no timeout approval: wait for an explicit answer (the Decision column, the Director's"
                     " words in the session, or a relayed approval); with no answer the action waits to the next working day."

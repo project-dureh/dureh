@@ -296,6 +296,26 @@ class Watch(GithubBase):
         self.assertEqual([(e["payload"]["from"], e["payload"]["to"]) for e in decided],
                          [(None, "Approve 1"), (None, "Approve 2")])
 
+    def test_a_decision_moves_the_item(self):
+        """Release 85 (Director 2026-10-29): the desk's watch moves an item to Today when the Director decides;
+        Discuss and items already In progress or Waiting for Director stay."""
+        self.gh.items = [node("I1", 1, "first", "Needs approval", None, "3 Director"),
+                         node("I2", 2, "second", "Needs approval", None, "3 Director"),
+                         node("I3", 3, "third", "In progress", None, "3 Director")]
+        self.lines()
+        self.gh.calls.clear()
+        self.gh.items = [node("I1", 1, "first", "Needs approval", "Approve 1", "3 Director"),
+                         node("I2", 2, "second", "Needs approval", "Discuss", "3 Director"),
+                         node("I3", 3, "third", "In progress", "Approve 1", "3 Director")]
+        got = self.lines()
+        self.assertIn("status: office#1 -> Today (Decision Approve 1)", got)
+        self.assertFalse(any(x.startswith("status: office#2") or x.startswith("status: office#3") for x in got), got)
+        today = "O_S" + str(list(github.STATUSES).index("Today"))
+        edits = [c["argv"] for c in self.gh.calls if c["argv"][1:3] == ["project", "item-edit"]]
+        self.assertEqual([e[-1] for e in edits], [today])
+        self.assertEqual(github.decision_status("Rejected", "Needs approval"), "Today")
+        self.assertIsNone(github.decision_status("Approve 2", "Waiting for Director"))
+
     def test_state_survives_a_restart(self):
         self.gh.items = [node("I1", 1, "first", "Today", "Later")]
         self.assertEqual(len(self.lines()), 1)
@@ -986,6 +1006,31 @@ class Items(GithubBase):
         self.gh.calls.clear()
         code, _, err = self.run_cli("item", "ask", "--title", "Order", "--body-file", str(body), "--layer", "2")
         self.assertEqual(code, 0, err)  # a layer-2 ask (DUREH) needs no three lines
+
+    def test_class_d_ask_is_a_director_step_with_the_command(self):
+        """Release 85 (approval classes): --class D opens Waiting for Director with the exact command, no options."""
+        body = self.tmp / "step.md"
+        body.write_text("The push was refused to the desk after the approval on item 7.")
+        code, _, err = self.run_cli("item", "ask", "--title", "Push", "--body-file", str(body), "--class", "D")
+        self.assertEqual(code, 2)
+        self.assertIn("--class D needs --command", err)
+        code, out, err = self.run_cli("item", "ask", "--title", "Push", "--body-file", str(body), "--class", "D",
+                                      "--command", "git push origin main")
+        self.assertEqual(code, 0, err)
+        create = next(c for c in self.gh.calls if c["argv"][1:3] == ["issue", "create"])
+        argv, text = create["argv"], create["input"]
+        self.assertEqual(argv[argv.index("--label") + 1], "waiting-director")
+        self.assertEqual(argv[argv.index("--assignee") + 1], "example-director")
+        self.assertTrue(text.startswith("## 현재 상태\n\nThe push was refused"))
+        self.assertIn("## 대표님이 하실 일\n\n```\ngit push origin main\n```", text)
+        self.assertNotIn("Approve 1", text)
+        wait = "O_S" + str(list(github.STATUSES).index("Waiting for Director"))
+        edits = [c["argv"] for c in self.gh.calls if c["argv"][1:3] == ["project", "item-edit"]]
+        self.assertIn(wait, [e[-1] for e in edits])
+        self.assertEqual([e["payload"]["class"] for e in self.events() if e["type"] == github.DIRECTOR_STEP], ["D"])
+        code, _, err = self.run_cli("item", "ask", "--title", "Q", "--body-file", str(body), "--command", "x", *THREE)
+        self.assertEqual(code, 2)
+        self.assertIn("--command goes with --class D", err)
 
     def test_ask_refuses_more_than_three_options(self):
         body = self.tmp / "ask.md"

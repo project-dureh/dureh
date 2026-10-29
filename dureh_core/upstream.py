@@ -21,9 +21,10 @@ TYPES = ("bug", "change", "decision", "friction")
 SEVERITIES = ("blocking", "degrading", "minor")
 STATUSES = ("open", "sent", "accepted", "deferred", "declined", "landed")
 # upstream may land a fix without a separate accepted reply (sent -> landed); `deferred` is an accepted
-# request the Director postponed: it may go back to accepted, or be declined.
+# request the Director postponed: it may go back to accepted, or be declined. Release 85: an `open` request upstream
+# already answered with a `landed` message may close directly (open -> landed; the export marked it sent only by mail).
 TRANSITIONS = {
-    "open": {"sent"},
+    "open": {"sent", "landed"},
     "sent": {"accepted", "declined", "landed"},
     "accepted": {"landed", "deferred"},
     "deferred": {"accepted", "declined"},
@@ -735,6 +736,28 @@ def collaboration(site: Site) -> dict:
         if _body(last.read_text(encoding="utf-8")).lower().startswith("open"):
             idle_after = [p for p in _messages(base / "to-upstream") if "-idle-" in p.name and p.name[:16] >= last.name[:16]]
             out["merge_window"] = "open (site idle)" if idle_after else "requested"
+    out["landed_open"] = _landed_open(incoming, out["open"])
     if out["merge_window"] != "closed" or out["new_from_upstream"]:
         out["mode"] = "collaborating"
     return out
+
+
+_LANDED_REV = re.compile(r"\bharness\s+([0-9a-f]{7,40})\b")
+
+
+def _landed_open(incoming: list[Path], open_ids: list[str]) -> list[dict]:
+    """Release 85 (dureh-team#91): open requests that a `landed` message from upstream names in its refs, with the
+    harness revision the message gives, so `status` can say "close it" (10-29: three landed requests stayed open at
+    one site for days and one was exported again as NEW)."""
+    found: dict[str, dict] = {}
+    for p in incoming:
+        text = p.read_text(encoding="utf-8", errors="replace")
+        h = _header(text)
+        if (h.get("kind") or "").strip() != "landed":
+            continue
+        refs = [r.strip() for r in (h.get("refs") or "").strip("[]").split(",") if r.strip()]
+        m = _LANDED_REV.search(_body(text))
+        for ur in refs:
+            if ur in open_ids:
+                found[ur] = {"ur": ur, "rev": m.group(1) if m else None, "message": h.get("id") or p.stem}
+    return [found[k] for k in open_ids if k in found]

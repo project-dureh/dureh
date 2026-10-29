@@ -58,6 +58,7 @@ class Role:
     source: str = "harness"               # harness | package
     runtime: str = "claude-code"          # release 64: claude-code (a subagent) | codex | local (`dureh member run`)
     runtime_fallback: str = "claude-code"  # what `member run --fallback` runs instead: claude-code, or none
+    tier_options: list[str] = field(default_factory=list)  # release 85: tiers the desk may pick per dispatch
     profile: str | None = None            # local runtime: the package path of the role's model profile
 
     @property
@@ -130,6 +131,7 @@ def _role(name: str, spec, where: str, source: str) -> Role:
         skill=spec.get("skill") or None,
         instructions=_texts(spec.get("instructions"), f"{where}: role {name} instructions"),
         project=bool(spec.get("project")),
+        tier_options=_texts(spec.get("tier_options"), f"{where}: role {name} tier_options"),
         source=source,
         **_runtime_keys(name, spec, where),
     )
@@ -249,6 +251,9 @@ class Org:
         for role in roles.values():
             if role.tier not in self.tiers:
                 fail(f"role {role.name} uses unknown tier {role.tier}")
+            for t in role.tier_options:
+                if t not in self.tiers:
+                    fail(f"role {role.name}: tier_options names unknown tier {t}")
             for target in role.may_dispatch:
                 if target not in roles:
                     fail(f"role {role.name} may dispatch unknown role {target}")

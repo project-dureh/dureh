@@ -232,5 +232,28 @@ class Routing(SiteCase):
         self.assertRegex(first, rf"^# spawn subagent_type=researcher model={re.escape(SONNET)} kind=build;")
 
 
+    def test_tier_option_picks_its_model_and_is_recorded(self):
+        """Release 85: `tier_options` let the desk pick a tier for one dispatch (`dispatch brief --tier T --reason R`);
+        the brief states that tier's model, the record carries tier and reason, and the spawn is held to it."""
+        FABLE = "anthropic:claude-fable-5-1"
+        self.configure(deep={"model": FABLE, "qualification": "waived-bootstrap", "waiver_expires": "2099-01-01"})
+        self.s.org.role("researcher").tier_options = ["deep"]
+        wi = self.item()
+        with self.assertRaisesRegex(DurehError, "--tier needs --reason"):
+            wf.dispatch_brief(self.s, wi, "desk", tier="deep")
+        with self.assertRaisesRegex(DurehError, "not pm"):
+            wf.dispatch_brief(self.s, wi, "desk", tier="pm", tier_reason="x")
+        b = wf.dispatch_brief(self.s, wi, "desk", tier="deep", tier_reason="hard plan")
+        self.assertEqual(b["model"], FABLE)
+        p = [e for e in self.led.events() if e["type"] == "dispatch.prepared"][-1]["payload"]
+        self.assertEqual((p["tier"], p["tier_reason"], p["model"]), ("deep", "hard plan", FABLE))
+        self.assertIsNotNone(self.spawn("desk", "researcher", b["brief"], model="sonnet"))
+
+    def test_no_tier_options_no_choice(self):
+        wi = self.item()
+        with self.assertRaisesRegex(DurehError, "no tier_options"):
+            wf.dispatch_brief(self.s, wi, "desk", tier="deep", tier_reason="x")
+
+
 if __name__ == "__main__":
     unittest.main()
