@@ -937,8 +937,10 @@ _INTERPRETERS = {"bash", "sh", "zsh", "dash", "ksh", "fish", "python", "python3"
                  "ssh", "su", "sudo", "eval", "source", ".", "xargs", "parallel", "apptainer", "singularity"}
 
 
-def _strip_heredocs(command: str) -> str:
-    """Drop heredoc bodies (stdin data) and keep everything shells execute, tracking quotes and comments."""
+def _strip_heredocs(command: str, quoted_only: bool = False) -> str:
+    """Drop heredoc bodies (stdin data) and keep everything shells execute, tracking quotes and comments. With
+    `quoted_only` (release 85) only the bodies of quoted heredocs (`<<'EOF'`, `<<"EOF"`, `<<\\EOF`) go: the shell
+    expands nothing in them, while an unquoted body still runs `$(...)` and backticks."""
     out, i, n, quote, pending = [], 0, len(command), None, []
     while i < n:
         c = command[i]
@@ -969,31 +971,34 @@ def _strip_heredocs(command: str) -> str:
             j += strip
             while j < n and command[j] in " \t":
                 j += 1
-            k, word = j, []
+            k, word, quoted = j, [], False
             while k < n and command[k] not in " \t\n;&|<>()":
                 if command[k] in "'\"":
                     e = command.find(command[k], k + 1)
                     if e < 0:
                         break
                     word.append(command[k + 1:e])
-                    k = e + 1
+                    k, quoted = e + 1, True
                 else:
+                    quoted = quoted or command[k] == "\\"
                     word.append(command[k + 1] if command[k] == "\\" and k + 1 < n else command[k])
                     k += 2 if command[k] == "\\" else 1
             if word:
-                pending.append(("".join(word), strip))
+                pending.append(("".join(word), strip, quoted))
             out.append(command[i:k])
             i = k
             continue
         elif c == "\n" and pending:
             out.append(c)
             i += 1
-            for delim, strip in pending:
+            for delim, strip, quoted in pending:
                 while i < n:
                     e = command.find("\n", i)
                     line, i = command[i:e if e >= 0 else n], (e + 1 if e >= 0 else n)
                     if (line.lstrip("\t") if strip else line) == delim:
                         break
+                    if quoted_only and not quoted:
+                        out.append(line + "\n")
             pending = []
             continue
         out.append(c)
@@ -1182,6 +1187,29 @@ def _datalad_check(site: Site, words: list[str], cwd: Path, agent_wi: str | None
             continue
         return f"datalad {sub} writes only inside your WI worktree or scratch space (target is {z.site_rel or t})"
     return None
+
+
+def _expands(command: str) -> bool:
+    """Release 85: is there a `$(` or a backtick the shell would run? Quoted heredoc bodies and single-quoted text are
+    literal (10-22..10-29: 110 of 178 refusals were backticks in a `cat > f <<'EOF'` markdown body)."""
+    text, out, quote = _strip_heredocs(command, quoted_only=True), [], None
+    i = 0
+    while i < len(text):
+        c = text[i]
+        if quote == "'":
+            quote = None if c == "'" else quote
+        elif c == "\\" and i + 1 < len(text):
+            out.append(text[i:i + 2])
+            i += 1
+        elif c == "'" and quote is None:
+            quote = "'"
+        else:
+            if c == '"':
+                quote = None if quote == '"' else '"'
+            out.append(c)
+        i += 1
+    rest = "".join(out)
+    return "`" in rest.replace("\\`", "") or "$(" in rest.replace("\\$(", "")
 
 
 # `$(cat <<'EOF' ... EOF)`: a quoted heredoc is literal text, the form Claude Code uses for commit messages.
@@ -1397,9 +1425,8 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
     if ti.get("run_in_background"):
         return _deny(wait("no hidden background work in the session; submit computation with `dureh slurm submit`",
                           original, always=True))
-    if "`" in command or "$(" in command:
-        if role != "desk":
-            return _deny(wait("command substitution cannot be checked; run the parts as separate commands", original))
+    if role != "desk" and ("`" in command or "$(" in command) and _expands(command):
+        return _deny(wait("command substitution cannot be checked; run the parts as separate commands", original))
     try:
         segs = _segments(command)
     except ValueError as exc:

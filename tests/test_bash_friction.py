@@ -76,6 +76,20 @@ class BashFriction(SiteCase):
                   "/other/path/bin/dureh wi approve --wi WI-0001 --memo ok", "$B status"):
             self.assertTrue(denied(self.bash(c)), c)
 
+    def test_literal_backticks_and_dollar_parens_are_not_substitutions(self):
+        # release 85: 110 of 178 refusals in a week were backticks in a quoted heredoc's markdown body
+        import os
+        f = os.path.join(os.environ["TMPDIR"], "a.md")
+        for c in (f"cat > {f} <<'EOF'\nUse `bin/dureh status` and $(not run).\nEOF",
+                  f'cat > {f} <<"EOF"\n`x`\nEOF',
+                  "echo 'a `literal` and $(literal)'",
+                  "printf 'fix `foo`\\n'"):
+            self.assertFalse(denied(self.bash(c)), c)
+        for c in (f"cat > {f} <<EOF\n`id`\nEOF",  # unquoted heredoc: the shell runs it
+                  'echo "`id`"', 'echo "$(id)"', "echo `id`",
+                  "echo 'x' `id`", "bash <<'EOF'\nid\nEOF"):
+            self.assertTrue(denied(self.bash(c)), c)
+
     def test_searching_for_the_word_dureh_is_not_a_harness_call(self):
         # release 85: workers were refused `env | grep -i dureh`
         for c in ("env | grep -i dureh", "grep -rn dureh_core src", "echo dureh"):
