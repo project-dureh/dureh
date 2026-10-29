@@ -1213,6 +1213,17 @@ def _names_harness(word: str) -> bool:
     return os.path.basename(w) in ("dureh", "dureh.py") or "dureh_core" in w
 
 
+# Release 85: `env | grep -i dureh` was refused as a harness call (camri WI-0376/0378, 10-26). For a search or print
+# command a bare word (no `/`) is a pattern or text, not a program it runs; a path to the harness still counts.
+_TEXT_TOOLS = {"grep", "egrep", "fgrep", "rg", "echo", "printf"}
+
+
+def _calls_harness_word(first: str, words: list[str]) -> bool:
+    if first in _TEXT_TOOLS:
+        words = [w for w in words[1:] if "/" in w]
+    return any(_names_harness(w) for w in words)
+
+
 # Release 27: whole-filesystem scans (WI-0115 left `find /` running for hours after its agent had finished).
 _SCAN_VALUE_OPTS = {
     "grep": {"-e", "-f", "-A", "-B", "-C", "-m", "-d", "-D", "--include", "--exclude", "--exclude-dir", "--exclude-from",
@@ -1441,7 +1452,7 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
             if words[0].startswith("$"):
                 return _deny("a command named by a variable cannot be checked; write the command out"
                              " (for several work items: `bin/dureh wi show --wi A --wi B`)")
-            if not _is_dureh(words[0], site, cwd) and any(_names_harness(w) for w in words):
+            if not _is_dureh(words[0], site, cwd) and _calls_harness_word(first, words):
                 return _deny("call the harness only as `bin/dureh <command>`, written out (not through an interpreter "
                              "or another path), so the hook can set your identity")
         if role != "desk" and (first in _INTERPRETERS or re.match(r"python3?\.\d+$", first)) \

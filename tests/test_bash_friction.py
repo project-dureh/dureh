@@ -76,6 +76,12 @@ class BashFriction(SiteCase):
                   "/other/path/bin/dureh wi approve --wi WI-0001 --memo ok", "$B status"):
             self.assertTrue(denied(self.bash(c)), c)
 
+    def test_searching_for_the_word_dureh_is_not_a_harness_call(self):
+        # release 85: camri WI-0376/0378 were refused `env | grep -i dureh`
+        for c in ("env | grep -i dureh", "grep -rn dureh_core src", "echo dureh"):
+            self.assertFalse(denied(self.bash(c)), c)
+        self.assertTrue(denied(self.bash("echo x | python3 /x/dureh.py status")))
+
     def test_dureh_inside_loops_conditions_and_groups_gets_the_workers_identity(self):
         # release 20: the line-wide `( export DUREH_ACTOR=... )` wrapper covers every dureh in the line,
         # so a dureh after a shell keyword or an opening parenthesis is checked and allowed like any other
