@@ -296,6 +296,26 @@ class Watch(GithubBase):
         self.assertEqual([(e["payload"]["from"], e["payload"]["to"]) for e in decided],
                          [(None, "Approve 1"), (None, "Approve 2")])
 
+    def test_a_decision_moves_the_item(self):
+        """Release 85 (Director 2026-10-29): the desk's watch moves an item to Today when the Director decides;
+        Discuss and items already In progress or Waiting for Director stay."""
+        self.gh.items = [node("I1", 1, "first", "Needs approval", None, "3 Director"),
+                         node("I2", 2, "second", "Needs approval", None, "3 Director"),
+                         node("I3", 3, "third", "In progress", None, "3 Director")]
+        self.lines()
+        self.gh.calls.clear()
+        self.gh.items = [node("I1", 1, "first", "Needs approval", "Approve 1", "3 Director"),
+                         node("I2", 2, "second", "Needs approval", "Discuss", "3 Director"),
+                         node("I3", 3, "third", "In progress", "Approve 1", "3 Director")]
+        got = self.lines()
+        self.assertIn("status: office#1 -> Today (Decision Approve 1)", got)
+        self.assertFalse(any(x.startswith("status: office#2") or x.startswith("status: office#3") for x in got), got)
+        today = "O_S" + str(list(github.STATUSES).index("Today"))
+        edits = [c["argv"] for c in self.gh.calls if c["argv"][1:3] == ["project", "item-edit"]]
+        self.assertEqual([e[-1] for e in edits], [today])
+        self.assertEqual(github.decision_status("Rejected", "Needs approval"), "Today")
+        self.assertIsNone(github.decision_status("Approve 2", "Waiting for Director"))
+
     def test_state_survives_a_restart(self):
         self.gh.items = [node("I1", 1, "first", "Today", "Later")]
         self.assertEqual(len(self.lines()), 1)

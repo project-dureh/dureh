@@ -646,6 +646,8 @@ def poll(site: Site, actor: str, cfg: dict) -> list[str]:
             led.event(DECIDED, actor, link.get("wi"), {"item_id": iid, "url": it["url"], "from": was, "to": dec,
                                                         "layer": it.get("layer"), "first_poll": first,
                                                         "director_comments": [c["url"] for c in said]})
+            if not first:
+                lines += _follow_decision(site, actor, cfg, it, dec, said, link.get("wi"))
         ids = [c["id"] for c in it["comments"] if c.get("id")]
         before = seen_com.get(iid, set())
         if not first:
@@ -732,6 +734,34 @@ def rate_limited(err: Exception) -> bool:
 def _retry_after(err: Exception) -> float | None:
     m = re.search(r"retry[- ]after[:= ]*(\d+)", str(err), re.I)
     return float(m.group(1)) if m else None
+
+
+def decision_status(decision, status) -> str | None:
+    """Release 85 (a company's request, Director 2026-10-29 "제가 결정하면, 위치를 옮기는게 자동화되었으면"): the Status
+    a Decision moves an open item to, the boards' one rule: Approve 1-3 or Rejected -> Today unless the item is already
+    In progress, Waiting for Director or Done; Discuss or no Decision -> None (not moved)."""
+    dec = decision_value(decision)
+    if dec in (None, DISCUSS) or status in ("In progress", "Waiting for Director", "Done", "Today"):
+        return None
+    return "Today"
+
+
+def _follow_decision(site: Site, actor: str, cfg: dict, it: dict, dec, said: list, wi) -> list[str]:
+    """Move the item to `decision_status` when its Decision changes; a fail-closed ask moves only with a Director
+    comment beside the Decision (as the upstream heartbeat holds it). One line when moved or held; a failed write is
+    reported, never raised (the next decision line is not lost)."""
+    want = decision_status(dec, it.get("status"))
+    if not want or not it.get("id"):
+        return []
+    if decision_value(dec) != REJECT and ask_fail_closed(site, it.get("url") or "") and not said:
+        return [f"status: {_ref(it)} held: a fail-closed ask moves with a Director comment beside the Decision"]
+    try:
+        _edit(cfg, _meta(cfg), it["id"], {FIELD_STATUS: want})
+    except (GhError, DurehError) as e:
+        return [f"status: {_ref(it)} not moved to {want}: {e}"]
+    Ledger(site).event(UPDATED, actor, wi, {"item_id": it["id"], "url": it.get("url"), "fields": {FIELD_STATUS: want},
+                                            "by_decision": decision_value(dec)}, [wi] if wi else None)
+    return [f"status: {_ref(it)} -> {want} (Decision {decision_value(dec)})"]
 
 
 def watch(site: Site, actor: str, interval: float = WATCH_INTERVAL, emit=print, sleep=time.sleep,
