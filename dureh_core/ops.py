@@ -515,6 +515,9 @@ def render_status(st: dict) -> str:
         lines.append(f"Upstream: collaborating; open {', '.join(u['open']) or 'none'}; blocked WIs "
                      f"{', '.join(u['blocked_wis']) or 'none'}; merge window {u['merge_window']}"
                      + (f"; {n} new message{'s' if n != 1 else ''} from upstream (`dureh upstream inbox`)" if n else ""))
+        for x in u.get("landed_open") or []:  # release 85: landed upstream, still open here
+            lines.append(f"Upstream landed {x['ur']} (message {x['message']}) but it is still open here: close it with"
+                         f" `dureh upstream status --ur {x['ur']} --to landed --rev {x['rev'] or '<harness rev>'}`")
     for lane in st.get("lanes") or []:
         lines.append(f"Lane: {lane['wi']} {lane['role']} [{lane['status']}] held by {'; '.join(lane['by'])}")
     lr = st.get("lane_refusals") or {}

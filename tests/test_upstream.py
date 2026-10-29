@@ -177,3 +177,28 @@ class Upstream(SiteCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+    def test_status_names_landed_requests_still_open(self):
+        """Release 85 (dureh-team#91): a request a `landed` message names but the site still lists as open shows a
+        close hint in `status` with the message's harness revision; open -> landed is allowed."""
+        import json as _json
+        from dureh_core import ops
+        from dureh_core.site import Site
+
+        ur = self.draft("change", "minor")["ur"]
+        ex = self.tmp / "exchange"
+        cfg = _json.loads(self.s.config_path.read_text())
+        cfg["upstream"] = {"exchange": str(ex)}
+        self.s.config_path.write_text(_json.dumps(cfg))
+        s = Site(self.site_root)
+        box = ex / s.mailbox_name / "from-upstream"
+        box.mkdir(parents=True)
+        (box / "20261029T125624Z-landed-8e1bf1.md").write_text(
+            f"---\nid: 8e1bf1\nkind: landed\nrefs: [{ur}]\n---\n{ur} landed: release 84 (harness 7dcb8dd, r1).\n")
+        c = up.collaboration(s)
+        self.assertEqual(c["landed_open"], [{"ur": ur, "rev": "7dcb8dd", "message": "8e1bf1"}])
+        text = ops.render_status(ops.status(s))
+        self.assertIn(f"`dureh upstream status --ur {ur} --to landed --rev 7dcb8dd`", text)
+        up.status(s, "desk", ur, "landed", rev="7dcb8dd")  # open -> landed
+        self.assertEqual(up.collaboration(s)["landed_open"], [])
