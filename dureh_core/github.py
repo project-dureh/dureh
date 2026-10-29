@@ -1017,6 +1017,29 @@ def _refuse_wip(cfg: dict, items: list[dict], url: str | None, also: str = "") -
              f" `dureh github item set --url <url> --status Today --on-hold`{also}")
 
 
+def start_item(site: Site, actor: str, wi: str) -> str | None:
+    """Release 86 (dureh-team#91 item 2; #102 stayed Today while it was worked): when the desk dispatches a WI, its
+    board item moves to In progress; with the company's In progress limit full it goes to Today with on-hold. None
+    when GitHub is off or the WI has no board item; a failed write is a line, never an error (the dispatch stands)."""
+    if not enabled(site):
+        return None
+    try:
+        item = linked_item(site, wi)
+    except DurehError:
+        return None
+    try:
+        item_set(site, actor, wi=wi, status="In progress")
+        return f"board: {item.get('url') or item['item_id']} -> In progress"
+    except DurehError as e:
+        if "In progress for" not in str(e):
+            return f"board: {wi} not moved to In progress: {e}"
+    try:
+        item_set(site, actor, wi=wi, on_hold=True)
+        return f"board: {item.get('url') or item['item_id']} -> Today + on-hold (the In progress limit is full)"
+    except DurehError as e:
+        return f"board: {wi} not moved: {e}"
+
+
 def item_set(site: Site, actor: str, wi: str | None = None, url: str | None = None, status=None, project=None,
              layer=None, units=None, decision=None, priority=None, start=None, target=None,
              on_hold: bool = False) -> dict:

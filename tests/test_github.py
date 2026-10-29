@@ -677,6 +677,17 @@ class Items(GithubBase):
         self.assertEqual(code, 2)
         self.assertIn("already has a board item", err)
 
+    def test_start_item_moves_the_wis_item_to_in_progress(self):
+        """Release 86 (dureh-team#91 item 2): dispatching a WI moves its board item to In progress."""
+        self.assertIsNone(github.start_item(self.site(), "desk", "WI-0001"))  # no board item: nothing
+        self.run_cli("item", "add", "--wi", "WI-0001")
+        self.gh.calls.clear()
+        line = github.start_item(self.site(), "desk", "WI-0001")
+        self.assertEqual(line, f"board: https://github.com/{ORG}/office/issues/11 -> In progress")
+        prog = "O_S" + str(list(github.STATUSES).index("In progress"))
+        edits = [c["argv"] for c in self.gh.calls if c["argv"][1:3] == ["project", "item-edit"]]
+        self.assertEqual([e[-1] for e in edits], [prog])
+
     def test_unknown_option_fails_before_anything_is_created(self):
         code, _, err = self.run_cli("item", "add", "--wi", "WI-0001", "--project", "no-such-project")
         self.assertEqual(code, 2)

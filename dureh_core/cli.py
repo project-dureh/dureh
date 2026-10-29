@@ -151,8 +151,14 @@ def cmd_adapter_sync(a):
     added = apply_config_defaults(site)  # UP-0069: package config_defaults the site's config.json lacks (added once)
     if added:
         print(f"config.json: added from the package's config_defaults: {', '.join(added)}")
+    agents = site.root / ".claude" / "agents"
+    before = {f.name for f in agents.glob("*.md")} if agents.is_dir() else set()
     m = claude_code.generate(site)
     print(f"generated {len(m['files'])} files for claude-code")
+    new_roles = sorted(f[:-3] for f in ({f.name for f in agents.glob("*.md")} - before)) if before else []
+    if new_roles:  # release 86 (dureh-team#91 item 7): Claude Code reads agent files when a session starts
+        print(f"new agent type(s): {', '.join(new_roles)}; a running desk session cannot spawn them until it is"
+              " restarted (`site session start --force` after the day's work is saved, or the next session)")
     from .projectgen import generate_projects
 
     for r in generate_projects(site):
@@ -279,6 +285,12 @@ def cmd_dispatch_brief(a):
     if why:
         fail(why)
     r = dispatch_brief(site, a.wi, _actor(a), a.role, a.tier, a.reason)
+    if not a.role:  # release 86: the WI's board item moves when its work starts (a checker dispatch does not move it)
+        from .github import start_item
+
+        moved = start_item(site, _actor(a), a.wi)
+        if moved:
+            print(f"# {moved}")
     env = r.get("worktree_env") or {}
     if env.get("env") in ("shared", "rebuilt"):
         how = (f"shares {env.get('shared')}" if env["env"] == "shared"
