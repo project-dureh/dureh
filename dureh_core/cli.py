@@ -917,7 +917,8 @@ def cmd_github(a):
         body = Path(a.body_file).read_text(encoding="utf-8")
         _print(github.item_ask(site, _actor(a), a.title, body, a.options, a.layer, a.wi, a.project, a.repo, a.units,
                                fail_closed=a.fail_closed, decide=a.decide, recommend=a.recommend,
-                               otherwise=a.otherwise, on_hold=a.on_hold))
+                               otherwise=a.otherwise, on_hold=a.on_hold, ask_class=a.ask_class,
+                               command=a.command))
     elif a.item_command == "close":
         _print(github.item_close(site, _actor(a), a.wi, a.url, a.comment))
     else:
@@ -1710,6 +1711,11 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--on-hold", action="store_true",
                    help="release 83, layer 1-2: open the ask with Status Today and the label on-hold instead of In "
                         "progress (a layer 1-2 ask is refused while 2 items of the company are In progress)")
+    x.add_argument("--class", dest="ask_class", choices=["C", "D"],
+                   help="release 85 (approval classes): C a decision (Needs approval, the default form); D a step only"
+                        " the Director's hands do (Waiting for Director, label waiting-director, no options; needs"
+                        " --command)")
+    x.add_argument("--command", help="with --class D: the exact command or step the Director runs")
     x.add_argument("--wi", help="the work item the ask belongs to")
     x.add_argument("--project")
     x.add_argument("--units", type=float)

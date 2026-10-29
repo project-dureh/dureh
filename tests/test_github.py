@@ -987,6 +987,31 @@ class Items(GithubBase):
         code, _, err = self.run_cli("item", "ask", "--title", "Order", "--body-file", str(body), "--layer", "2")
         self.assertEqual(code, 0, err)  # a layer-2 ask (DUREH) needs no three lines
 
+    def test_class_d_ask_is_a_director_step_with_the_command(self):
+        """Release 85 (approval classes): --class D opens Waiting for Director with the exact command, no options."""
+        body = self.tmp / "step.md"
+        body.write_text("The push was refused to the desk after the approval on item 7.")
+        code, _, err = self.run_cli("item", "ask", "--title", "Push", "--body-file", str(body), "--class", "D")
+        self.assertEqual(code, 2)
+        self.assertIn("--class D needs --command", err)
+        code, out, err = self.run_cli("item", "ask", "--title", "Push", "--body-file", str(body), "--class", "D",
+                                      "--command", "git push origin main")
+        self.assertEqual(code, 0, err)
+        create = next(c for c in self.gh.calls if c["argv"][1:3] == ["issue", "create"])
+        argv, text = create["argv"], create["input"]
+        self.assertEqual(argv[argv.index("--label") + 1], "waiting-director")
+        self.assertEqual(argv[argv.index("--assignee") + 1], "example-director")
+        self.assertTrue(text.startswith("## 현재 상태\n\nThe push was refused"))
+        self.assertIn("## 대표님이 하실 일\n\n```\ngit push origin main\n```", text)
+        self.assertNotIn("Approve 1", text)
+        wait = "O_S" + str(list(github.STATUSES).index("Waiting for Director"))
+        edits = [c["argv"] for c in self.gh.calls if c["argv"][1:3] == ["project", "item-edit"]]
+        self.assertIn(wait, [e[-1] for e in edits])
+        self.assertEqual([e["payload"]["class"] for e in self.events() if e["type"] == github.DIRECTOR_STEP], ["D"])
+        code, _, err = self.run_cli("item", "ask", "--title", "Q", "--body-file", str(body), "--command", "x", *THREE)
+        self.assertEqual(code, 2)
+        self.assertIn("--command goes with --class D", err)
+
     def test_ask_refuses_more_than_three_options(self):
         body = self.tmp / "ask.md"
         body.write_text("q")

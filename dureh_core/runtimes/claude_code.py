@@ -712,7 +712,7 @@ def _claude_md(site: Site) -> str:
               " apply it and show it as auto-applied (the Director reverts by a reply); a B ask that was escalated anyway applies its recommended option at the slot end;"
               " C, irreversible, outside the lab, or a change of rule or direction (the fail-closed kinds below): a Needs approval item that waits for an explicit answer, while the work it blocks is re-planned, never stalled;"
               " D, a step only the Director's hands can do (an App or web setting, a login, a command refused to you after approval, a dataset link):"
-              " a Waiting for Director item with the exact command. " + FAIL_CLOSED_RULE +
+              f" a Waiting for Director item with the exact command (`{dureh} github item ask --class D --command \"...\"`). " + FAIL_CLOSED_RULE +
               f" The plan lists every action only the Director can take (a dataset link, a push approval, a config change) with `{dureh} day plan --director-action \"<text>\"` (repeatable),"
               " so the Director handles them in one go at approval: `slack ask --kind day-plan` posts them under 대표님 조치 필요 (release 58)."
               " A wait is allowed only when the Director alone can act (a push, a dataset link, an approval-exec item): record it with"
