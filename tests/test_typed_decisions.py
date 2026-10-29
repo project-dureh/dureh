@@ -222,8 +222,11 @@ class NeverStall(SiteCase):
 
         text = _claude_md(self.s)
         self.assertIn(self.RULE, text)
-        self.assertIn("day decide ... --action provisional`, and a question with no answer after 30 minutes proceeds the same way", text)
-        self.assertIn("The day plan names, for every choice it offers the Director, the fallback the desk takes after 30 minutes", text)
+        self.assertIn("day decide ... --action provisional` (the end report lists these under `provisional`)", text)
+        # release 85: one class section (A-D), no timeout approvals, no 30-minute fallback
+        self.assertIn("Every ask belongs to exactly one class", text)
+        self.assertIn("there are no timeout approvals", text)
+        self.assertNotIn("after 30 minutes", text)
         self.assertIn("the end report lists every such wait under `waiting` for the Director to choose from (Director, 2026-10-12:"
                       " 꼭 필요할때는 기다릴수 있지만, 이를 예방하기 위한 제안을 제게 하고 제가 선택적으로 해결해주기로 합니다)", text)
         self.assertIn(self.RULE, (self.site_root / "CLAUDE.md").read_text())  # the installed desk file carries it too
