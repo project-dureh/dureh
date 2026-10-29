@@ -605,11 +605,13 @@ def _claude_md(site: Site) -> str:
               " Items whose target is `harness` or `package` are not merged: promotion leaves an opaque `contrib/c-<id>` branch for upstream to review"
               " (and notifies upstream through the mailbox when one is configured). WI branches are named `wi/<site-id>/<WI>`; older `wi/<WI>` branches keep working.",
               f"6. Findings are records, not work items: `{dureh} ledger add finding --summary ... --evidence-level measured|reviewed|inferred|proposed`.",
-              f"7. Before moving or deleting a path, run `{dureh} path-refs <path>`. Delete only through `{dureh} purge`."
+              f"7. Before moving or deleting a path, run `{dureh} path-refs <path>`. Delete only through `{dureh} purge`:"
+              " an approved deletion runs as that command (bound to the approved files), never as `rm`, `find -delete` or a script (release 85)."
               " Stray untracked or ignored files in a dispatched or staged WI's worktree (they fail verify's ownership check):"
               f" `{dureh} purge --wi <WI> --path <path relative to the worktree> --dry-run`, then without `--dry-run`; tracked files are refused."
               f" Files in a project cache (unpinned only): `{dureh} purge --project <name> --cache <cache> --path <file> --dry-run` (sizes, sha256),"
               " then, after the Director approved those files, `--approve --by Director --memo '<where approved>'` and `--approval <decision>`; there is no default approval."
+              f" Untracked or ignored files and directories a run left in a project (release 85): `{dureh} purge --project <name> --path <path> --dry-run`, then the same approval steps; tracked files and annexed content are refused."
               f" If a dispatch or verify reports a broken worktree, a stale `.venv` (for example after the site moved) or a missing worktree env, run `{dureh} worktree repair --wi <WI>`"
               f" (or `--target <target>` for a main tree's `.venv`); it rebuilds the environment with `env_rebuild` from config.json."
               f" After the site moved or was renamed, `{dureh} worktree repair --all` does this for every worktree and environment at once (`--dry-run` first)."
