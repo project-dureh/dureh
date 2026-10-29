@@ -2197,7 +2197,7 @@ SQUASH_REFUSED = (re.compile(r"\bWI-\d+"), re.compile(r"co-authored-by|claude|an
 
 
 def squash_message_refusal(message: str | None) -> str | None:
-    """Release 85 (dureh-team#91, mokoji office#69): a squashed public commit carries no internal work-item ids and
+    """Release 85 (dureh-team#91): a squashed public commit carries no internal work-item ids and
     no assistant trailers or session links. Why `message` is refused, or None."""
     if not (message or "").strip():
         return "--squash needs --message: the one commit message the public repository gets"

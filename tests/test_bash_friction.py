@@ -77,7 +77,7 @@ class BashFriction(SiteCase):
             self.assertTrue(denied(self.bash(c)), c)
 
     def test_searching_for_the_word_dureh_is_not_a_harness_call(self):
-        # release 85: camri WI-0376/0378 were refused `env | grep -i dureh`
+        # release 85: workers were refused `env | grep -i dureh`
         for c in ("env | grep -i dureh", "grep -rn dureh_core src", "echo dureh"):
             self.assertFalse(denied(self.bash(c)), c)
         self.assertTrue(denied(self.bash("echo x | python3 /x/dureh.py status")))

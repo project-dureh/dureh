@@ -81,7 +81,7 @@ _SEP = "=" * 70
 def unit_summary(report: str) -> str:
     """unittest's closing lines (`Ran N tests in Xs | OK` or `... | FAILED (...)`). The job writes stdout and stderr to
     one file, and block-buffered stdout from the tests lands after unittest's own report, so the last lines of the
-    file are not the summary (camri 10-29: a JSON event line showed as the summary). Falls back to the last 3 lines."""
+    file are not the summary (10-29: a JSON event line showed as the summary). Falls back to the last 3 lines."""
     lines = report.strip().splitlines()
     for i in range(len(lines) - 1, -1, -1):
         if lines[i].startswith("Ran ") and " test" in lines[i]:

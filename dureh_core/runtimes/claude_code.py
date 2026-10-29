@@ -1213,7 +1213,7 @@ def _names_harness(word: str) -> bool:
     return os.path.basename(w) in ("dureh", "dureh.py") or "dureh_core" in w
 
 
-# Release 85: `env | grep -i dureh` was refused as a harness call (camri WI-0376/0378, 10-26). For a search or print
+# Release 85: `env | grep -i dureh` was refused as a harness call (a company's workers, 10-26). For a search or print
 # command a bare word (no `/`) is a pattern or text, not a program it runs; a path to the harness still counts.
 _TEXT_TOOLS = {"grep", "egrep", "fgrep", "rg", "echo", "printf"}
 

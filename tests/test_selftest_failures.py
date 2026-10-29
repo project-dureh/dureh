@@ -28,7 +28,7 @@ def report(n_fail=1, n_error=1, long_line=False):
 
 
 class Summary(unittest.TestCase):
-    """unittest's closing lines are the summary even when buffered test stdout lands after them (camri 10-29)."""
+    """unittest's closing lines are the summary even when buffered test stdout lands after them (10-29)."""
 
     def test_ok_with_trailing_stdout(self):
         text = report(0, 0) + '{"type": "workday.switched", "x": 1}\ngithub token refresh failed: POST x: HTTP 502\n'
