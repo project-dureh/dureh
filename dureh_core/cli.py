@@ -494,10 +494,10 @@ def cmd_purge(a):
     from .workflow import purge, purge_cache, purge_cache_approve, purge_paths
 
     if bool(a.wi) == bool(a.project):
-        fail("purge takes --wi <WI> or --project <name> --cache <cache> (not both)")
-    if a.project:  # release 77 (#40): files in a project cache, with a bound Director approval
-        if not a.cache or not a.path:
-            fail("purge --project needs --cache <name> and at least one --path")
+        fail("purge takes --wi <WI> or --project <name> [--cache <cache>] (not both)")
+    if a.project:  # release 77 (#40): files in a project cache; release 85: untracked project paths without --cache
+        if not a.path:
+            fail("purge --project needs at least one --path")
         if a.approve:
             if a.approval or a.dry_run:
                 fail("--approve records the approval; it does not go with --approval or --dry-run")
@@ -1348,10 +1348,13 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--path", action="append", help="a path relative to the WI's worktree to remove (repeatable): "
                                                    "untracked or ignored only, never a tracked file or a path that "
                                                    "resolves outside the worktree; the WI must be dispatched or staged."
-                                                   " With --project: a file in projects/<name>/cache/<cache>/")
+                                                   " With --project --cache: a file in projects/<name>/cache/<cache>/;"
+                                                   " with --project alone (release 85): an untracked or ignored file or"
+                                                   " directory in projects/<name>/")
     x.add_argument("--project", help="release 77: delete files from projects/<name>/cache/<cache>/ (desk only; never a"
                                      " file pinned in config.json or the project manifest; needs --approval)")
-    x.add_argument("--cache", help="with --project: the cache directory name, e.g. containers")
+    x.add_argument("--cache", help="with --project: the cache directory name, e.g. containers; without it the paths"
+                                   " are untracked files or directories of the project (release 85)")
     x.add_argument("--approval", help="with --project: the Director's purge-approval decision id (bound to the files"
                                       " and their sha256); required, no default")
     x.add_argument("--approve", action="store_true", help="with --project: record the Director's approval for these"

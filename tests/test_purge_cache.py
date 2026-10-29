@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import subprocess
 
 from helpers import SiteCase
 
@@ -121,3 +122,60 @@ class PurgeCache(SiteCase):
         with contextlib.redirect_stderr(err):
             self.assertEqual(main(["--site", str(self.site_root), "purge", "--wi", "WI-0001", "--project", "p1"]), 2)
         self.assertIn("not both", err.getvalue())
+
+
+class PurgeUntracked(SiteCase):
+    """Release 85 (dureh-team#91): `purge --project P --path X` without `--cache`: untracked or ignored files and
+    directories in `projects/<P>/`, with the same bound approval; tracked files, links and repo metadata refused."""
+
+    def setUp(self):
+        super().setUp()
+        self.install()
+        self.s = self.site()
+        self.proj = self.site_root / "projects" / "p2"
+        self.proj.mkdir(parents=True)
+        git = lambda *a: subprocess.run(["git", "-C", str(self.proj), *a], check=True, capture_output=True)
+        git("init", "-q")
+        (self.proj / "README.md").write_text("tracked\n")
+        (self.proj / ".gitignore").write_text("checkpoints/\n")
+        git("add", "README.md", ".gitignore")
+        git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init")
+        ck = self.proj / "checkpoints" / "run1"
+        ck.mkdir(parents=True)
+        (ck / "a.ckpt").write_bytes(b"a" * 10)
+        (ck / "b.ckpt").write_bytes(b"b" * 20)
+        (self.proj / "stray.log").write_text("x")
+
+    def test_directory_and_file_purged_with_bound_approval(self):
+        dry = wf.purge_cache(self.s, "desk", "p2", None, ["checkpoints", "stray.log"], None, dry_run=True)
+        self.assertEqual(sorted(f["path"] for f in dry["files"]),
+                         ["checkpoints/run1/a.ckpt", "checkpoints/run1/b.ckpt", "stray.log"])
+        dec = wf.purge_cache_approve(self.s, "desk", "p2", None, ["checkpoints", "stray.log"], "item 119")["id"]
+        out = wf.purge_cache(self.s, "desk", "p2", None, ["stray.log", "checkpoints"], dec)
+        self.assertEqual(len(out["removed"]), 3)
+        self.assertFalse((self.proj / "checkpoints").exists())
+        self.assertTrue((self.proj / "README.md").is_file())
+
+    def test_tracked_file_refused(self):
+        with self.assertRaisesRegex(DurehError, "tracked by git"):
+            wf.purge_cache(self.s, "desk", "p2", None, ["README.md"], None, dry_run=True)
+
+    def test_git_metadata_and_symlinks_refused(self):
+        with self.assertRaisesRegex(DurehError, "repository metadata"):
+            wf.purge_cache(self.s, "desk", "p2", None, [".git"], None, dry_run=True)
+        os.symlink("../../README.md", self.proj / "checkpoints" / "run1" / "link")
+        with self.assertRaisesRegex(DurehError, "symlink"):
+            wf.purge_cache(self.s, "desk", "p2", None, ["checkpoints"], None, dry_run=True)
+
+    def test_content_change_after_approval_refused(self):
+        dec = wf.purge_cache_approve(self.s, "desk", "p2", None, ["checkpoints"], "item 119")["id"]
+        (self.proj / "checkpoints" / "run1" / "c.ckpt").write_bytes(b"new")
+        with self.assertRaisesRegex(DurehError, "does not approve deleting exactly these files"):
+            wf.purge_cache(self.s, "desk", "p2", None, ["checkpoints"], dec)
+        self.assertTrue((self.proj / "checkpoints" / "run1" / "a.ckpt").is_file())
+
+    def test_cli_without_cache(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            main(["--site", str(self.site_root), "purge", "--project", "p2", "--path", "stray.log", "--dry-run"])
+        self.assertIn("stray.log", buf.getvalue())
