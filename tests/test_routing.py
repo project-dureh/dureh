@@ -232,10 +232,6 @@ class Routing(SiteCase):
         self.assertRegex(first, rf"^# spawn subagent_type=researcher model={re.escape(SONNET)} kind=build;")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
     def test_tier_option_picks_its_model_and_is_recorded(self):
         """Release 85: `tier_options` let the desk pick a tier for one dispatch (`dispatch brief --tier T --reason R`);
         the brief states that tier's model, the record carries tier and reason, and the spawn is held to it."""
@@ -257,3 +253,7 @@ if __name__ == "__main__":
         wi = self.item()
         with self.assertRaisesRegex(DurehError, "no tier_options"):
             wf.dispatch_brief(self.s, wi, "desk", tier="deep", tier_reason="x")
+
+
+if __name__ == "__main__":
+    unittest.main()

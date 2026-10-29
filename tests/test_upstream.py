@@ -175,10 +175,6 @@ class Upstream(SiteCase):
             up.export(self.s, "desk", r["ur"])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
     def test_status_names_landed_requests_still_open(self):
         """Release 85 (dureh-team#91): a request a `landed` message names but the site still lists as open shows a
         close hint in `status` with the message's harness revision; open -> landed is allowed."""
@@ -202,3 +198,7 @@ if __name__ == "__main__":
         self.assertIn(f"`dureh upstream status --ur {ur} --to landed --rev 7dcb8dd`", text)
         up.status(s, "desk", ur, "landed", rev="7dcb8dd")  # open -> landed
         self.assertEqual(up.collaboration(s)["landed_open"], [])
+
+
+if __name__ == "__main__":
+    unittest.main()
