@@ -27,6 +27,20 @@ def report(n_fail=1, n_error=1, long_line=False):
             if total else "....\n" + f"{DASH}\nRan 4 tests in 0.1s\n\nOK\n")
 
 
+class Summary(unittest.TestCase):
+    """unittest's closing lines are the summary even when buffered test stdout lands after them (camri 10-29)."""
+
+    def test_ok_with_trailing_stdout(self):
+        text = report(0, 0) + '{"type": "workday.switched", "x": 1}\ngithub token refresh failed: POST x: HTTP 502\n'
+        self.assertEqual(selftest.unit_summary(text), "Ran 4 tests in 0.1s | OK")
+
+    def test_failed(self):
+        self.assertEqual(selftest.unit_summary(report(1, 1)), "Ran 12 tests in 1.0s | FAILED (failures=1, errors=1)")
+
+    def test_no_summary_falls_back_to_tail(self):
+        self.assertEqual(selftest.unit_summary("a\nb\nc\nd\n"), "b | c | d")
+
+
 class Parse(unittest.TestCase):
     def test_each_failure_and_error_is_named_with_its_tail(self):
         got = selftest.unit_failures(report())
