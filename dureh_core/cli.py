@@ -278,7 +278,7 @@ def cmd_dispatch_brief(a):
     why = gate(site, a.wi, checking=bool(a.role) and site.org.has(a.role, "verify"))
     if why:
         fail(why)
-    r = dispatch_brief(site, a.wi, _actor(a), a.role)
+    r = dispatch_brief(site, a.wi, _actor(a), a.role, a.tier, a.reason)
     env = r.get("worktree_env") or {}
     if env.get("env") in ("shared", "rebuilt"):
         how = (f"shares {env.get('shared')}" if env["env"] == "shared"
@@ -1185,6 +1185,8 @@ def parser() -> argparse.ArgumentParser:
     x = add(d, "brief", cmd_dispatch_brief, "prepare a recorded brief for spawning one agent")
     x.add_argument("--wi", required=True)
     x.add_argument("--role", help="checker, to verify a staged item")
+    x.add_argument("--tier", help="release 85: one of the role's tier_options (package) for this dispatch; needs --reason")
+    x.add_argument("--reason", help="with --tier: why this item needs that tier (recorded)")
     x.add_argument("--actor")
     x = add(d, "stop", cmd_dispatch_stop, "record a stop for a dispatched work item")
     x.add_argument("--wi", required=True)

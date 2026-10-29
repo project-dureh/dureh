@@ -39,7 +39,8 @@ ORGANIZATION_REFUSAL = ("startup.yaml organization (the managers/workers enable 
 HARNESS_DIRECT_COMMANDS = ("sbatch", "srun", "salloc", "scancel", "nohup", "setsid", "disown", "screen", "tmux",
                            "apptainer", "singularity", "docker", "podman", "dureh", "bin/dureh", "dureh.py")
 ROLE_KEYS = ("kind", "tier", "description", "output", "never", "isolation", "write_scopes", "may_dispatch",
-             "capabilities", "project", "skill", "instructions", "value", "runtime", "runtime_fallback", "profile")
+             "capabilities", "project", "skill", "instructions", "value", "runtime", "runtime_fallback", "profile",
+             "tier_options")
 # release 64: the checker may also choose its runtime (a read-only verifier on `codex`)
 CHECKER_RESKIN_KEYS = ("skill", "instructions", "description", "output", "never", "project", "runtime",
                        "runtime_fallback")

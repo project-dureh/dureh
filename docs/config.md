@@ -112,6 +112,7 @@ roles:
     instructions: [<extra agent-file lines>]
     runtime: claude-code | codex | local           # release 64; codex: verify roles only; local: worktree workers
     runtime_fallback: claude-code | none           # what `member run --fallback` runs instead (default claude-code)
+    tier_options: [deep]                           # release 85: tiers the desk may pick per dispatch (`dispatch brief --tier deep --reason ...`)
     profile: profiles/<x>.Modelfile                # local only: the model profile, a file in the package
 values: [{id, title, skill, manager}]              # manager: the role a bootstrap item of that value goes to
 policies:

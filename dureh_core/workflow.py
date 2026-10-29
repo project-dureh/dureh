@@ -699,7 +699,10 @@ def _skill_for(site: Site, role: str, value: str | None) -> str | None:
     return None
 
 
-def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None) -> dict:
+def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None, tier: str | None = None,
+                   tier_reason: str | None = None) -> dict:
+    """Release 85: `tier` picks one of the role's `tier_options` (or its own tier) for this dispatch, with a reason;
+    the brief then states that tier's model and the spawn hook holds the spawn to it."""
     led = Ledger(site)
     org = site.org
     rec = led.get("work-item", wi)
@@ -739,8 +742,18 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None) -> 
     # release 54 (D3): routing picks a tier by the work unit's kind; the academic and rework escalations below
     # keep precedence; a kind routed to null, or no `models.routing` at all, keeps the role's own tier
     kind, kind_reason = dispatch_kind_reason(site, p, role, checking)
-    tier = site.routing().get(kind) or role.tier
-    entry = site.model_for_tier("writer-academic" if p.get("academic") and not checking else tier)
+    chosen = tier
+    if chosen is not None:
+        if checking:
+            fail("--tier is for the item's own role, not a checker dispatch")
+        if chosen not in (role.tier, *role.tier_options):
+            fail(f"role {role.name} may run on tier {role.tier}"
+                 + (f" or {', '.join(role.tier_options)} (its tier_options)" if role.tier_options else
+                    " only (the package gives it no tier_options)") + f", not {chosen}")
+        if not (tier_reason or "").strip():
+            fail("--tier needs --reason: why this item needs that tier (it is recorded with the dispatch)")
+    tier = chosen or site.routing().get(kind) or role.tier
+    entry = site.model_for_tier("writer-academic" if p.get("academic") and not checking and not chosen else tier)
     ok, why = _qualified(entry)
     if not ok:
         fail(f"tier {tier} model {entry.get('model')} cannot be dispatched: {why}")
@@ -766,7 +779,7 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None) -> 
             if len(reorg) > int(site.limit("reorg_finding_budget", 3)):
                 fail("reorganization finding budget exceeded; report to the Director before continuing")
     rework_limit = int((org.tiers.get("worker", {}).get("bounds") or {}).get("rework_limit", 2))
-    if not checking and role.is_worker and led.wi_status(wi)["rework"] >= rework_limit:
+    if not checking and not chosen and role.is_worker and led.wi_status(wi)["rework"] >= rework_limit:
         entry = dict(site.model_for_tier("pm"))
         why += f"; escalated after {rework_limit} reworks"
     if role.is_worker and role.write_scopes and not checking and role.isolation == "worktree":
@@ -792,6 +805,7 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None) -> 
     header = f"{BRIEF_TAG} {wi} role={role.name} brief={digest}"
     led.event("dispatch.prepared", by, wi, {"role": role.name, "brief": digest, "bytes": len(body), "checking": checking,
                                             "model": entry["model"], "kind": kind, "kind_reason": kind_reason,
+                                            **({"tier": chosen, "tier_reason": tier_reason.strip()} if chosen else {}),
                                             "qualification": why,
                                             "worktree": wt["worktree"], "base": wt["base"], "by": by,
                                             **({"worktree_env": wt["env"]} if wt.get("env") else {}),

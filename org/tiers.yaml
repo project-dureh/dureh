@@ -20,6 +20,10 @@ tiers:
       max_wis_per_bundle: 8
   desk:
     task: Organization-level planning and Director interaction.
+  planner:
+    task: One plan document for one work item, built from an inventory (phases, ordered items, risks); no code.
+  deep:
+    task: The hardest reasoning for one work item, chosen per dispatch (`dispatch brief --tier deep`) where a role allows it.
 limits:
   worker_brief_bytes: 2048
   manager_brief_bytes: 10240
