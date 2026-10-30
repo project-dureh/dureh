@@ -736,14 +736,55 @@ def _retry_after(err: Exception) -> float | None:
     return float(m.group(1)) if m else None
 
 
+APPROVAL_LABELS = ("needs-approval", "needs-review")
+KEEP_ON_DECISION = ("In progress", "Waiting for Director", "Done")
+
+
+def board_status(*, state=None, merged=False, labels=(), decision=None, status=None, director_merges_pr=False):
+    """Release 86 (dureh-team#91 item 1): the boards' one Status rule, used by `github watch` here and by the team's
+    status_sync and heartbeat. Returns (Status required or None to leave it, why, conflict note or None):
+
+      closed or merged                                         Done
+      label waiting-director                                   Waiting for Director (a conflict when needs-approval
+                                                                 or needs-review is also set and no Decision is)
+      label needs-approval or needs-review, no Decision        Needs approval
+      label on-hold                                            Today
+      `director_merges_pr` (an open, non-draft PR only the      Waiting for Director
+        Director merges)
+      Decision Approve 1-3 or Rejected                         Today, unless In progress, Waiting for Director or
+                                                                 Done (a Done item open for the sweep)
+      otherwise (Discuss, a hold, included)                    None (unchanged; In progress is never inferred)"""
+    labels, current = {str(x).lower() for x in labels or ()}, status
+    dec = decision_value(decision)
+    held = dec == DISCUSS
+    if held:
+        dec = None
+    if merged or state in ("CLOSED", "MERGED"):
+        return "Done", "merged" if (merged or state == "MERGED") else "closed", None
+    approval = sorted(labels & set(APPROVAL_LABELS))
+    if "waiting-director" in labels:
+        if approval and not dec:
+            return None, "", f"labels waiting-director and {'+'.join(approval)} with no Decision: remove one"
+        return "Waiting for Director", "label waiting-director", None
+    if approval and not dec:
+        return "Needs approval", f"label {approval[0]}", None
+    if ON_HOLD_LABEL in labels:
+        return "Today", "label on-hold", None
+    if director_merges_pr:
+        return "Waiting for Director", "open pull request: only the Director merges", None
+    if held or not dec:
+        return None, "", None
+    if current in KEEP_ON_DECISION:
+        return current, f"Decision {dec}, {current}", None
+    return "Today", f"Decision {dec}", None
+
+
 def decision_status(decision, status) -> str | None:
     """Release 85 (a company's request, Director 2026-10-29 "제가 결정하면, 위치를 옮기는게 자동화되었으면"): the Status
-    a Decision moves an open item to, the boards' one rule: Approve 1-3 or Rejected -> Today unless the item is already
-    In progress, Waiting for Director or Done; Discuss or no Decision -> None (not moved)."""
-    dec = decision_value(decision)
-    if dec in (None, DISCUSS) or status in ("In progress", "Waiting for Director", "Done", "Today"):
-        return None
-    return "Today"
+    a Decision moves an open item to, by `board_status` (labels are not read here): Approve 1-3 or Rejected -> Today
+    unless the item is already In progress, Waiting for Director, Done or Today; Discuss or no Decision -> None."""
+    want = board_status(decision=decision, status=status)[0]
+    return want if want and want != status else None
 
 
 def _follow_decision(site: Site, actor: str, cfg: dict, it: dict, dec, said: list, wi) -> list[str]:

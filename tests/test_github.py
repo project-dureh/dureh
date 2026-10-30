@@ -315,6 +315,24 @@ class Watch(GithubBase):
         self.assertEqual([e[-1] for e in edits], [today])
         self.assertEqual(github.decision_status("Rejected", "Needs approval"), "Today")
         self.assertIsNone(github.decision_status("Approve 2", "Waiting for Director"))
+        self.assertIsNone(github.decision_status("Approve 1", "Done"))
+
+    def test_board_status_rules(self):
+        """Release 86 (dureh-team#91 item 1): the one Status rule the team tools call too."""
+        bs = github.board_status
+        self.assertEqual(bs(state="CLOSED", decision="Approve 1"), ("Done", "closed", None))
+        self.assertEqual(bs(merged=True)[0], "Done")
+        self.assertEqual(bs(labels=["waiting-director"], decision="Approve 1")[0], "Waiting for Director")
+        want, _, conflict = bs(labels=["waiting-director", "needs-review"])
+        self.assertIsNone(want)
+        self.assertIn("waiting-director and needs-review", conflict)
+        self.assertEqual(bs(labels=["Needs-Approval"], decision="Discuss")[0], "Needs approval")
+        self.assertEqual(bs(labels=["on-hold"], status="In progress")[0], "Today")
+        self.assertEqual(bs(director_merges_pr=True, decision="Approve 1")[0], "Waiting for Director")
+        self.assertEqual(bs(decision="Later", status="Needs approval"), (None, "", None))  # Later = Discuss, a hold
+        self.assertEqual(bs(decision="Option 2", status="Needs approval"), ("Today", "Decision Approve 2", None))
+        self.assertEqual(bs(decision="Rejected", status="In progress")[0], "In progress")
+        self.assertEqual(bs(status="Backlog"), (None, "", None))
 
     def test_state_survives_a_restart(self):
         self.gh.items = [node("I1", 1, "first", "Today", "Later")]
