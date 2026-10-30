@@ -10,13 +10,15 @@ the team tool reads it from here once this release lands, so the two dashboards 
                           "없음 (fail-closed), 답을 기다립니다"
   대표님이 하실 일         (Waiting for Director) the bold line under "## 대표님이 하실 일", else its first line
 
-A line not found prints <채워 주세요>; a line still holding a template placeholder (`<...>`) is not found."""
+A line not found prints <채워 주세요>; a line still holding a template placeholder (`<...>`) is not found. An item
+without a board Priority carries "Priority 없음" in its heading (release 87, dureh-team#108 item 5)."""
 from __future__ import annotations
 
 import re
 
 NEEDS, WAITING = "Needs approval", "Waiting for Director"
 MISSING = "<채워 주세요>"
+NO_PRIORITY = "Priority 없음"  # an item without the board's Priority is marked, not hidden
 FAIL_CLOSED = "없음 (fail-closed), 답을 기다립니다"
 LINE_MAX = 240
 MARK = "<!-- dureh-digest -->"
@@ -165,7 +167,7 @@ def digest(items: list[dict]) -> dict:
 
 def _head(d: dict, n: int) -> str:
     link = f"[{d['ref']}]({d['url']})" if d.get("url") else d["ref"]
-    pr = f" · {d['priority'][:2]}" if d.get("priority") else ""
+    pr = f" · {d['priority'][:2]}" if d.get("priority") else f" · {NO_PRIORITY}"  # release 87, dureh-team#108 item 5
     return f"#### {n}. {link}{pr}"
 
 
@@ -184,5 +186,5 @@ def text(dig: dict, org: str, stamp: str) -> str:
         out += ["없습니다.", ""]
     for n, d in enumerate(dig["steps"], 1):
         out += [_head(d, n), f"- {_short(d.get('action')) or MISSING}", ""]
-    out += [MARK, DESK_MARK]  # without the desk mark the issue reads as the Director's own (camri office#141)
+    out += [MARK, DESK_MARK]  # without the desk mark the issue reads as the Director's own (release 87, a company's office#141)
     return "\n".join(out) + "\n"

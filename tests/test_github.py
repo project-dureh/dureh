@@ -63,7 +63,7 @@ def issue(iid, number, title, author="example-director", created="2026-10-16T12:
 
 
 THREE = ("--decide", "A를 먼저 할까요?", "--recommend", "예, A가 B의 입력입니다.", "--otherwise",
-         "30분 뒤 Option 1로 진행합니다.")
+         "30분 뒤 Option 1로 진행합니다.", "--priority", "P2")
 
 
 class FakeGh:
@@ -996,9 +996,9 @@ class Items(GithubBase):
         self.assertEqual(argv[argv.index("--assignee") + 1], "example-director")
         self.assertEqual(argv[argv.index("--label") + 1], "kind:decision")
         self.assertTrue(create["input"].rstrip().endswith(github.DESK_MARK))
-        self.assertIn("- **Approve 2**: first B", create["input"])
-        self.assertIn("- **Rejected**:", create["input"])
-        self.assertIn("- **Discuss**: hold; nothing proceeds, the desk answers your comments", create["input"])
+        self.assertIn("- **Approve 2:** first B", create["input"])
+        self.assertIn("- **Rejected:**", create["input"])
+        self.assertIn("- **Discuss:** hold; nothing proceeds, the desk answers your comments", create["input"])
         self.assertIn("Decision** column: Approve 1, Approve 2, Rejected, Discuss.", create["input"])
         self.assertIn("your comments on this item are read with it", create["input"])
         self.assertNotIn("Option 1", create["input"].split("**배경 · Background**")[1])
@@ -1029,9 +1029,11 @@ class Items(GithubBase):
                                     *THREE)
         self.assertEqual(code, 0, err)
         text = next(c for c in self.gh.calls if c["argv"][1:3] == ["issue", "create"])["input"]
-        self.assertTrue(text.startswith("**결정할 것:** A를 먼저 할까요?\n**추천:** 예, A가 B의 입력입니다.\n"
-                                        "**답이 없으면:** 30분 뒤 Option 1로 진행합니다."), text)
-        self.assertLess(text.index("**배경 · Background**"), text.index("Two items are ready"))
+        self.assertTrue(text.startswith("## 현재 상태\n\nTwo items are ready; the order matters for the release.\n\n"
+                                        "## 결정할 것\n\nA를 먼저 할까요?\n\n- **Approve 1:** A\n- **Approve 2:** B\n"
+                                        "- **Rejected:** no; nothing here proceeds\n- **Discuss:** "), text)
+        self.assertIn("\n\n**추천:** 예, A가 B의 입력입니다.\n**답이 없으면:** 30분 뒤 Option 1로 진행합니다.\n\n---\n\n"
+                      "**배경 · Background**\n\nTwo items are ready", text)
         self.gh.calls.clear()
         code, _, err = self.run_cli("item", "ask", "--title", "Order", "--body-file", str(body), "--layer", "2")
         self.assertEqual(code, 0, err)  # a layer-2 ask (DUREH) needs no three lines
@@ -1043,9 +1045,14 @@ class Items(GithubBase):
         code, _, err = self.run_cli("item", "ask", "--title", "Push", "--body-file", str(body), "--class", "D")
         self.assertEqual(code, 2)
         self.assertIn("--class D needs --command", err)
+        code, _, err = self.run_cli("item", "ask", "--title", "Push", "--body-file", str(body), "--class", "D",
+                                    "--command", "git push origin main")
+        self.assertEqual(code, 2)  # release 87: a layer-3 item carries a Priority
+        self.assertIn("needs --priority P0..P3", err)
         code, out, err = self.run_cli("item", "ask", "--title", "Push", "--body-file", str(body), "--class", "D",
-                                      "--command", "git push origin main")
+                                      "--command", "git push origin main", "--priority", "P2")
         self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["fields"]["Priority"], "P2")
         create = next(c for c in self.gh.calls if c["argv"][1:3] == ["issue", "create"])
         argv, text = create["argv"], create["input"]
         self.assertEqual(argv[argv.index("--label") + 1], "waiting-director")
@@ -1060,6 +1067,64 @@ class Items(GithubBase):
         code, _, err = self.run_cli("item", "ask", "--title", "Q", "--body-file", str(body), "--command", "x", *THREE)
         self.assertEqual(code, 2)
         self.assertIn("--command goes with --class D", err)
+
+    def test_ask_body_in_the_director_item_format(self):
+        """Release 87 (dureh-team#108 item 4): --state opens the body; the issue round-trips through the dashboard's
+        parser (board_digest.three_lines): the question under 결정할 것, 추천 and 답이 없으면."""
+        from dureh_core import board_digest
+
+        body = self.tmp / "ask.md"
+        body.write_text("Two items are ready.\n\nMore background here.")
+        code, _, err = self.run_cli("item", "ask", "--title", "Order", "--body-file", str(body), "--options", "A 먼저",
+                                    "B 먼저", "--state", "둘 다 준비됨, 순서만 남음", *THREE)
+        self.assertEqual(code, 0, err)
+        text = next(c for c in self.gh.calls if c["argv"][1:3] == ["issue", "create"])["input"]
+        self.assertTrue(text.startswith("## 현재 상태\n\n둘 다 준비됨, 순서만 남음\n\n## 결정할 것\n\n"), text)
+        self.assertIn("More background here.", text.split("---")[1])
+        self.assertEqual(board_digest.three_lines("Order", text),
+                         {"decide": "A를 먼저 할까요?", "recommend": "예, A가 B의 입력입니다.",
+                          "fallback": "30분 뒤 Option 1로 진행합니다."})
+        edits = [c["argv"] for c in self.gh.calls if c["argv"][1:3] == ["project", "item-edit"]]
+        self.assertIn("O_PR2", [e[-1] for e in edits])  # --priority P2 on the board
+
+    def test_ask_decide_holds_the_question_only(self):
+        """Release 87 (dureh-team#108 item 4): --decide naming an option or over 150 characters is refused."""
+        body = self.tmp / "ask.md"
+        body.write_text("q")
+        rest = THREE[2:]
+        for decide in ("Approve 1로 갈까요?", "option 2: B를 먼저", "가" * 151):
+            self.gh.calls.clear()
+            code, _, err = self.run_cli("item", "ask", "--title", "Q", "--body-file", str(body), "--options", "A", "B",
+                                        "--decide", decide, *rest)
+            self.assertEqual(code, 2, decide)
+            self.assertIn("put the choices in --options", err)
+            self.assertEqual(self.gh.calls, [])
+
+    def test_layer3_ask_needs_a_priority(self):
+        """Release 87 (dureh-team#108 item 5): --priority is required on layer 3, optional on layer 1-2."""
+        body = self.tmp / "ask.md"
+        body.write_text("q")
+        code, _, err = self.run_cli("item", "ask", "--title", "Q", "--body-file", str(body), *THREE[:-2])
+        self.assertEqual(code, 2)
+        self.assertIn("needs --priority P0..P3", err)
+        self.assertEqual(self.gh.calls, [])
+        code, _, err = self.run_cli("item", "ask", "--title", "Q", "--body-file", str(body), "--layer", "2")
+        self.assertEqual(code, 0, err)
+
+    def test_layer3_option_that_is_a_director_step_is_refused(self):
+        """Release 87 (dureh-team#108 item 6): an option only the Director's hands do goes to --class D."""
+        body = self.tmp / "ask.md"
+        body.write_text("q")
+        for opt in ("대표님이 새 저장소를 생성", "the Director creates the dataset link"):
+            self.gh.calls.clear()
+            code, _, err = self.run_cli("item", "ask", "--title", "Q", "--body-file", str(body), "--options", opt,
+                                        "keep local", *THREE)
+            self.assertEqual(code, 2, opt)
+            self.assertIn("--class D --command", err)
+            self.assertEqual(self.gh.calls, [])
+        code, _, err = self.run_cli("item", "ask", "--title", "Q", "--body-file", str(body), "--options",
+                                    "대표님 승인 후 데스크가 저장소를 만듭니다", "keep local", *THREE)
+        self.assertEqual(code, 0, err)  # an ordinary option: the desk acts after the approval
 
     def test_ask_refuses_more_than_three_options(self):
         body = self.tmp / "ask.md"
@@ -1102,6 +1167,12 @@ class DeskText(GithubBase):
         self.assertIn("Decision column", text)
         self.assertIn("A `work request` line", text)
         self.assertIn("github item add --wi <WI> --url <issue url>", text)
+        # release 87 (dureh-team#108 items 3, 5, 7)
+        self.assertIn("Never ask the Director for a decision or an approval in the chat", text)
+        self.assertIn("the chat holds only one status line with the item's link", text)
+        self.assertIn("--layer 3 --priority P2 [--state <현재 상태>] --decide", text)
+        self.assertIn("are DUREH's (layer 2): ask DUREH by mailbox (`upstream draft`, a UR) or a notice", text)
+        self.assertIn("github item ask --class D --command \"...\" --priority P2", text)
 
     def test_rule_when_off(self):
         self.set_config({"enabled": False})
@@ -1160,6 +1231,8 @@ class Digest(GithubBase):
         self.assertIn("- **데스크 추천:** <채워 주세요>", out)
         self.assertIn("없음 (fail-closed), 답을 기다립니다", out)
         self.assertIn("- `git push origin main` 한 번", out)
+        self.assertIn("issues/2) · P0", out)
+        self.assertIn("issues/1) · Priority 없음", out)  # release 87: an item without Priority is marked
         self.assertNotIn("office#4", out)
         self.assertIn(github.DESK_MARK, out)  # not read as the Director's own issue
         self.assertNotIn("office#5", out)
