@@ -469,12 +469,13 @@ def _one_line(text: str, limit: int = 300) -> str:
 def _linked(site: Site) -> dict[str, dict]:
     """{item_id: {wi, url, layer, ask, fail_closed}} from the records of this site's board items. Release 81
     (finding cc81a566): an item made by `item ask` carries `ask: true`; its `wi` is the WI the ask is about, not
-    that WI's board link (linked_item skips it for --wi)."""
+    that WI's board link (linked_item skips it for --wi). Release 87 (a company's finding): a `--class D` step
+    (github.director-step.created) is linked the same way, so `item set/close --url` accept it."""
     out: dict[str, dict] = {}
     for e in Ledger(site).events():
-        if e["type"] in (ADDED, ASKED, UPDATED) and e["payload"].get("item_id"):
+        if e["type"] in (ADDED, ASKED, UPDATED, DIRECTOR_STEP) and e["payload"].get("item_id"):
             row = out.setdefault(e["payload"]["item_id"], {})
-            if e["type"] == ASKED:
+            if e["type"] in (ASKED, DIRECTOR_STEP):  # release 87: a class D step is set and closed by --url too
                 row["ask"] = True
             if e["wi"]:
                 row["wi"] = e["wi"]

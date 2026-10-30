@@ -1064,6 +1064,10 @@ class Items(GithubBase):
         edits = [c["argv"] for c in self.gh.calls if c["argv"][1:3] == ["project", "item-edit"]]
         self.assertIn(wait, [e[-1] for e in edits])
         self.assertEqual([e["payload"]["class"] for e in self.events() if e["type"] == github.DIRECTOR_STEP], ["D"])
+        url = json.loads(out)["url"]  # release 87: the step is linked, so set/close by --url accept it
+        self.assertEqual(github.linked_item(self.site(), url=url)["url"], url)
+        code, _, err = self.run_cli("item", "set", "--url", url, "--status", "Done", "--actor", "desk")
+        self.assertEqual(code, 0, err)
         code, _, err = self.run_cli("item", "ask", "--title", "Q", "--body-file", str(body), "--command", "x", *THREE)
         self.assertEqual(code, 2)
         self.assertIn("--command goes with --class D", err)
