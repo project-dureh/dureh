@@ -919,6 +919,8 @@ def cmd_github(a):
         github.watch(site, _actor(a), a.interval, emit=lambda line: print(line, flush=True), polls=1 if a.once else None)
     elif c == "sweep":
         _print(github.sweep(site, _actor(a), a.dry_run))
+        if not a.dry_run:
+            _digest_note(github, site, a)
     elif c == "digest":
         res = github.digest(site, _actor(a) if a.write else None, a.write)
         if a.json:
@@ -945,6 +947,15 @@ def cmd_github(a):
     else:
         text = Path(a.file).read_text(encoding="utf-8") if a.file else sys.stdin.read()
         _print(github.comment(site, _actor(a), text, a.wi, a.url))
+    if c == "item" and a.item_command in ("add", "set", "ask", "close"):
+        _digest_note(github, site, a)
+
+
+def _digest_note(github, site, a) -> None:
+    """Release 87: a desk write to the board refreshes the dashboard issue (config github.dashboard_issue)."""
+    note = github.refresh_digest(site, _actor(a))
+    if note:
+        print(note, file=sys.stderr)
 
 
 def cmd_report(a):

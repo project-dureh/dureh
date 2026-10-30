@@ -120,7 +120,13 @@ def action_line(body: str) -> str | None:
     lines = (body or "").splitlines()
     for n, raw in enumerate(lines):
         if STEP_HEAD.match(raw):
+            fence = False
             for nxt in lines[n + 1:]:
+                if nxt.lstrip().startswith("```"):  # release 87: a `--class D` step holds its command in a fence
+                    fence = not fence
+                    continue
+                if fence and nxt.strip():
+                    return _value(f"`{nxt.strip()}`")
                 if nxt.lstrip().startswith("#") or nxt.strip() == "---":
                     return None
                 if nxt.strip():
