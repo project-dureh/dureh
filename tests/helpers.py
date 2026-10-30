@@ -30,6 +30,28 @@ def _tools_path():
 TOOLS = _tools_path()
 
 
+def foreign_git_above(path) -> Path | None:
+    """The nearest `.git` in `path` or one of its ancestors, else None. datalad looks for a superdataset this way, in
+    Python, so GIT_CEILING_DIRECTORIES does not stop it (UR-20261030-01: a compute node's /tmp/.git that is not ours
+    made `datalad create` run `git -C /tmp init`)."""
+    for d in [Path(path).resolve(), *Path(path).resolve().parents]:
+        if (d / ".git").exists():
+            return d / ".git"
+    return None
+
+
+def _test_tmp_root() -> str | None:
+    """Where each test's temporary site is made: the default temporary directory, or (when a `.git` sits in it or
+    above it) the first of the fallbacks without one; None (the default) when none is clean."""
+    for cand in (tempfile.gettempdir(), "/dev/shm"):
+        if os.path.isdir(cand) and os.access(cand, os.W_OK) and foreign_git_above(cand) is None:
+            return cand
+    return None
+
+
+TEST_TMP_ROOT = _test_tmp_root()
+
+
 class private_tmp:
     """`with private_tmp(base):` datalad and git-annex subprocesses (and the harness commands that start them) see a
     TMPDIR of their own, a new directory under `base`, and git never looks above `base` for a repository
@@ -102,7 +124,7 @@ class SiteCase(unittest.TestCase):
         os.environ.pop("DUREH_ACTOR", None)
         os.environ.pop("DUREH_SITE", None)
         os.environ.pop("SLURM_JOB_ID", None)  # never the real session job: 2026-10-03 a close() test cancelled it
-        self.tmp = Path(tempfile.mkdtemp(prefix="dureh-test-")).resolve()
+        self.tmp = Path(tempfile.mkdtemp(prefix="dureh-test-", dir=TEST_TMP_ROOT)).resolve()
         os.environ["TMPDIR"] = str(self.tmp / "nodelocal")
         (self.tmp / "nodelocal").mkdir()
         self.package = self.tmp / "package"
