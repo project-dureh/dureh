@@ -1064,6 +1064,10 @@ class Items(GithubBase):
         edits = [c["argv"] for c in self.gh.calls if c["argv"][1:3] == ["project", "item-edit"]]
         self.assertIn(wait, [e[-1] for e in edits])
         self.assertEqual([e["payload"]["class"] for e in self.events() if e["type"] == github.DIRECTOR_STEP], ["D"])
+        url = json.loads(out)["url"]  # release 87: the step is linked, so set/close by --url accept it
+        self.assertEqual(github.linked_item(self.site(), url=url)["url"], url)
+        code, _, err = self.run_cli("item", "set", "--url", url, "--status", "Done", "--actor", "desk")
+        self.assertEqual(code, 0, err)
         code, _, err = self.run_cli("item", "ask", "--title", "Q", "--body-file", str(body), "--command", "x", *THREE)
         self.assertEqual(code, 2)
         self.assertIn("--command goes with --class D", err)
@@ -1238,6 +1242,27 @@ class Digest(GithubBase):
         self.assertNotIn("office#5", out)
         self.assertTrue(any("body" in c["input"] for c in self.gh.calls if c["input"]))
         self.assertEqual(self.events(), [])
+
+    def test_step_in_a_fence_shows_the_command(self):
+        """Release 87: a `--class D` step keeps its command in a fence; the dashboard shows it, not the fence."""
+        from dureh_core import board_digest
+        body = "## 대표님이 하실 일\n\n```\nProject 1 > Settings > + Add option: x\n```\n\nreply here\n"
+        self.assertEqual(board_digest.action_line(body), "`Project 1 > Settings > + Add option: x`")
+
+    def test_desk_writes_refresh_the_dashboard(self):
+        """Release 87 (Director 2026-10-30): a desk write to the board keeps the dashboard issue current."""
+        self.board()
+        cfg = json.loads((self.site_root / "config.json").read_text())["github"]
+        self.assertIsNone(github.refresh_digest(self.site(), "desk"))  # no dashboard_issue: nothing
+        self.set_config({**cfg, "dashboard_issue": 7})
+        code, _, err = self.run_cli("item", "close", "--url", "https://github.com/example-org/office/issues/3",
+                                    "--actor", "desk")
+        self.assertEqual(code, 0, err)
+        self.assertIn("digest: https://github.com/example-org/office/issues/7 refreshed", err)
+        edits = [c for c in self.gh.calls if c["argv"][1:3] == ["issue", "edit"]]
+        self.assertEqual(len(edits), 1)
+        self.gh.fail_next = "HTTP 502"
+        self.assertIn("not refreshed", github.refresh_digest(self.site(), "desk"))  # reported, never raised
 
     def test_write_needs_the_desk_and_the_issue(self):
         self.board()

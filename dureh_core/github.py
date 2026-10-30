@@ -374,6 +374,19 @@ def status(site: Site) -> dict:
 DIGESTED = "github.digest.written"
 
 
+def refresh_digest(site: Site, actor: str | None) -> str | None:
+    """Release 87 (the Director 2026-10-30: a company dashboard still listed a finished step): after a desk write to
+    the board, keep the dashboard issue current when config github.dashboard_issue is set. One line, or None when
+    no dashboard is configured; a failure is reported in the line, never raised (the write itself already ran)."""
+    try:
+        if not (config(site).get("dashboard_issue")):
+            return None
+        res = digest(site, actor, write=True)
+    except (GhError, DurehError) as exc:
+        return f"digest: not refreshed: {exc}"
+    return f"digest: {res['url']} {'unchanged' if res.get('unchanged') else 'refreshed'}"
+
+
 def digest(site: Site, actor: str | None = None, write: bool = False) -> dict:
     """Release 86 (dureh-team#91 item 5): the company dashboard in the team's #31 format (board_digest): what waits
     for the Director's decision and his own steps on this board. Printed by default; with `write` (the desk) the body
@@ -456,12 +469,13 @@ def _one_line(text: str, limit: int = 300) -> str:
 def _linked(site: Site) -> dict[str, dict]:
     """{item_id: {wi, url, layer, ask, fail_closed}} from the records of this site's board items. Release 81
     (finding cc81a566): an item made by `item ask` carries `ask: true`; its `wi` is the WI the ask is about, not
-    that WI's board link (linked_item skips it for --wi)."""
+    that WI's board link (linked_item skips it for --wi). Release 87 (a company's finding): a `--class D` step
+    (github.director-step.created) is linked the same way, so `item set/close --url` accept it."""
     out: dict[str, dict] = {}
     for e in Ledger(site).events():
-        if e["type"] in (ADDED, ASKED, UPDATED) and e["payload"].get("item_id"):
+        if e["type"] in (ADDED, ASKED, UPDATED, DIRECTOR_STEP) and e["payload"].get("item_id"):
             row = out.setdefault(e["payload"]["item_id"], {})
-            if e["type"] == ASKED:
+            if e["type"] in (ASKED, DIRECTOR_STEP):  # release 87: a class D step is set and closed by --url too
                 row["ask"] = True
             if e["wi"]:
                 row["wi"] = e["wi"]
@@ -882,6 +896,10 @@ def watch(site: Site, actor: str, interval: float = WATCH_INTERVAL, emit=print, 
             limited, backoff = 0, None
             for line in lines:
                 emit(line)
+            if any(x.startswith("status: ") and " -> " in x for x in lines):  # release 87: a Decision moved an item
+                note = refresh_digest(site, actor)
+                if note:
+                    emit(note)
         n += 1
         if polls is not None and n >= polls:
             return
