@@ -656,6 +656,324 @@ class PatternRemotes(SiteCase):
             self.assertIsNone(ops.pattern_private_refusal(s, rule, rule["matched"]))
 
 
+class PushPolicy(SiteCase):
+    """Release 89 (dureh-team#111 Approve 1; proposal site-permissions-2026-10-30 section 4): push.policy rules over
+    GitHub remotes after every exact and pattern entry. The GitHub URL reaches a local bare repository through the
+    checkout's `url.<base>.insteadOf`; only the visibility call to GitHub is mocked."""
+    URL = "git@github.com:example-org/tool.git"
+    PRIVATE = {"id": "org-private", "match": {"owner": ["example-org"], "visibility": "private"},
+               "allow": {"standing_ff": True}, "require": {"decision": "never"}}
+    PUBLIC = {"id": "org-public", "match": {"owner": ["example-org"], "visibility": "public"},
+              "allow": {"squash": True}, "require": {"decision": "always", "cleanup": True}}
+
+    def setUp(self):
+        super().setUp()
+        self.install()
+        self.s = self.site()
+        self.repo = self.make_module()
+        self.remotes = self.tmp / "gh" / "example-org"
+        self.remotes.mkdir(parents=True)
+        self.bare = self.remotes / "tool.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(self.bare)], check=True)
+        subprocess.run(["git", "config", f"url.{self.remotes}/.insteadOf", "git@github.com:example-org/"],
+                       cwd=self.repo, check=True)
+
+    def site_with(self, policy, allowed=None):
+        from dureh_core.site import Site
+        cfg = json.loads(self.s.config_path.read_text())
+        cfg["push"] = {"allowed_remotes": allowed or [], "policy": policy}
+        self.s.config_path.write_text(json.dumps(cfg))
+        return Site(self.site_root)
+
+    @staticmethod
+    def github(visibility="private"):
+        from unittest import mock
+        from dureh_core import github
+        def answer(_cfg, args, **_kw):  # `.visibility` (release 89) or `.private` (a release-86 pattern rule)
+            if visibility is None:
+                raise DurehError("gh: network unreachable")
+            return (visibility if args[-1] == ".visibility" else str(visibility == "private").lower()) + "\n"
+        gh = mock.patch.object(github, "gh", side_effect=answer)
+        return mock.patch.object(github, "config", return_value={}), gh
+
+    def push(self, s, ref="main", approval=None, squash=None, visibility="private"):
+        cfgp, ghp = self.github(visibility)
+        with cfgp, ghp:
+            return ops.push(s, "desk", str(self.repo), self.URL, ref, approval, squash=squash)
+
+    def approve(self, s, ref="main", squash=None, visibility="private"):
+        cfgp, ghp = self.github(visibility)
+        with cfgp, ghp:
+            return ops.push_approve(s, "desk", str(self.repo), self.URL, ref, "approved", squash=squash)
+
+    def seed(self):
+        subprocess.run(["git", "push", "-q", str(self.bare), "main"], cwd=self.repo, check=True)
+
+    def commit(self, text):
+        (self.repo / "src" / "demo.py").write_text(text)
+        subprocess.run(["git", "commit", "-qam", "later change"], cwd=self.repo, check=True)
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True).stdout.strip()
+
+    def tip(self, branch="main"):
+        p = subprocess.run(["git", "rev-parse", "--verify", "-q", branch], cwd=self.bare, capture_output=True, text=True)
+        return p.stdout.strip() or None
+
+    def pushes(self, s):
+        return [e for e in Ledger(s).events() if e["type"].startswith("push.")]
+
+    def test_shape(self):
+        s = self.site_with([self.PRIVATE, {**self.PRIVATE, "extra": 1},
+                            {"id": "b", "match": {"owner": ["org/*"], "name": "x", "visibility": "secret",
+                                                  "empty": "yes", "where": 1},
+                             "allow": {"tags": True, "standing_ff": 1, "new_branches": [""]},
+                             "require": {"decision": "sometimes", "cleanup": True}, "deny": "no"},
+                            {"id": "c"}, 7])
+        errs = ops.config_errors(s)
+        for want in ("push.policy[1] has unknown key(s) extra", "push.policy[1].id 'org-private' is used by an earlier",
+                     "(b).match has unknown key(s) where", "(b).match.owner must be a non-empty list",
+                     "(b).match.name must be a list of globs", "(b).match.visibility must be one of private, public, any",
+                     "(b).match.empty must be true, false or null", '(b).allow.tags must be false or "decision"',
+                     "(b).allow.standing_ff must be true or false", "(b).allow.new_branches must be a list",
+                     "(b).require.decision must be one of never, first, always", "(b).deny must be true or false",
+                     "(b): require.cleanup true needs allow.squash true", "(c).match must be an object",
+                     "push.policy[4] must be an object"):
+            self.assertTrue(any(want in e for e in errs), (want, errs))
+        self.assertFalse(any("push.policy[0]" in e for e in errs), errs)
+        self.assertTrue(any("push.policy must be a list" in e for e in ops.config_errors(self.site_with("x"))))
+        self.assertEqual(ops.config_errors(self.site_with([self.PRIVATE, self.PUBLIC])), [])
+        # absent keys are fail-closed
+        r = ops.push_policy({"policy": [{"id": "x", "match": {"owner": ["o"]}}]})[0]
+        self.assertEqual((r["allow"], r["require"], r["match"]["visibility"]),
+                         ({"standing_ff": False, "new_branches": [], "tags": False, "squash": False},
+                          {"decision": "always", "cleanup": None}, "any"))
+
+    def test_exact_entry_wins_over_policy(self):
+        self.seed()
+        deny = {"id": "no", "match": {"owner": ["example-org"]}, "deny": True}
+        s = self.site_with([deny], allowed=[{"url": self.URL, "standing_ff": True}])
+        rev = self.commit("def f():\n    return 2\n")
+        from unittest import mock
+        from dureh_core import github
+        with mock.patch.object(github, "gh") as gh:
+            ev = ops.push(s, "desk", str(self.repo), self.URL, "main", None)
+        gh.assert_not_called()
+        self.assertEqual(self.tip(), rev)
+        self.assertEqual(ev["payload"]["policy"], {"source": "exact"})
+        self.assertEqual(ev["payload"]["rule"]["url"], self.URL)
+        with self.assertRaisesRegex(DurehError, "rule no refuses .* \\(deny\\)"):
+            self.push(self.site_with([deny]))
+
+    def test_private_and_public_routing(self):
+        self.seed()
+        s = self.site_with([self.PRIVATE, self.PUBLIC])
+        rev = self.commit("def f():\n    return 2\n")
+        ev = self.push(s)
+        self.assertEqual(self.tip(), rev)
+        self.assertEqual(ev["payload"]["approval"], "standing-ff")
+        pol = ev["payload"]["policy"]
+        self.assertEqual((pol["source"], pol["rule_id"]), ("policy", "org-private"))
+        self.assertEqual({k: pol["facts"][k] for k in ("visibility", "empty", "new_branch", "fast_forward", "first")},
+                         {"visibility": "private", "empty": False, "new_branch": False, "fast_forward": True,
+                          "first": True})
+        self.assertIn("checked_at", pol["facts"])
+        self.assertEqual(ev["payload"]["rule"]["id"], "org-private")
+        # the same repository turned public falls to the public rule at its next push
+        rev2 = self.commit("def f():\n    return 3\n")
+        with self.assertRaisesRegex(DurehError, "org-public requires cleanup.*history push is refused"):
+            self.push(s, visibility="public")
+        with self.assertRaisesRegex(DurehError, "org-public requires cleanup.*nothing was recorded"):
+            self.approve(s, visibility="public")
+        with self.assertRaisesRegex(DurehError, "--approval DECISION is required .*org-public: require.decision always"):
+            self.push(s, squash="tool update", visibility="public")
+        dec = self.approve(s, squash="tool update", visibility="public")
+        ev = self.push(s, approval=dec["id"], squash="tool update", visibility="public")
+        self.assertEqual(ev["payload"]["policy"]["rule_id"], "org-public")
+        self.assertEqual(ev["payload"]["squash"]["parent"], rev)
+        self.assertEqual(ev["payload"]["revision"], rev2)
+        self.assertEqual(self.tip(), ev["payload"]["squash"]["commit"])
+        # internal visibility matches neither rule
+        with self.assertRaisesRegex(DurehError, "no push.policy rule covers refs/heads/main on example-org/tool"):
+            self.push(s, visibility="internal")
+
+    def test_no_rule_refuses_naming_owner_and_name(self):
+        self.seed()
+        s = self.site_with([self.PRIVATE])
+        self.commit("def f():\n    return 2\n")
+        from dureh_core import github
+        from unittest import mock
+        with mock.patch.object(github, "gh") as gh:
+            with self.assertRaisesRegex(DurehError, "no push.policy rule covers other-org/tool"):
+                ops.push(s, "desk", str(self.repo), "git@github.com:other-org/tool.git", "main", None)
+            with self.assertRaisesRegex(DurehError, "not in push.allowed_remotes .*GitHub remotes only|not in push"):
+                ops.push(s, "desk", str(self.repo), str(self.bare), "main", None)
+            with self.assertRaisesRegex(DurehError, "no push.policy rule covers other-org/tool.*nothing was recorded"):
+                ops.push_approve(s, "desk", str(self.repo), "git@github.com:other-org/tool.git", "main", "m")
+        gh.assert_not_called()
+        named = self.site_with([{**self.PRIVATE, "match": {**self.PRIVATE["match"], "name": ["brk-*"]}}])
+        with self.assertRaisesRegex(DurehError, "no push.policy rule covers example-org/tool"):
+            self.push(named)
+        branch = self.site_with([{**self.PRIVATE, "match": {**self.PRIVATE["match"], "branches": ["golden"]}}])
+        with self.assertRaisesRegex(DurehError, "no push.policy rule covers refs/heads/main"):
+            self.push(branch)
+        self.assertEqual(self.pushes(s), [])
+
+    def test_decision_always_and_first(self):
+        self.seed()
+        always = self.site_with([{**self.PRIVATE, "require": {}}])
+        self.commit("def f():\n    return 2\n")
+        with self.assertRaisesRegex(DurehError, "--approval DECISION is required .*require.decision always"):
+            self.push(always)
+        dec = self.approve(always)
+        ev = self.push(always, approval=dec["id"])
+        self.assertEqual(ev["payload"]["decision"], dec["id"])
+        self.assertTrue(ev["payload"]["policy"]["facts"]["first"])
+        # first: the next push to this repository after a recorded push.completed is standing
+        first = self.site_with([{**self.PRIVATE, "require": {"decision": "first"}}])
+        rev = self.commit("def f():\n    return 3\n")
+        ev = self.push(first)
+        self.assertEqual((ev["payload"]["approval"], self.tip()), ("standing-ff", rev))
+        self.assertFalse(ev["payload"]["policy"]["facts"]["first"])
+
+    def test_decision_first_needs_a_decision_before_any_push(self):
+        self.seed()
+        s = self.site_with([{**self.PRIVATE, "require": {"decision": "first"}}])
+        self.commit("def f():\n    return 2\n")
+        with self.assertRaisesRegex(DurehError, "the first push to this repository needs one"):
+            self.push(s)
+        # a dry run is a push.planned, not a push.completed: still the first push
+        dec = self.approve(s)
+        cfgp, ghp = self.github()
+        with cfgp, ghp:
+            self.assertEqual(ops.push(s, "desk", str(self.repo), self.URL, "main", dec["id"], True)["type"],
+                             "push.planned")
+        with self.assertRaisesRegex(DurehError, "the first push to this repository needs one"):
+            self.push(s)
+        self.push(s, approval=dec["id"])
+        self.commit("def f():\n    return 3\n")
+        self.assertEqual(self.push(s)["payload"]["approval"], "standing-ff")
+
+    def test_decision_never_limits(self):
+        self.seed()
+        s = self.site_with([{**self.PRIVATE, "allow": {"standing_ff": True, "new_branches": ["integrate/*"]}}])
+        subprocess.run(["git", "branch", "-q", "feature"], cwd=self.repo, check=True)
+        subprocess.run(["git", "branch", "-q", "integrate/a"], cwd=self.repo, check=True)
+        with self.assertRaisesRegex(DurehError, "new branch is not covered .*new_branches integrate/\\*"):
+            self.push(s, ref="feature")
+        self.assertTrue(self.push(s, ref="integrate/a")["payload"]["new_branch"])
+        subprocess.run(["git", "commit", "-q", "--amend", "-m", "rewritten"], cwd=self.repo, check=True)
+        with self.assertRaisesRegex(DurehError, "not a fast-forward"):
+            self.push(s)
+        subprocess.run(["git", "tag", "v1"], cwd=self.repo, check=True)
+        with self.assertRaisesRegex(DurehError, "no push.policy rule covers refs/tags/v1"):
+            self.push(s, ref="refs/tags/v1")
+        tags = self.site_with([{**self.PRIVATE, "allow": {"standing_ff": True, "tags": "decision"}}])
+        with self.assertRaisesRegex(DurehError, "a tag push needs a Director decision"):
+            self.push(tags, ref="refs/tags/v1")
+        dec = self.approve(tags, ref="refs/tags/v1")
+        self.push(tags, ref="refs/tags/v1", approval=dec["id"])
+        self.assertIsNotNone(self.tip("v1"))
+        off = self.site_with([{**self.PRIVATE, "allow": {}}])
+        with self.assertRaisesRegex(DurehError, "has standing_ff off"):
+            self.push(off)
+
+    def test_cleanup_requires_a_clean_squash(self):
+        self.seed()
+        s = self.site_with([{**self.PRIVATE, "allow": {"standing_ff": True, "squash": True},
+                             "require": {"decision": "never", "cleanup": True}}])
+        rev = self.commit("def f():\n    return 2\n")
+        with self.assertRaisesRegex(DurehError, "requires cleanup \\(require.cleanup\\)"):
+            self.push(s)
+        with self.assertRaisesRegex(DurehError, "WI-0001"):
+            self.push(s, squash="fix WI-0001")
+        ev = self.push(s, squash="tool update")  # decision never: a clean squash is a standing push
+        self.assertEqual(ev["payload"]["approval"], "standing-ff")
+        self.assertEqual(ev["payload"]["squash"]["parent"], ev["payload"]["policy"]["facts"]["remote_tip"])
+        log = subprocess.run(["git", "log", "-1", "--format=%B", "main"], cwd=self.bare, capture_output=True,
+                             text=True).stdout.strip()
+        self.assertEqual(log, "tool update")
+        self.assertNotEqual(self.tip(), rev)
+        nosq = self.site_with([self.PRIVATE])
+        with self.assertRaisesRegex(DurehError, "does not allow --squash"):
+            self.push(nosq, squash="tool update 2")
+
+    def test_squash_starts_an_empty_repository(self):
+        s = self.site_with([{"id": "org-empty", "match": {"owner": ["example-org"], "visibility": "public",
+                                                          "empty": True, "branches": ["main"]},
+                             "allow": {"new_branches": ["main"], "squash": True}, "require": {"decision": "always"}},
+                            self.PUBLIC])
+        rev = self.commit("def f():\n    return 2\n")
+        with self.assertRaisesRegex(DurehError, "requires cleanup \\(the repository is public\\)"):
+            self.push(s, visibility="public")
+        dec = self.approve(s, squash="first public version", visibility="public")
+        ev = self.push(s, approval=dec["id"], squash="first public version", visibility="public")
+        sq = ev["payload"]["squash"]
+        self.assertEqual((sq["parent"], sq["root"]), (None, True))
+        self.assertEqual(ev["payload"]["policy"]["rule_id"], "org-empty")
+        self.assertTrue(ev["payload"]["policy"]["facts"]["empty"])
+        count = subprocess.run(["git", "rev-list", "--count", "main"], cwd=self.bare, capture_output=True,
+                               text=True).stdout.strip()
+        self.assertEqual((count, self.tip()), ("1", sq["commit"]))
+        tree = lambda cwd, r: subprocess.run(["git", "rev-parse", f"{r}^{{tree}}"], cwd=cwd, capture_output=True,
+                                             text=True).stdout.strip()
+        self.assertEqual(tree(self.bare, "main"), tree(self.repo, rev))
+        # once not empty, a new branch by --squash is refused
+        subprocess.run(["git", "branch", "-q", "other"], cwd=self.repo, check=True)
+        with self.assertRaisesRegex(DurehError, "refs/heads/other does not exist .* first branch of an empty"):
+            self.approve(s, ref="other", squash="x", visibility="public")
+
+    def test_squash_on_an_empty_repository_needs_new_branches(self):
+        s = self.site_with([{"id": "empty", "match": {"owner": ["example-org"], "empty": True},
+                             "allow": {"squash": True}, "require": {"decision": "never"}}])
+        with self.assertRaisesRegex(DurehError, "first branch of an empty repository listed in .* new_branches \\(none\\)"):
+            self.push(s, squash="first version")
+        self.assertIsNone(self.tip())
+        # a plain standing push creates main when new_branches lists it
+        plain = self.site_with([{"id": "empty", "match": {"owner": ["example-org"], "empty": True},
+                                 "allow": {"new_branches": ["main"]}, "require": {"decision": "never"}}])
+        ev = self.push(plain)
+        self.assertTrue(ev["payload"]["new_branch"])
+        self.assertIsNotNone(self.tip())
+
+    def test_visibility_read_failure_refuses(self):
+        self.seed()
+        s = self.site_with([self.PRIVATE])
+        self.commit("def f():\n    return 2\n")
+        before = self.tip()
+        with self.assertRaisesRegex(DurehError, "GitHub could not be asked: gh: network unreachable"):
+            self.push(s, visibility=None)
+        with self.assertRaisesRegex(DurehError, "GitHub could not be asked.*nothing was recorded"):
+            self.approve(s, visibility=None)
+        with self.assertRaisesRegex(DurehError, "GitHub could not be asked"):  # no config github at all
+            ops.push(s, "desk", str(self.repo), self.URL, "main", None)
+        self.assertEqual(self.tip(), before)
+        self.assertEqual(self.pushes(s), [])
+        self.assertEqual(Ledger(s).load("decision"), [])
+
+    def test_pattern_public_falls_to_the_policy_and_status_lines(self):
+        self.seed()
+        pat = {"url": "git@github.com:example-org/*.git", "pattern": True, "standing_ff": True}
+        s = self.site_with([self.PUBLIC], allowed=[pat])
+        rev = self.commit("def f():\n    return 2\n")
+        ev = self.push(s)
+        self.assertEqual((ev["payload"]["policy"], self.tip()), ({"source": "pattern"}, rev))
+        with self.assertRaisesRegex(DurehError, "org-public requires cleanup"):
+            self.push(s, visibility="public")
+        with self.assertRaisesRegex(DurehError, "is not private"):  # without a policy, unchanged
+            self.push(self.site_with([], allowed=[pat]), visibility="public")
+        st = ops.status(self.site_with([self.PRIVATE, self.PUBLIC, {"id": "no", "match": {"owner": ["x"]},
+                                                                    "deny": True}]))
+        self.assertEqual(st["push"], [
+            "policy org-private: GitHub example-org/*; visibility private; branches all -> standing fast-forward on;"
+            " new branches none; tags refused; squash refused; decision never; cleanup on public repositories",
+            "policy org-public: GitHub example-org/*; visibility public; branches all -> standing fast-forward off;"
+            " new branches none; tags refused; squash allowed; decision always; cleanup on",
+            "policy no: GitHub x/*; visibility any; branches all -> refused (deny)"])
+        self.assertIn("Push: policy org-private", ops.render_status(st))
+        self.assertTrue(ops.push_policy_covers(s.config["push"], self.URL))
+        self.assertFalse(ops.push_policy_covers({"policy": [{"id": "n", "match": {"owner": ["example-org"]},
+                                                             "deny": True}]}, self.URL))
+
+
 class SiteLinks(SiteCase):
     def test_link_module_pins_revision(self):
         self.install()

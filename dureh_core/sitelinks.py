@@ -109,14 +109,16 @@ def link_module(site: Site, actor: str, module_id: str, source: str | None, rev:
 
 def _push_off(site: Site, entry: dict, root: Path) -> bool:
     """A module is push-off when its entry says `push: false`, or when neither its source nor its checkout's origin
-    is in config `push.allowed_remotes` (the harness cannot push it)."""
+    is in config `push.allowed_remotes` nor named by a `push.policy` rule (the harness cannot push it)."""
     if entry.get("push") is False:
         return True
-    from .ops import push_rule
+    from .ops import push_policy_covers, push_rule
 
     origin = git(["remote", "get-url", "origin"], root, check=False) if (root / ".git").exists() else ""
     # release 82: an allowed_remotes entry may be an object; it is compared by its url
-    return push_rule(site, str(entry.get("source") or ""), origin, "origin") is None
+    # release 89: a GitHub source a push.policy rule names (owner and name) is not push-off either
+    return (push_rule(site, str(entry.get("source") or ""), origin, "origin") is None
+            and not push_policy_covers(site.config.get("push") or {}, str(entry.get("source") or ""), origin))
 
 
 def _standing_ff_covers(site: Site, source: str, root: Path, branch: str) -> bool:
