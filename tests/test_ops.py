@@ -597,6 +597,65 @@ class Ops(SiteCase):
         self.assertIn("name: py-writer", front)
 
 
+class PatternRemotes(SiteCase):
+    """Release 86 (Director 2026-10-30 "패턴허용", dureh-team#91): a pattern rule covers an organization's private
+    repositories; exact entries win; public ones and failed checks are refused."""
+    PAT = {"url": "git@github.com:example-org/*.git", "pattern": True, "standing_ff": True,
+           "new_branches": ["feature/*"]}
+
+    def setUp(self):
+        super().setUp()
+        self.install()
+        self.s = self.site()
+
+    def site_with(self, *rules):
+        from dureh_core.site import Site
+        cfg = json.loads(self.s.config_path.read_text())
+        cfg["push"] = {"allowed_remotes": list(rules)}
+        self.s.config_path.write_text(json.dumps(cfg))
+        return Site(self.site_root)
+
+    def test_shape(self):
+        s = self.site_with(self.PAT, {"url": "git@github.com:example-org/office.git", "pattern": True},
+                           {"url": "git@github.com:example-org/*.git", "pattern": True, "tags": True},
+                           {"url": "/some/path/*", "pattern": True})
+        errs = ops.push_remote_errors(s.config["push"])
+        self.assertEqual(sum("repository name is a glob" in e for e in errs), 2, errs)
+        self.assertEqual(sum("tags true is refused" in e for e in errs), 1, errs)
+        self.assertFalse(any("allowed_remotes[0]" in e for e in errs), errs)
+
+    def test_matching(self):
+        exact = {"url": "git@github.com:example-org/office.git", "branches": ["main"]}
+        s = self.site_with(self.PAT, exact)
+        self.assertEqual(ops.push_rule(s, "git@github.com:example-org/office.git")["branches"], ["main"])
+        hit = ops.push_rule(s, "git@github.com:example-org/stradler.git", "origin")
+        self.assertTrue(hit["pattern"])
+        self.assertEqual(hit["matched"], "git@github.com:example-org/stradler.git")
+        self.assertFalse(hit["tags"])
+        self.assertTrue(ops.push_rule(s, "https://github.com/Example-Org/new-tool"))
+        self.assertIsNone(ops.push_rule(s, "git@github.com:other-org/stradler.git"))
+        self.assertIsNone(ops.push_rule(s, "/work/example-org/stradler.git"))
+        self.assertIn("pattern, private repositories only", ops.push_rule_line(hit))
+
+    def test_private_check_is_fail_closed(self):
+        from unittest import mock
+        s = self.site_with(self.PAT)
+        rule = ops.push_rule(s, "git@github.com:example-org/tool.git")
+        why = ops.pattern_private_refusal(s, rule, rule["matched"])
+        self.assertIn("could not be asked", why)  # no config github: refused
+        from dureh_core import github
+        with mock.patch.object(github, "config", return_value={}), \
+                mock.patch.object(github, "gh", return_value="false\n") as gh:
+            self.assertIn("is not private", ops.pattern_private_refusal(s, rule, rule["matched"]))
+            self.assertEqual(gh.call_args[0][1][:2], ["api", "repos/example-org/tool"])
+            with self.assertRaisesRegex(DurehError, "is not private"):
+                ops.push(s, "desk", str(self.tmp), "git@github.com:example-org/tool.git", "main", None)
+            with self.assertRaisesRegex(DurehError, "is not private.*nothing was recorded"):
+                ops.push_approve(s, "desk", str(self.make_module()), "git@github.com:example-org/tool.git", "main", "m")
+        with mock.patch.object(github, "config", return_value={}), mock.patch.object(github, "gh", return_value="true"):
+            self.assertIsNone(ops.pattern_private_refusal(s, rule, rule["matched"]))
+
+
 class SiteLinks(SiteCase):
     def test_link_module_pins_revision(self):
         self.install()

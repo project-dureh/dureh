@@ -151,8 +151,14 @@ def cmd_adapter_sync(a):
     added = apply_config_defaults(site)  # UP-0069: package config_defaults the site's config.json lacks (added once)
     if added:
         print(f"config.json: added from the package's config_defaults: {', '.join(added)}")
+    agents = site.root / ".claude" / "agents"
+    before = {f.name for f in agents.glob("*.md")} if agents.is_dir() else set()
     m = claude_code.generate(site)
     print(f"generated {len(m['files'])} files for claude-code")
+    new_roles = sorted(f[:-3] for f in ({f.name for f in agents.glob("*.md")} - before)) if before else []
+    if new_roles:  # release 86 (dureh-team#91 item 7): Claude Code reads agent files when a session starts
+        print(f"new agent type(s): {', '.join(new_roles)}; a running desk session cannot spawn them until it is"
+              " restarted (`site session start --force` after the day's work is saved, or the next session)")
     from .projectgen import generate_projects
 
     for r in generate_projects(site):
@@ -279,6 +285,12 @@ def cmd_dispatch_brief(a):
     if why:
         fail(why)
     r = dispatch_brief(site, a.wi, _actor(a), a.role, a.tier, a.reason)
+    if not a.role:  # release 86: the WI's board item moves when its work starts (a checker dispatch does not move it)
+        from .github import start_item
+
+        moved = start_item(site, _actor(a), a.wi)
+        if moved:
+            print(f"# {moved}")
     env = r.get("worktree_env") or {}
     if env.get("env") in ("shared", "rebuilt"):
         how = (f"shares {env.get('shared')}" if env["env"] == "shared"
@@ -907,6 +919,15 @@ def cmd_github(a):
         github.watch(site, _actor(a), a.interval, emit=lambda line: print(line, flush=True), polls=1 if a.once else None)
     elif c == "sweep":
         _print(github.sweep(site, _actor(a), a.dry_run))
+    elif c == "digest":
+        res = github.digest(site, _actor(a) if a.write else None, a.write)
+        if a.json:
+            _print({k: v for k, v in res.items() if k != "text"})
+        elif a.write:
+            print(f"digest: {res['url']} {'unchanged' if res.get('unchanged') else 'written'} "
+                  f"({res['decide']} to decide, {res['steps']} Director steps)")
+        else:
+            print(res["text"], end="")
     elif a.item_command == "add":
         _print(github.item_add(site, _actor(a), a.wi, a.status, a.project, a.layer, a.units, a.repo, a.url,
                                a.priority, a.start, a.target))
@@ -1663,6 +1684,14 @@ def parser() -> argparse.ArgumentParser:
                                      "carries no waiting-director, needs-review or needs-approval label (day close runs "
                                      "it); records github.sweep.done")
     x.add_argument("--dry-run", action="store_true", help="list what would close; close nothing")
+    x.add_argument("--actor")
+    x = add(gp, "digest", cmd_github, "the company dashboard in the DUREH dashboard's format (release 86): open "
+                                      "Needs approval items with 결정할 것 / 데스크 추천 / 안 하면 lines from their bodies, "
+                                      "and Waiting for Director items with the Director's step; printed, or with "
+                                      "--write (desk) the body of issue config github.dashboard_issue, edited in place "
+                                      "when it changed; records github.digest.written")
+    x.add_argument("--write", action="store_true")
+    x.add_argument("--json", action="store_true", help="counts and the target only")
     x.add_argument("--actor")
     gi = add(gp, "item", cmd_github, "desk: board items for work items and decision asks").add_subparsers(
         dest="item_command", required=True)

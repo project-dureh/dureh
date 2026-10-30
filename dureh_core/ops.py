@@ -2079,7 +2079,11 @@ def _dest_ref(ref: str) -> str:
     return ref if ref.startswith("refs/") else f"refs/heads/{ref}"
 
 
-PUSH_RULE_KEYS = ("url", "branches", "standing_ff", "new_branches", "tags")
+PUSH_RULE_KEYS = ("url", "branches", "standing_ff", "new_branches", "tags", "pattern")
+# release 86 (Director 2026-10-30 "패턴허용", dureh-team#91): a `pattern` rule's url is a glob over the repository name
+# of one GitHub organization (git@github.com:<org>/*.git); it covers private repositories only (checked on GitHub
+# at each push and approval, fail-closed), so a public repository still needs its own entry
+GITHUB_REMOTE = re.compile(r"^(?:git@github\.com:|https://github\.com/|ssh://git@github\.com/)([A-Za-z0-9-]+)/([A-Za-z0-9._*?-]+?)(?:\.git)?/?$")
 
 
 def push_remote_errors(pcfg: dict) -> list[str]:
@@ -2111,10 +2115,17 @@ def push_remote_errors(pcfg: dict) -> list[str]:
             v = e.get(key)
             if v is not None and not (isinstance(v, list) and all(isinstance(g, str) and g.strip() for g in v)):
                 out.append(f"{where}.{key} must be a list of branch globs (non-empty strings) (release 82)")
-        for key in ("standing_ff", "tags"):
+        for key in ("standing_ff", "tags", "pattern"):
             v = e.get(key)
             if v is not None and not isinstance(v, bool):
                 out.append(f"{where}.{key} must be true or false (release 82; default false)")
+        if e.get("pattern") is True and isinstance(e.get("url"), str):
+            m = GITHUB_REMOTE.match(e["url"])
+            if not m or "*" in m.group(1) or not any(c in m.group(2) for c in "*?"):
+                out.append(f"{where}.url must be a GitHub remote whose repository name is a glob, such as "
+                           "git@github.com:example-org/*.git, when pattern is true (release 86)")
+            if e.get("tags") is True:
+                out.append(f"{where}: a pattern rule pushes branches only; tags true is refused (release 86)")
     return out
 
 
@@ -2135,14 +2146,50 @@ def push_rules(pcfg: dict) -> list[dict]:
                         "branches": [str(g) for g in br] if isinstance(br, list) else None,
                         "standing_ff": e.get("standing_ff") is True,
                         "new_branches": [str(g) for g in e.get("new_branches") or [] if isinstance(g, str)],
-                        "tags": e.get("tags") is True})
+                        "tags": e.get("tags") is True and e.get("pattern") is not True,
+                        **({"pattern": True} if e.get("pattern") is True else {})})
     return out
 
 
 def push_rule(site_or_cfg, *names: str) -> dict | None:
     """The first `push.allowed_remotes` rule whose url is one of `names` (a remote's URL or its name), else None."""
     pcfg = (site_or_cfg.config.get("push") if isinstance(site_or_cfg, Site) else site_or_cfg) or {}
-    return next((r for r in push_rules(pcfg) if r["url"] in [n for n in names if n]), None)
+    names = [n for n in names if n]
+    rules = push_rules(pcfg)
+    exact = next((r for r in rules if not r.get("pattern") and r["url"] in names), None)
+    if exact:
+        return exact
+    for r in rules:  # release 86: a pattern rule after every exact entry, matched on the remote's URL only
+        if r.get("pattern"):
+            hit = next((n for n in names if GITHUB_REMOTE.match(n) and _pattern_match(r["url"], n)), None)
+            if hit:
+                return {**r, "matched": hit}
+    return None
+
+
+def _pattern_match(pattern: str, url: str) -> bool:
+    p, u = GITHUB_REMOTE.match(pattern), GITHUB_REMOTE.match(url)
+    return bool(p and u and p.group(1).lower() == u.group(1).lower() and fnmatch.fnmatchcase(u.group(2), p.group(2)))
+
+
+def pattern_private_refusal(site: Site, rule: dict, url: str) -> str | None:
+    """Why a pattern rule does not cover `url` (release 86): GitHub must say the repository is private; any failure
+    to ask (no config github, a gh error) refuses."""
+    if not rule.get("pattern"):
+        return None
+    owner, name = GITHUB_REMOTE.match(url).groups()
+    where = f"config push.allowed_remotes pattern rule {rule['url']}"
+    try:
+        from . import github
+
+        cfg = github.config(site)
+        private = github.gh(cfg, ["api", f"repos/{owner}/{name}", "--jq", ".private"], timeout=30).strip()
+    except DurehError as exc:
+        return f"{where} covers private repositories only, and GitHub could not be asked about {owner}/{name}: {exc}"
+    if private != "true":
+        return (f"{owner}/{name} is not private, so {where} does not cover it: a public repository needs its own "
+                f"allowed_remotes entry (the Director's approval)")
+    return None
 
 
 def _globs(globs: list[str] | None, name: str) -> bool:
@@ -2151,6 +2198,11 @@ def _globs(globs: list[str] | None, name: str) -> bool:
 
 def push_rule_line(rule: dict) -> str:
     """One status line for a push rule."""
+    if rule.get("pattern"):
+        return (f"{rule['url']} (pattern, private repositories only): branches "
+                f"{', '.join(rule['branches']) if rule['branches'] is not None else 'all'}; standing fast-forward "
+                f"{'on' if rule['standing_ff'] else 'off'}; new branches {', '.join(rule['new_branches']) or 'none'};"
+                " tags refused")
     if rule["form"] == "string":
         return (f"{rule['url']}: all branches; standing fast-forward {'on' if rule['standing_ff'] else 'off'}"
                 f" (site-wide){'; new branches too' if rule['new_branches'] else ''}")
@@ -2252,6 +2304,9 @@ def push(site: Site, actor: str, repo: str, remote: str, ref: str, approval: str
     rule = push_rule(site, url, remote)
     if rule is None:
         fail(f"remote {url!r} is not in push.allowed_remotes")
+    refused = pattern_private_refusal(site, rule, rule.get("matched") or url)
+    if refused:
+        fail(refused)
     rev = git(["rev-parse", ref], repo_path)
     if approval:
         dec = led.get("decision", approval)
@@ -2310,7 +2365,8 @@ def push_approve(site: Site, actor: str, repo: str, remote: str, ref: str, memo:
     rev = git(["rev-parse", ref], repo_path)
     url = git(["remote", "get-url", remote], repo_path, check=False) or remote
     rule = push_rule(site, url, remote)
-    refused = rule and push_limit_refusal(rule, _dest_ref(ref), True)
+    refused = rule and (pattern_private_refusal(site, rule, rule.get("matched") or url)
+                        or push_limit_refusal(rule, _dest_ref(ref), True))
     if refused:  # release 82: no decision for a push the remote's rule refuses anyway
         fail(refused + "; nothing was recorded")
     return Ledger(site).append("decision", "push-approval", actor, None,

@@ -40,7 +40,7 @@ from .records import Ledger, short_title
 from .site import Site
 from .util import DurehError, fail
 
-KEYS = ("enabled", "org", "project", "office_repo", "token_file", "director_login", "app")
+KEYS = ("enabled", "org", "project", "office_repo", "token_file", "director_login", "app", "dashboard_issue")
 DEFAULT_OFFICE = "office"
 DESK_MARK = "<!-- dureh-desk -->"
 DECISION_LABEL = "kind:decision"
@@ -176,6 +176,9 @@ def config_errors(site: Site, config: dict | None = None, startup=None) -> list[
         out.append("config github.token_file must be a path (the fine-grained token's file, mode 600)")
     if director is not None and (not isinstance(director, str) or not _LOGIN.match(director)):
         out.append(f"config github.director_login must be a GitHub login, not {director!r}")
+    dash = raw.get("dashboard_issue")
+    if dash is not None and (isinstance(dash, bool) or not isinstance(dash, int) or dash < 1):
+        out.append(f"config github.dashboard_issue must be an issue number of office_repo (release 86), not {dash!r}")
     from .github_app import app_errors
 
     out += app_errors(site, raw.get("app"))
@@ -201,7 +204,8 @@ def config(site: Site) -> dict:
     if not raw.get("enabled"):
         fail(OFF_LINE)
     return {"org": raw["org"], "project": raw["project"], "office_repo": raw.get("office_repo", DEFAULT_OFFICE),
-            "token_file": site.expand(raw["token_file"]), "director_login": raw.get("director_login")}
+            "token_file": site.expand(raw["token_file"]), "director_login": raw.get("director_login"),
+            "dashboard_issue": raw.get("dashboard_issue")}
 
 
 def _token(cfg: dict) -> str:
@@ -295,6 +299,9 @@ BOARD_QUERY = """query($org: String!, $number: Int!, $after: String) {
               comments(last: 30) { nodes { id url author { login } body } } }
             ... on DraftIssue { title } } } } } } }""" % {"f": _FIELD}
 MAX_PAGES = 20
+# release 86 (dureh-team#91 item 5): the digest reads bodies too; the watch's query stays without them
+DIGEST_QUERY = BOARD_QUERY.replace("... on Issue { number title url state", "... on Issue { number title url state body") \
+    .replace("... on PullRequest { number title url state", "... on PullRequest { number title url state body")
 
 
 def _parse_meta(proj: dict) -> dict:
@@ -322,7 +329,7 @@ def _parse_item(node: dict) -> dict:
             "status": values.get(FIELD_STATUS), "decision": decision_value(values.get(FIELD_DECISION)),
             "decision_raw": values.get(FIELD_DECISION),
             "project": values.get(FIELD_PROJECT), "layer": values.get(FIELD_LAYER), "units": values.get(FIELD_UNITS),
-            "comments": comments}
+            "priority": values.get(FIELD_PRIORITY), "body": c.get("body"), "comments": comments}
 
 
 def board(cfg: dict, query: str = BOARD_QUERY, costs: list | None = None) -> dict:
@@ -355,6 +362,38 @@ def status(site: Site) -> dict:
         groups.setdefault(it["status"] or "(no status)", []).append(row)
     return {"org": cfg["org"], "project": cfg["project"], "title": b["meta"]["title"],
             "groups": {k: v for k, v in groups.items() if v}, "count": len(b["items"])}
+
+
+DIGESTED = "github.digest.written"
+
+
+def digest(site: Site, actor: str | None = None, write: bool = False) -> dict:
+    """Release 86 (dureh-team#91 item 5): the company dashboard in the team's #31 format (board_digest): what waits
+    for the Director's decision and his own steps on this board. Printed by default; with `write` (the desk) the body
+    of issue config github.dashboard_issue in office_repo is replaced (only when it changed), records
+    github.digest.written. A write without dashboard_issue is refused."""
+    from . import board_digest
+
+    cfg = config(site)
+    if write:
+        _require_desk(site, actor)
+        if not cfg.get("dashboard_issue"):
+            fail("config github.dashboard_issue is not set: the Director/DUREH name the office_repo issue that holds "
+                 "the dashboard (docs/github.md); `github digest` without --write prints it")
+    dig = board_digest.digest(board(cfg, DIGEST_QUERY)["items"])
+    body = board_digest.text(dig, cfg["org"], time.strftime("%Y-%m-%d %H:%M %Z"))
+    res = {"decide": len(dig["decide"]), "steps": len(dig["steps"]), "text": body, "written": False}
+    if not write:
+        return res
+    repo = f"{cfg['org']}/{cfg['office_repo']}"
+    target = f"https://github.com/{repo}/issues/{cfg['dashboard_issue']}"
+    old = gh(cfg, ["issue", "view", target, "--json", "body", "--jq", ".body"])
+    stale = lambda t: "\n".join(x for x in (t or "").splitlines() if not x.startswith("갱신: "))  # noqa: E731
+    if stale(old.strip()) == stale(body.strip()):
+        return {**res, "url": target, "unchanged": True}
+    gh(cfg, ["issue", "edit", target, "--body-file", "-"], input_text=_clean(body, "the dashboard"))
+    Ledger(site).event(DIGESTED, actor, None, {"url": target, "decide": res["decide"], "steps": res["steps"]})
+    return {**res, "written": True, "url": target}
 
 
 def _ref(it: dict) -> str:
@@ -736,14 +775,55 @@ def _retry_after(err: Exception) -> float | None:
     return float(m.group(1)) if m else None
 
 
+APPROVAL_LABELS = ("needs-approval", "needs-review")
+KEEP_ON_DECISION = ("In progress", "Waiting for Director", "Done")
+
+
+def board_status(*, state=None, merged=False, labels=(), decision=None, status=None, director_merges_pr=False):
+    """Release 86 (dureh-team#91 item 1): the boards' one Status rule, used by `github watch` here and by the team's
+    status_sync and heartbeat. Returns (Status required or None to leave it, why, conflict note or None):
+
+      closed or merged                                         Done
+      label waiting-director                                   Waiting for Director (a conflict when needs-approval
+                                                                 or needs-review is also set and no Decision is)
+      label needs-approval or needs-review, no Decision        Needs approval
+      label on-hold                                            Today
+      `director_merges_pr` (an open, non-draft PR only the      Waiting for Director
+        Director merges)
+      Decision Approve 1-3 or Rejected                         Today, unless In progress, Waiting for Director or
+                                                                 Done (a Done item open for the sweep)
+      otherwise (Discuss, a hold, included)                    None (unchanged; In progress is never inferred)"""
+    labels, current = {str(x).lower() for x in labels or ()}, status
+    dec = decision_value(decision)
+    held = dec == DISCUSS
+    if held:
+        dec = None
+    if merged or state in ("CLOSED", "MERGED"):
+        return "Done", "merged" if (merged or state == "MERGED") else "closed", None
+    approval = sorted(labels & set(APPROVAL_LABELS))
+    if "waiting-director" in labels:
+        if approval and not dec:
+            return None, "", f"labels waiting-director and {'+'.join(approval)} with no Decision: remove one"
+        return "Waiting for Director", "label waiting-director", None
+    if approval and not dec:
+        return "Needs approval", f"label {approval[0]}", None
+    if ON_HOLD_LABEL in labels:
+        return "Today", "label on-hold", None
+    if director_merges_pr:
+        return "Waiting for Director", "open pull request: only the Director merges", None
+    if held or not dec:
+        return None, "", None
+    if current in KEEP_ON_DECISION:
+        return current, f"Decision {dec}, {current}", None
+    return "Today", f"Decision {dec}", None
+
+
 def decision_status(decision, status) -> str | None:
     """Release 85 (a company's request, Director 2026-10-29 "제가 결정하면, 위치를 옮기는게 자동화되었으면"): the Status
-    a Decision moves an open item to, the boards' one rule: Approve 1-3 or Rejected -> Today unless the item is already
-    In progress, Waiting for Director or Done; Discuss or no Decision -> None (not moved)."""
-    dec = decision_value(decision)
-    if dec in (None, DISCUSS) or status in ("In progress", "Waiting for Director", "Done", "Today"):
-        return None
-    return "Today"
+    a Decision moves an open item to, by `board_status` (labels are not read here): Approve 1-3 or Rejected -> Today
+    unless the item is already In progress, Waiting for Director, Done or Today; Discuss or no Decision -> None."""
+    want = board_status(decision=decision, status=status)[0]
+    return want if want and want != status else None
 
 
 def _follow_decision(site: Site, actor: str, cfg: dict, it: dict, dec, said: list, wi) -> list[str]:
@@ -1015,6 +1095,29 @@ def _refuse_wip(cfg: dict, items: list[dict], url: str | None, also: str = "") -
         fail(f"refused: the board already has {len(running)} open items In progress for {cfg['org']} (limit"
              f" {WIP_IN_PROGRESS}, Director 2026-10-26): {names}. Finish one, or move one back with"
              f" `dureh github item set --url <url> --status Today --on-hold`{also}")
+
+
+def start_item(site: Site, actor: str, wi: str) -> str | None:
+    """Release 86 (dureh-team#91 item 2; #102 stayed Today while it was worked): when the desk dispatches a WI, its
+    board item moves to In progress; with the company's In progress limit full it goes to Today with on-hold. None
+    when GitHub is off or the WI has no board item; a failed write is a line, never an error (the dispatch stands)."""
+    if not enabled(site):
+        return None
+    try:
+        item = linked_item(site, wi)
+    except DurehError:
+        return None
+    try:
+        item_set(site, actor, wi=wi, status="In progress")
+        return f"board: {item.get('url') or item['item_id']} -> In progress"
+    except DurehError as e:
+        if "In progress for" not in str(e):
+            return f"board: {wi} not moved to In progress: {e}"
+    try:
+        item_set(site, actor, wi=wi, on_hold=True)
+        return f"board: {item.get('url') or item['item_id']} -> Today + on-hold (the In progress limit is full)"
+    except DurehError as e:
+        return f"board: {wi} not moved: {e}"
 
 
 def item_set(site: Site, actor: str, wi: str | None = None, url: str | None = None, status=None, project=None,
