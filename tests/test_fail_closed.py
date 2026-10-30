@@ -50,7 +50,7 @@ class FallbackLines(unittest.TestCase):
 
 
 FC_THREE = ("--decide", "새 remote로 push할까요?", "--recommend", "아니오, 로컬에 둡니다.",
-            "--otherwise", "기다립니다 (Fallback: none).")
+            "--otherwise", "기다립니다 (Fallback: none).", "--priority", "P2")
 
 
 class Ask(GithubBase):
@@ -99,7 +99,7 @@ class Ask(GithubBase):
         code, out, err = self.run_cli("item", "ask", "--title", "Order", "--body-file",
                                       self.body("Which first?\nFallback after 30 minutes: Option 1"),
                                       "--options", "A", "B", "--decide", "A 먼저?", "--recommend", "A",
-                                      "--otherwise", "30분 뒤 Option 1")
+                                      "--otherwise", "30분 뒤 Option 1", "--priority", "P2")
         self.assertEqual(code, 0, err)
         create = next(c for c in self.gh.calls if c["argv"][1:3] == ["issue", "create"])
         self.assertNotIn("fail-closed", create["argv"])

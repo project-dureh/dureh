@@ -939,7 +939,7 @@ def cmd_github(a):
         _print(github.item_ask(site, _actor(a), a.title, body, a.options, a.layer, a.wi, a.project, a.repo, a.units,
                                fail_closed=a.fail_closed, decide=a.decide, recommend=a.recommend,
                                otherwise=a.otherwise, on_hold=a.on_hold, ask_class=a.ask_class,
-                               command=a.command))
+                               command=a.command, state=a.state, priority=a.priority))
     elif a.item_command == "close":
         _print(github.item_close(site, _actor(a), a.wi, a.url, a.comment))
     else:
@@ -1736,7 +1736,9 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--fail-closed", action="store_true",
                    help="release 78: a fail-closed kind (no 30-minute fallback, no timeout approval): label fail-closed; "
                         "a body naming a fallback option is refused")
-    x.add_argument("--decide", help="release 80: 결정할 것, one sentence (required on a layer-3 ask)")
+    x.add_argument("--state", help="release 87: 현재 상태, one line (default: the body's first paragraph)")
+    x.add_argument("--decide", help="release 80: 결정할 것, the question only (required on a layer-3 ask; release 87: "
+                                    "at most 150 characters, no option names: the choices go in --options)")
     x.add_argument("--recommend", help="release 80: 추천, the recommended choice and why (required on layer 3)")
     x.add_argument("--otherwise", help="release 80: 답이 없으면, what happens without an answer (required on layer 3)")
     x.add_argument("--on-hold", action="store_true",
@@ -1747,6 +1749,8 @@ def parser() -> argparse.ArgumentParser:
                         " the Director's hands do (Waiting for Director, label waiting-director, no options; needs"
                         " --command)")
     x.add_argument("--command", help="with --class D: the exact command or step the Director runs")
+    x.add_argument("--priority", help="release 87: P0..P3, the board's Priority (required on a layer-3 ask, --class D "
+                                      "too; desk rule: P2 unless asked)")
     x.add_argument("--wi", help="the work item the ask belongs to")
     x.add_argument("--project")
     x.add_argument("--units", type=float)

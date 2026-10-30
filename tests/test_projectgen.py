@@ -103,10 +103,13 @@ class ProjectGen(ExampleSiteCase):
         self.assertFalse((self.proj / ".claude" / "agents" / "publisher.md").exists())
 
     def test_saves_in_a_datalad_project(self):
-        from helpers import TOOLS, private_tmp, run
+        from helpers import TOOLS, foreign_git_above, private_tmp, run
 
         if not TOOLS:
             self.skipTest("datalad and git-annex not available: not run")
+        above = foreign_git_above(self.tmp)
+        if above is not None:  # UR-20261030-01: datalad would take it for a superdataset
+            self.skipTest(f"{above} is above the test site and no clean temporary directory was found: not run")
         os.environ["PATH"] = TOOLS
         dl = self.site_root / "projects" / "dl"
         before = (os.environ.get("TMPDIR"), os.environ.get("GIT_CEILING_DIRECTORIES"))

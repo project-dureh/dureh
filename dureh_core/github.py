@@ -60,6 +60,13 @@ FIELD_STATUS, FIELD_PROJECT, FIELD_LAYER, FIELD_DECISION, FIELD_UNITS = "Status"
 # #31: roadmap fields; a Priority of P1 matches an option named "P1" or "P1 ..."; dates are YYYY-MM-DD
 FIELD_PRIORITY, FIELD_START, FIELD_TARGET = "Priority", "Start date", "Target date"
 PRIORITIES = ("P0", "P1", "P2", "P3")
+# Release 87 (Director, dureh-team#108 items 4 and 6): `item ask --decide` holds the question only (the choices go in
+# --options), and a layer-3 option that is a step only the Director's hands do is filed with --class D instead. The
+# cue list is kept small on purpose: the Director as the subject of a create/make/run verb, in Korean or English.
+DECIDE_MAX = 150
+_DECIDE_OPTION = re.compile(r"(?<![A-Za-z])(?:Approve\s*[1-3]|Option\s*\d)(?!\d)", re.I)  # "Approve 1로" too
+DIRECTOR_HANDS = (re.compile(r"대표님(?:이|께서)\s*[^.\n]{0,40}?(?:생성|만들|만드|직접\s*실행)"),
+                  re.compile(r"\b(?:the\s+)?Director\s+(?:creates?|makes?|runs?|sets\s+up|logs\s+in)\b", re.I))
 SECRET_MARKS = ("ghp_", "gho_", "ghu_", "ghs_", "ghr_", "github_pat_")
 MAX_BODY = 60000
 _LOGIN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$")
@@ -1176,18 +1183,21 @@ DIRECTOR_STEP = "github.director-step.created"
 
 
 def _director_step(site: Site, actor: str, title: str, body: str, command: str | None, wi: str | None, project,
-                   repo: str | None) -> dict:
+                   repo: str | None, priority=None) -> dict:
     """Release 85 (`item ask --class D`, approval-balance plan 3.1/3.4): a step only the Director's hands can do (an App
     or web setting, a login, a command refused to the desk after approval, a dataset link). No Decision options: the
     issue opens with 현재 상태 and 대표님이 하실 일 (the exact command), is assigned to the Director, carries the label
-    waiting-director and Status Waiting for Director, and is closed by the desk once the step is done."""
+    waiting-director and Status Waiting for Director, and is closed by the desk once the step is done. Release 87
+    (dureh-team#108 item 5): it is a layer-3 item, so it needs `priority` like a layer-3 decision ask."""
     if not (command or "").strip():
         fail("--class D needs --command: the exact command or step the Director runs (one block he can paste)")
+    if priority is None:
+        fail("refused: a layer-3 item needs --priority P0..P3 (release 87, dureh-team#108; desk rule: P2 unless asked)")
     cfg = config(site)
     title = _clean(title, "the title", 256)
     text = (f"## 현재 상태\n\n{_clean(body, 'the body')}\n\n## 대표님이 하실 일\n\n```\n{_clean(command, '--command', 4000)}\n```"
             f"\n\nWhen it is done, reply here; the desk checks the result and closes this item.\n\n{DESK_MARK}")
-    fields = _fields("Waiting for Director", project, 3, None)
+    fields = _fields("Waiting for Director", project, 3, None, priority=priority)
     meta = _meta(cfg)
     _edits(meta, fields)
     repo_name = _repo(cfg, repo)
@@ -1206,12 +1216,18 @@ def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] |
              wi: str | None = None, project=None, repo: str | None = None, units=None,
              fail_closed: bool = False, decide: str | None = None, recommend: str | None = None,
              otherwise: str | None = None, on_hold: bool = False, ask_class: str | None = None,
-             command: str | None = None) -> dict:
+             command: str | None = None, state: str | None = None, priority=None) -> dict:
     """A decision ask: a `kind:decision` issue (layer 3: assigned to config github.director_login, Status Waiting for
     Director), on the board with its Layer; the answer is the board's Decision, read by `watch`/`status`.
     Release 80 (dureh-team#30 Option 1, the Director's three-line ask of dureh-team#49): a layer-3 ask opens with three
     lines, 결정할 것 (`decide`, one yes/no or choice sentence), 추천 (`recommend`, with the reason) and 답이 없으면
     (`otherwise`); the body follows as background. A layer-3 ask without them is refused.
+    Release 87 (Director, dureh-team#108 items 4-6; his item format of 2026-10-27): the body is `## 현재 상태` (`state`,
+    one line; default the body's first paragraph), `## 결정할 것` with the question and right under it the options as
+    `- **Approve N:** ...` lines (then Rejected and Discuss), `**추천:**`, `**답이 없으면:**`, `---` and the body as
+    background. `decide` naming an option ("Approve 1", "Option 2") or longer than DECIDE_MAX is refused (the choices
+    go in `options`); a layer-3 ask needs `priority` (P0..P3), and a layer-3 option that is a step only the Director's
+    hands do (DIRECTOR_HANDS) is refused with the hint to file it with `--class D`.
     `fail_closed` (release 78, v0.4 bundle 1): the ask also carries the `fail-closed` label and a line saying it has
     no fallback; a body or option naming a fallback option is refused before anything is created, and the record
     keeps `fail_closed: true` so `day decide --ask <url>` refuses a provisional choice on it.
@@ -1225,7 +1241,7 @@ def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] |
         fail(f"--class takes C (a decision: Needs approval) or D (a step only the Director's hands do), not {ask_class!r};"
              " classes A and B are not asked (approval-balance plan 3.1)")
     if ask_class == "D":
-        return _director_step(site, actor, title, body, command, wi, project, repo)
+        return _director_step(site, actor, title, body, command, wi, project, repo, priority)
     if command:
         fail("--command goes with --class D")
     cfg = config(site)
@@ -1239,6 +1255,18 @@ def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] |
         if named:
             fail("refused: a fail-closed ask names no fallback option (release 78; no 30-minute fallback, no timeout "
                  f"approval): remove or rewrite {named[0]!r} (for example \"Fallback: none, this waits for the answer\")")
+    question = " ".join((decide or "").split())
+    named = _DECIDE_OPTION.search(question)
+    if named or len(question) > DECIDE_MAX:
+        why = f"names an option ({named.group(0)!r})" if named else f"is {len(question)} characters (at most {DECIDE_MAX})"
+        fail(f"refused: --decide {why}; it holds the question only, one short sentence (release 87, dureh-team#108):"
+             " put the choices in --options (they become Approve 1..3 under the question)")
+    if int(layer) == 3:
+        hands = next((o for o in options if any(c.search(o) for c in DIRECTOR_HANDS)), None)
+        if hands:
+            fail(f"refused: the option {hands!r} is a step only the Director's hands do, not a decision (release 87,"
+                 " dureh-team#108): file it with `github item ask --class D --command \"...\" --priority P2` (Waiting for"
+                 " Director) and ask only the decision here")
     if wi:
         Ledger(site).get("work-item", wi)
     title = _clean(title, "the title", 256)
@@ -1248,19 +1276,21 @@ def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] |
     if int(layer) == 3 and missing:
         fail(f"refused: a layer-3 ask opens with three lines (release 80, dureh-team#30): give {', '.join(missing)} "
              "(결정할 것 / 추천 / 답이 없으면, one sentence each, Korean for the Director)")
-    if not missing:
-        if fail_closed:
-            named = fallback_lines(otherwise or "")
-            if named:
-                fail(f"refused: a fail-closed ask names no fallback option: rewrite --otherwise {named[0]!r}")
-        head = "\n".join(f"**{k}:** {_clean(v, '--' + n, 500)}" for k, v, n in
-                         (("결정할 것", decide, "decide"), ("추천", recommend, "recommend"), ("답이 없으면", otherwise, "otherwise")))
-        text = f"{head}\n\n---\n**배경 · Background**\n\n{text}"
-    # Director 2026-10-27: a multiple choice in the Decision column's own names
-    approves = [f"- **Approve {i}**: {o}" for i, o in enumerate(options, 1)] or ["- **Approve 1**: approve as asked"]
-    text += ("\n\n**Options · 선택지** (Decision column)\n" + "\n".join(approves)
-             + "\n- **Rejected**: no; nothing here proceeds"
-             + "\n- **Discuss**: hold; nothing proceeds, the desk answers your comments on this item")
+    if fail_closed and (otherwise or "").strip():
+        named = fallback_lines(otherwise or "")
+        if named:
+            fail(f"refused: a fail-closed ask names no fallback option: rewrite --otherwise {named[0]!r}")
+    if int(layer) == 3 and priority is None:
+        fail("refused: a layer-3 ask needs --priority P0..P3 (release 87, dureh-team#108; desk rule: P2 unless asked)")
+    now = _one_line(_clean(state, "--state", 500) if (state or "").strip() else re.split(r"\n\s*\n", text.strip())[0])
+    # Director 2026-10-27: a multiple choice in the Decision column's own names, right under the question
+    approves = [f"- **Approve {i}:** {o}" for i, o in enumerate(options, 1)] or ["- **Approve 1:** approve as asked"]
+    choice = "\n".join([*approves, "- **Rejected:** no; nothing here proceeds",
+                        "- **Discuss:** hold; nothing proceeds, the desk answers your comments on this item"])
+    tail = "\n".join(f"**{k}:** {_clean(v, '--' + n, 500)}" for k, v, n in
+                     (("추천", recommend, "recommend"), ("답이 없으면", otherwise, "otherwise")) if (v or "").strip())
+    text = (f"## 현재 상태\n\n{now}\n\n## 결정할 것\n\n{_clean(question, '--decide') if question else title}\n\n{choice}"
+            + (f"\n\n{tail}" if tail else "") + f"\n\n---\n\n**배경 · Background**\n\n{text}")
     choices = [*[f"Approve {i}" for i in range(1, max(len(options), 1) + 1)], REJECT, DISCUSS]
     who = "the Director" if int(layer) == 3 else LAYERS.get(int(layer), "?")
     if fail_closed:
@@ -1270,7 +1300,7 @@ def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] |
              f"The Decision column is the decision; your comments on this item are read with it.\n\n{DESK_MARK}")
     text = _clean(text, "the issue body")
     status = "Needs approval" if int(layer) == 3 else "Today" if on_hold else "In progress"
-    fields = _fields(status, project, layer, units)
+    fields = _fields(status, project, layer, units, priority=priority)
     if status == "In progress":  # release 83: the release-82 limit, before anything is created
         _refuse_wip(cfg, board(cfg)["items"], None, ", or file this ask with `--on-hold` (Status Today)")
     meta = _meta(cfg)
