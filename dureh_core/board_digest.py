@@ -20,6 +20,7 @@ MISSING = "<채워 주세요>"
 FAIL_CLOSED = "없음 (fail-closed), 답을 기다립니다"
 LINE_MAX = 240
 MARK = "<!-- dureh-digest -->"
+DESK_MARK = "<!-- dureh-desk -->"  # github.DESK_MARK: watches and the team heartbeat skip desk-written text
 
 _BOLD = re.compile(r"\*\*|__")
 _PLACEHOLDER = re.compile(r"<[^<>\s!/][^<>]*>")
@@ -183,5 +184,5 @@ def text(dig: dict, org: str, stamp: str) -> str:
         out += ["없습니다.", ""]
     for n, d in enumerate(dig["steps"], 1):
         out += [_head(d, n), f"- {_short(d.get('action')) or MISSING}", ""]
-    out.append(MARK)
+    out += [MARK, DESK_MARK]  # without the desk mark the issue reads as the Director's own (camri office#141)
     return "\n".join(out) + "\n"

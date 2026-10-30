@@ -1161,6 +1161,7 @@ class Digest(GithubBase):
         self.assertIn("없음 (fail-closed), 답을 기다립니다", out)
         self.assertIn("- `git push origin main` 한 번", out)
         self.assertNotIn("office#4", out)
+        self.assertIn(github.DESK_MARK, out)  # not read as the Director's own issue
         self.assertNotIn("office#5", out)
         self.assertTrue(any("body" in c["input"] for c in self.gh.calls if c["input"]))
         self.assertEqual(self.events(), [])
