@@ -1126,5 +1126,86 @@ class DeskText(GithubBase):
         self.assertNotIn("GitHub is preferred for asks", text)
 
 
+
+class Digest(GithubBase):
+    """Release 86 (dureh-team#91 item 5): the company dashboard in the #31 format."""
+
+    ASK = ("## 현재 상태\n\n배경.\n\n## 결정할 것\n\n**A를 먼저 할까요?**\n\n- **Approve 1 (추천):** A 먼저\n"
+           "- **Approve 2:** B 먼저\n\n답이 없으면: 기다립니다.\n")
+    STEP = "## 현재 상태\n\n준비됨.\n\n## 대표님이 하실 일\n\n**`git push origin main` 한 번**\n"
+
+    def board(self):
+        def body(n, text):
+            n["content"]["body"] = text
+            return n
+        prio = lambda n, v: (n["fieldValues"]["nodes"].append({"name": v, "field": {"name": "Priority"}}), n)[1]  # noqa: E731
+        self.gh.items = [body(node("I1", 1, "Decision: order", "Needs approval"), self.ASK),
+                         prio(body(node("I2", 2, "Decision: fail", "Needs approval", labels=["fail-closed"]),
+                                   "결정할 것: 공개 push?"), "P0 now"),
+                         body(node("I3", 3, "Push it", "Waiting for Director"), self.STEP),
+                         body(node("I4", 4, "Closed ask", "Needs approval", state="CLOSED"), self.ASK),
+                         node("I5", 5, "Working", "In progress")]
+
+    def test_print(self):
+        self.board()
+        code, out, _ = self.run_cli("digest")
+        self.assertEqual(code, 0)
+        self.assertIn("# example-org 대시보드", out)
+        first, second = out.index("office#2"), out.index("office#1")
+        self.assertLess(first, second)  # Priority first
+        self.assertIn("- **결정할 것:** A를 먼저 할까요?", out)
+        self.assertIn("- **데스크 추천:** Approve 1: A 먼저", out)
+        self.assertIn("- **안 하면 / 답이 없으면:** 기다립니다.", out)
+        self.assertIn("- **결정할 것:** 공개 push?", out)
+        self.assertIn("- **데스크 추천:** <채워 주세요>", out)
+        self.assertIn("없음 (fail-closed), 답을 기다립니다", out)
+        self.assertIn("- `git push origin main` 한 번", out)
+        self.assertNotIn("office#4", out)
+        self.assertNotIn("office#5", out)
+        self.assertTrue(any("body" in c["input"] for c in self.gh.calls if c["input"]))
+        self.assertEqual(self.events(), [])
+
+    def test_write_needs_the_desk_and_the_issue(self):
+        self.board()
+        code, _, err = self.run_cli("digest", "--write", "--actor", "desk")
+        self.assertEqual(code, 2)
+        self.assertIn("dashboard_issue is not set", err)
+        cfg = json.loads((self.site_root / "config.json").read_text())["github"]
+        self.set_config({**cfg, "dashboard_issue": 7})
+        code, _, err = self.run_cli("digest", "--write", "--actor", "nobody")
+        self.assertEqual(code, 2)
+        self.assertFalse(any(c["argv"][1:3] == ["issue", "edit"] for c in self.gh.calls))
+        code, out, _ = self.run_cli("digest", "--write", "--actor", "desk")
+        self.assertEqual(code, 0, out)
+        self.assertIn("issues/7 written (2 to decide, 1 Director steps)", out)
+        edit = [c for c in self.gh.calls if c["argv"][1:3] == ["issue", "edit"]]
+        self.assertEqual(len(edit), 1)
+        self.assertIn("## 1. 정하실 것", edit[0]["input"])
+        self.assertEqual([e["type"] for e in self.events()], [github.DIGESTED])
+
+    def test_write_unchanged_is_skipped(self):
+        self.board()
+        cfg = json.loads((self.site_root / "config.json").read_text())["github"]
+        self.set_config({**cfg, "dashboard_issue": 7})
+        body = github.digest(self.site())["text"].replace("갱신: ", "갱신: 어제 ", 1)
+        real = self.gh.__call__
+
+        def answer(argv, env, input_text, timeout):
+            if argv[1:3] == ["issue", "view"]:
+                self.gh.calls.append({"argv": argv, "env": env, "input": input_text})
+                return subprocess.CompletedProcess(argv, 0, body, "")
+            return real(argv, env, input_text, timeout)
+        with mock.patch.object(github, "_exec", answer):
+            code, out, _ = self.run_cli("digest", "--write", "--actor", "desk")
+        self.assertIn("unchanged", out)
+        self.assertFalse(any(c["argv"][1:3] == ["issue", "edit"] for c in self.gh.calls))
+        self.assertEqual(self.events(), [])
+
+    def test_bad_dashboard_issue_is_refused(self):
+        cfg = json.loads((self.site_root / "config.json").read_text())["github"]
+        self.set_config({**cfg, "dashboard_issue": "seven"})
+        self.assertTrue(any("dashboard_issue must be an issue number" in e for e in github.config_errors(self.site())))
+
+
 if __name__ == "__main__":
     unittest.main()

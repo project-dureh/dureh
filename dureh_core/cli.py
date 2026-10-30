@@ -919,6 +919,15 @@ def cmd_github(a):
         github.watch(site, _actor(a), a.interval, emit=lambda line: print(line, flush=True), polls=1 if a.once else None)
     elif c == "sweep":
         _print(github.sweep(site, _actor(a), a.dry_run))
+    elif c == "digest":
+        res = github.digest(site, _actor(a) if a.write else None, a.write)
+        if a.json:
+            _print({k: v for k, v in res.items() if k != "text"})
+        elif a.write:
+            print(f"digest: {res['url']} {'unchanged' if res.get('unchanged') else 'written'} "
+                  f"({res['decide']} to decide, {res['steps']} Director steps)")
+        else:
+            print(res["text"], end="")
     elif a.item_command == "add":
         _print(github.item_add(site, _actor(a), a.wi, a.status, a.project, a.layer, a.units, a.repo, a.url,
                                a.priority, a.start, a.target))
@@ -1675,6 +1684,14 @@ def parser() -> argparse.ArgumentParser:
                                      "carries no waiting-director, needs-review or needs-approval label (day close runs "
                                      "it); records github.sweep.done")
     x.add_argument("--dry-run", action="store_true", help="list what would close; close nothing")
+    x.add_argument("--actor")
+    x = add(gp, "digest", cmd_github, "the company dashboard in the DUREH dashboard's format (release 86): open "
+                                      "Needs approval items with 결정할 것 / 데스크 추천 / 안 하면 lines from their bodies, "
+                                      "and Waiting for Director items with the Director's step; printed, or with "
+                                      "--write (desk) the body of issue config github.dashboard_issue, edited in place "
+                                      "when it changed; records github.digest.written")
+    x.add_argument("--write", action="store_true")
+    x.add_argument("--json", action="store_true", help="counts and the target only")
     x.add_argument("--actor")
     gi = add(gp, "item", cmd_github, "desk: board items for work items and decision asks").add_subparsers(
         dest="item_command", required=True)
