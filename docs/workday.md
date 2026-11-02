@@ -40,6 +40,8 @@ The company's working day is 8 hours (`workday.hours`) from the moment DUREH sta
    `"<desk name>, 추가근무 출근"` with the name from the persona registry `state/persona/persona.json`
    (`"데스크, 추가근무 출근"` without one). Config `session.prompts.<purpose>` (a template with `{name}`, or
    `false`), `start --prompt TEXT` and `--no-prompt` override; the record carries the `prompt` used (or null).
+   **Handshake (Director, 2026-11-02).** The desk's reply to the start message (`"<desk name>, 출근"`) begins
+   with `dureh day handshake`, before the plan; see "Start-of-day handshake" below.
 1. **Start.** The desk reports a plan to the Director (goal, work items, order, expected usage) and
    records it: `dureh day plan --goal ... --file plan.md`. **Director actions (release 58).** The plan also lists
    every action only the Director can take that day (a dataset link, a push approval, a config change), one
@@ -313,6 +315,40 @@ Never held by the plan or the clock: stopping an agent (`dispatch stop`) or a sc
 handling (idle, `adapter sync`, `verify --self`), recording upstream replies. For data at risk the desk
 tells the Director at once; on the Director's word `dureh day urgent --wi <WI>... --memo "..."` releases
 those WIs from the plan, the clock and the budget until the next day.
+
+## Start-of-day handshake
+
+The Director, 2026-11-02: operations are checked every morning before work, like a handshake (that morning a
+site's dispatch stopped for hours on a model bootstrap waiver that had expired unseen). `dureh day handshake`
+prints one line per check, each `ok`, `warn`, `FAIL` or `skip` (not checked here), then a summary line;
+`--json` gives the same as data. Exit code: 2 when a check FAILs, 1 when one warns, else 0.
+
+| check | FAIL | warn | skip |
+|---|---|---|---|
+| `dispatch <tier>` (every tier `models` maps or a dispatchable role uses; `dispatch brief`'s own qualification test) | no model, no qualification, expired waiver | | |
+| `waivers` (`dureh status`'s waiver warning) | a bootstrap waiver expired | one ends within 7 days | |
+| `harness` | | the mailbox's newest `landed` release is newer than the pinned harness | no `upstream.exchange`: the newest release is not known |
+| `session` (`site session status`) | | no recorded session job, the job is gone or not RUNNING, under 1 h left, an unrecorded session-like job | squeue unavailable |
+| `day` | | an earlier day's plan is still open; past the end | |
+| `director actions`, `asks` | | an ask or Director step still open with a Decision set (from the GitHub watch's cached view); open asks with no cached view | GitHub off |
+| `blocked WIs` | | WIs blocked on an open upstream request | |
+| `mailbox` | | unread messages from upstream | no exchange |
+| `config` (`config_errors`) | each error | | |
+
+It is read-only: it records nothing, contacts no network service (the board's Decisions come from the watch's
+cache `cache/github/watch.json`; `github status` reads the live board) and runs with `--observe`. A check that
+cannot be answered is `skip` or `warn`, never `ok`.
+
+The desk text: the reply to the start message begins with the handshake. The desk fixes what is its own to fix
+(`upstream inbox --record`, closing an earlier day, acting on a decided ask), runs it again, then sends DUREH the
+lines and the day plan (a mailbox notice, `upstream send --kind notice --body-file <file>`, when
+`upstream.exchange` is set; otherwise at the top of its reply). A FAIL it cannot fix goes to DUREH at once in its
+own notice, not after the plan; work the FAIL does not block goes on.
+
+```text
+bin/dureh day handshake            # text; exit 0 ok, 1 warn, 2 FAIL
+bin/dureh --observe day handshake --json
+```
 
 ## Phases and weekdays
 
