@@ -83,6 +83,21 @@ def _qualifications(site: Site, today: date | None) -> list[dict]:
     return [_line("qualifications", WARN if "ends within" in w else FAIL, w) for w in lines]
 
 
+def _newer_models(site: Site) -> list[dict]:
+    """Phase 2 (newest-model rule): a tier whose model family has a newer version in `models.candidates`."""
+    from .qualification import newer_models
+
+    if not isinstance((site.config.get("models") or {}).get("candidates"), list):
+        return [_line("newer models", SKIP, "models.candidates is not set: newer model versions are not checked")]
+    rows = newer_models(site)
+    if not rows:
+        return [_line("newer models", OK, "no tier's model family has a newer version in models.candidates")]
+    return [_line("newer models", WARN, f"newer model available for tier {r['tier']}: {r['newer']} (incumbent"
+                                        f" {r['incumbent']}); run the candidate exam this week (`dureh exam run --tier"
+                                        f" {r['tier']} --model {r['newer']}`), then ask for the switch with the scores")
+            for r in rows]
+
+
 def _waivers(site: Site, today: date | None) -> list[dict]:
     from .ops import model_waiver_warnings
 
@@ -239,6 +254,7 @@ def handshake(site: Site, today: date | None = None) -> dict:
         st, ses = {}, [_line("session", WARN, f"not checked: {exc}")]
     checks = (_safe("dispatch", _dispatch, site) + _safe("waivers", _waivers, site, today)
               + _safe("qualifications", _qualifications, site, today)
+              + _safe("newer models", _newer_models, site)
               + _safe("harness", _harness, site) + ses + _safe("asks", _director, site, st)
               + _safe("upstream", _upstream, site) + _safe("config", _config, site))
     levels = {c["level"] for c in checks}
