@@ -269,6 +269,45 @@ class AsyncVerify(SiteCase):
         self.assertEqual(self.superseded_events(wi), [], "amend itself records nothing about the run")
         self.assertTrue(wf.pending_verify(self.led, wi), "the stale run stays until the next submit")
 
+    # ------------------------------------------- amended checks (release 89, UR-20261102-01)
+    def stop_amend_restage(self, wi, checks):
+        """A company's path: the checks were wrong, so stop, amend the checks, re-stage the same head."""
+        wf.dispatch_stop(self.s, "desk", wi, "checks were wrong")
+        wf.wi_amend(self.s, "desk", wi, "fix the checks", {"checks": checks})
+        self.led.event("wi.dispatched", "desk", wi, {"role": "py-writer", "brief": "2" * 16, "by": "desk"})
+        wf.wi_stage(self.s, "py-writer", wi, "same head, new checks")
+
+    def test_amended_checks_let_submit_supersede_the_old_run(self):
+        wi = self.item(["false"])
+        self.running()
+        old = self.submit(wi)
+        self.finish(old)
+        self.stop_amend_restage(wi, ["true"])
+        self.running()
+        r = self.submit(wi)  # was refused: "waiting to be collected" while collect said "submit again"
+        self.assertEqual(r["superseded"], old["run"])
+        self.assertIn("checks declared before", r["superseded_note"])
+        ev = self.superseded_events(wi)[0]["payload"]
+        self.assertEqual((ev["reason"], ev["old_head"], ev["new_head"]), ("checks changed", old["head"], old["head"]))
+        self.finish(r)
+        got = wf.verify_collect(self.s, "checker", wi)
+        self.assertEqual((got["result"], got["collected_from"]), ("pass", r["run"]))
+
+    def test_collect_after_amended_checks_voids_the_run_and_says_submit(self):
+        wi = self.item(["false"])
+        self.running()
+        old = self.submit(wi)
+        self.finish(old)
+        self.stop_amend_restage(wi, ["true"])
+        r = wf.verify_collect(self.s, "checker", wi)
+        self.assertEqual(r["superseded"], old["run"])
+        self.assertNotIn("result", r, "nothing was verified")
+        self.assertIn(f"verify --wi {wi} --submit", r["next"])
+        self.assertIsNone(wf.pending_verify(self.led, wi))
+        with self.assertRaisesRegex(DurehError, "its declared checks were amended"):
+            wf.verify_collect(self.s, "checker", wi, old["run"])
+        self.assertTrue(self.submit(wi)["submitted"])
+
     def test_nothing_to_submit_verifies_synchronously(self):
         wi = self.item([])
         r = wf.verify_submit(self.s, "checker", wi)
