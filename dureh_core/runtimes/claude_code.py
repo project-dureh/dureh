@@ -782,7 +782,8 @@ def _claude_md(site: Site) -> str:
               f"Model qualification (release 90): a tier runs on a model only with a live waiver or a passing exam of that exact"
               f" model (`qualification: run-<id>`). `{dureh} exam plan --all` lists the candidate models that still need a run,"
               f" cheapest first; `{dureh} exam build --tier T`, `{dureh} exam run --tier T --model M` (spawn each printed brief"
-              f" with that model), `{dureh} exam score --run R`, `{dureh} exam compare --all`. Exams run within the daily share;"
+              f" unchanged, subagent_type = its role, model = the exact id, not an alias), `{dureh} exam score --run R` (a"
+              f" failing task comes back once as an attempt-2 brief: spawn it, score again), `{dureh} exam compare --all`. Exams run within the daily share;"
               " applying a pass to config is a `models.<tier>` change (same model class B, a new model class C)."]
     return "\n".join(lines) + "\n"
 
@@ -1141,6 +1142,18 @@ def _git_reads(sub: str, args: list[str]) -> bool:
     return False
 
 
+def _git_sub(args: list[str]) -> list[str] | None:
+    """[subcommand, *its args] of a git command line's arguments (global options skipped); None for an option that
+    redirects git (--git-dir, --work-tree) or a line without a subcommand."""
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        w = args[i].split("=")[0]
+        if w in ("--git-dir", "--work-tree", "--namespace", "--exec-path"):
+            return None
+        i += 2 if args[i] in ("-C", "-c") else 1
+    return args[i:] if i < len(args) else None
+
+
 def _git_check(site: Site, words: list[str], cwd: Path, agent_wi: str | None, agent_id: str | None) -> str | None:
     """Reason to deny a git command, or None. Writes are allowed only in the bound WI's worktree or scratch."""
     i, repo = 1, cwd
@@ -1475,7 +1488,7 @@ def _wait_hint(reason: str, command: str, always: bool = False, hint: str = WAIT
     return f"{reason}; {hint}" if always or _WAIT_FORM.search(command) else reason
 
 
-def guard_bash(site: Site, role: str, data: dict) -> dict | None:
+def guard_bash(site: Site, role: str, data: dict, exam: dict | None = None) -> dict | None:
     ti = data.get("tool_input") or {}
     hint = wait_hint_text(site)
     wait = lambda reason, cmd, always=False: _wait_hint(reason, cmd, always, hint)  # noqa: E731
@@ -1509,7 +1522,7 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
         return _deny(wait("no background jobs (`&`) in the session; use the scheduler", original))
     agent_id = data.get("agent_id")
     led = Ledger(site)
-    agent_wi = _bind(led, role, data, "first-tool") if agent_id else None
+    agent_wi = _bind(led, role, data, "first-tool") if agent_id and not exam else None
     dureh_seen = keyword_lead = False
     literals: dict[str, str] = {}  # NAME=value assignments earlier in this line
     for seg in words_only:
@@ -1555,6 +1568,13 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
             return _deny(f"`{first}` runs only as a scheduler job; use `dureh slurm submit`")
         if first == "git" and "push" in words[1:3]:
             return _deny("pushes go through `dureh push` with a Director decision bound to the revision")
+        if exam:  # phase 2: an exam agent reads git and runs no harness command
+            if _is_dureh(words[0], site, cwd):
+                return _deny("an exam agent runs no dureh command; the desk scores the exam (`dureh exam score`)")
+            if first == "git":
+                rest = _git_sub(words[1:])
+                if rest is None or not _git_reads(rest[0], rest[1:]):
+                    return _deny("an exam agent does not commit or change refs; leave the changes in the workspace")
         if first == "git" and role != "desk":
             why = _git_check(site, words, cwd, agent_wi, agent_id)
             if why:
@@ -1602,6 +1622,11 @@ def guard_bash(site: Site, role: str, data: dict) -> dict | None:
             targets += [w for w in words[2:] if not w.startswith("-")]
         for tgt in targets:
             if tgt in ("/dev/null", "/dev/stdout", "/dev/stderr") or tgt.startswith("&"):
+                continue
+            if exam:
+                why = _q().write_refusal(exam, Path(os.path.expanduser(tgt)), cwd)
+                if why:
+                    return _deny(f"write to {tgt.removesuffix('/.dureh-dir')}: {why}")
                 continue
             ok, why = _write_decision(site, role, Path(os.path.expanduser(tgt)), cwd, agent_wi, agent_id)
             if not ok:
@@ -1716,6 +1741,76 @@ def _model_unstated(site: Site, target: str, prepared: dict, ti: dict) -> str | 
     return None
 
 
+def _q():
+    from .. import qualification
+
+    return qualification
+
+
+def _exam_header_in_transcript(data: dict) -> dict | None:
+    """The DUREH-EXAM line of the subagent's own prompt (its transcript head), or None."""
+    for path in _transcripts(data):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                head = fh.read(65536)
+        except OSError:
+            continue
+        if BRIEF_RE.search(head):
+            return None
+        for line in head.splitlines():  # the prompt is JSON-encoded on line 1: its newlines are escaped
+            h = _q().parse_header(line.replace("\\n", "\n"))
+            if h:
+                return h
+    return None
+
+
+def _exam_of(site: Site, led: Ledger, role: str, data: dict) -> dict | None:
+    """Phase 2: the exam binding of an agent spawned with a DUREH-EXAM brief ({exam_run, task, attempt, workspace,
+    verdict, ...}), {"error": ...} when its brief has no recorded spawn, or None for every other agent."""
+    agent_id = data.get("agent_id")
+    if not agent_id:
+        return None
+    q = _q()
+    b = q.agent_binding(led, agent_id)
+    if b:
+        return b
+    h = _exam_header_in_transcript(data)
+    if h is None:
+        return None
+    b = q.bind_agent(led, role, agent_id, h, procs.runtime_pid())
+    return {"error": b} if isinstance(b, str) else b
+
+
+def _exam_spawn(site: Site, led: Ledger, role: str, target: str, ti: dict) -> dict | None:
+    """Phase 2: the desk spawns an exam brief (`dureh exam run`). Admitted when the brief is the recorded one of an
+    unscored exam run, for that task's role, not yet spawned (one rerun per failing task, prepared by `exam score`),
+    the spawn's `model` is exactly the run's model and the workday allows work; recorded as `exam.spawned`."""
+    if target not in site.org.roles or target == "desk":
+        return _deny(f"`{target}` is not a DUREH role an exam can run")
+    model = None
+    with led.lock():
+        why, slot = _q().admit_spawn(site, role, target, ti.get("prompt") or "")
+        if why:
+            return _deny(why)
+        model = slot["model"]
+        spawn = str(ti.get("model") or "").strip()
+        if spawn not in (model, model.partition(":")[2]):
+            return _deny(f"an exam qualifies the exact model {model}: spawn with model={model.partition(':')[2]}"
+                         + (f", not {spawn}" if spawn else " (the model is required; a family alias is not enough)"))
+        from ..workday import gate
+
+        why = gate(site, None)
+        if why:
+            return _deny(why)
+        led.event("exam.spawned", role, None, {"exam_run": slot["exam_run"], "task": slot["task"],
+                                               "attempt": slot["attempt"], "role": target, "tier": slot["tier"],
+                                               "model": model, "spawn_model": spawn, "brief": slot["brief_sha256"],
+                                               "workspace": slot["workspace"], "verdict": slot.get("verdict"),
+                                               "background": bool(ti.get("run_in_background"))},
+                  [slot["exam_run"]])
+    return None
+
+
 def pre_tool_use(site: Site, data: dict) -> dict | None:
     tool = data.get("tool_name") or ""
     role = _role_of(site, data)
@@ -1737,10 +1832,17 @@ def pre_tool_use(site: Site, data: dict) -> dict | None:
     org = site.org
     led = Ledger(site)
     ti = data.get("tool_input") or {}
+    exam = _exam_of(site, led, role, data) if role != "desk" else None
+    if exam and exam.get("error"):
+        return _deny(exam["error"])
     if tool in SPAWN_TOOLS:
+        if exam:
+            return _deny("an exam agent spawns no agents")
         if role != "desk":
             _bind(led, role, data, "first-tool")
         target = ti.get("subagent_type") or "general-purpose"
+        if not BRIEF_RE.search(ti.get("prompt") or "") and _q().parse_header(ti.get("prompt") or ""):
+            return _exam_spawn(site, led, role, target, ti)
         if target not in org.roles or target == "desk":
             return _deny(f"`{target}` is not a DUREH role; spawn one of the roles {role} may dispatch: "
                          f"{', '.join(org.role(role).may_dispatch) or 'none'}")
@@ -1763,6 +1865,9 @@ def pre_tool_use(site: Site, data: dict) -> dict | None:
         path = ti.get("file_path") or ti.get("notebook_path")
         if not path:
             return _deny("write without a path")
+        if exam:
+            why = _q().write_refusal(exam, Path(path), Path(data.get("cwd") or site.root))
+            return _deny(why) if why else None
         agent_wi = _bind(led, role, data, "first-tool")
         ok, why = _write_decision(site, role, Path(path), Path(data.get("cwd") or site.root), agent_wi,
                                   data.get("agent_id"))
@@ -1778,7 +1883,7 @@ def pre_tool_use(site: Site, data: dict) -> dict | None:
                 return _deny(f"desk memory would grow to {current + new} bytes, over the {cap}-byte cap; summarize first")
         return None
     if tool == "Bash":
-        return guard_bash(site, role, data)
+        return guard_bash(site, role, data, exam)
     if tool in NETWORK_TOOLS and not org.has(role, "network"):
         holders = ["desk"] + [r.name for r in org.with_capability("network")]
         return _deny(f"network access needs the network capability ({', '.join(holders)})")
@@ -1807,7 +1912,10 @@ def subagent_start(site: Site, data: dict) -> dict | None:
     role = _role_of(site, data)
     if role.startswith("foreign:"):
         return None
-    _bind(Ledger(site), role, data, "start")
+    led = Ledger(site)
+    if _exam_of(site, led, role, data) is not None:
+        return None
+    _bind(led, role, data, "start")
     return None
 
 
@@ -1840,6 +1948,8 @@ def _bind(led: Ledger, role: str, data: dict, at: str) -> str | None:
     if bound:
         return bound
     digest = _brief_in_transcript(data)
+    if digest is None and _exam_header_in_transcript(data):
+        return None  # phase 2: an exam agent is never bound to a work item, not even by order
     with led.lock():
         bound = _agent_wi(led, agent_id)
         if bound:
@@ -1926,10 +2036,22 @@ def subagent_stop(site: Site, data: dict) -> None:
     if role.startswith("foreign:"):
         return None
     led = Ledger(site)
-    wi = _bind(led, role, data, "stop")
     tpath = data.get("agent_transcript_path")
     usage = transcript_usage(Path(tpath)) if tpath else {"coverage": "none", "reason": "runtime did not supply a transcript path"}
     agent_id = data.get("agent_id")
+    exam = _exam_of(site, led, role, data)
+    if exam is not None:  # phase 2: an exam agent's usage counts against its exam run (units per task)
+        leftovers = _cleanup_agent(led, role, None, agent_id)
+        ref = {k: exam.get(k) for k in ("exam_run", "task", "attempt")} if not exam.get("error") else {}
+        led.event("agent.finished", role, None, {"agent_id": agent_id, **ref,
+                                                 "leftovers_killed": len(leftovers.get("killed") or [])})
+        led.append("run", "agent", role, None, {"run_type": "agent", "status": "completed", "agent_id": agent_id,
+                                                "runtime": "claude-code", "usage": usage,
+                                                **({"exam_run": ref["exam_run"], "exam_task": ref["task"],
+                                                    "exam_attempt": ref["attempt"], "model": exam.get("model")}
+                                                   if ref else {"exam_error": exam["error"]})})
+        return None
+    wi = _bind(led, role, data, "stop")
     leftovers = _cleanup_agent(led, role, wi, agent_id)
     led.event("agent.finished", role, wi, {"agent_id": agent_id, "leftovers_killed": len(leftovers.get("killed") or [])})
     led.append("run", "agent", role, wi, {"run_type": "agent", "status": "completed", "agent_id": agent_id,
@@ -1945,7 +2067,7 @@ def _cleanup_agent(led: Ledger, role: str, wi: str | None, agent_id: str | None)
         return {}
     protect = set()
     for ev in reversed(led.load("event")):
-        if ev["type"] == "agent.started" and ev["payload"].get("agent_id") == agent_id:
+        if ev["type"] in ("agent.started", "exam.agent.started") and ev["payload"].get("agent_id") == agent_id:
             if ev["payload"].get("runtime_pid"):
                 protect.add(int(ev["payload"]["runtime_pid"]))
             break
