@@ -155,6 +155,9 @@ class Bundle(SiteCase):
                   f"mkdir -p {wt}/src/b 1>&2", f"ls {wt} &>/dev/null", f"mkdir -p {wt}/src/c 2> /dev/null"):
             self.assertFalse(denied(bash(c)), c)
         self.assertTrue(denied(bash(f"ls {wt} 2>{wt}/docs/err.txt")), "a real file after 2> is still a write")
+        # release 89: only device files are exempt; /dev/shm is a real file system
+        self.assertFalse(denied(bash(f"ls {wt} 2>/dev/fd/2")), "/dev/fd/N is a device")
+        self.assertTrue(denied(bash(f"ls {wt} 2>/dev/shm/dureh-out.txt")), "a file under /dev/shm is a write")
         self.assertTrue(denied(bash(f"echo x > {wt}/README.md")))
 
     def test_bundle_with_only_stopped_children_fails(self):

@@ -1034,10 +1034,19 @@ def _strip_heredocs(command: str, quoted_only: bool = False) -> str:
 _REDIRECT_OPS = _REDIRECTS | {">&", "<", "<&", "<>", "&>", "&>>", "<<<"}
 
 
+_NO_FILE_TARGETS = {"/dev/null", "/dev/zero", "/dev/stdout", "/dev/stderr", "/dev/stdin", "/dev/tty"}
+
+
+def _no_file_target(tgt: str) -> bool:
+    """True for a redirection target that is a device, not a file: /dev/null and the like, /dev/fd/N."""
+    return tgt in _NO_FILE_TARGETS or re.fullmatch(r"/dev/fd/\d+", tgt) is not None
+
+
 def _split_redirects(words: list[str]) -> tuple[list[str], list[str]]:
     """(words without redirections, file targets of output redirections). `2>/dev/null` arrives as
     `2`, `>`, `/dev/null`: an fd number right before an operator belongs to the redirection, and
-    duplications (`>&2`, `2>&1`) and /dev/* write no file (UR-20261003-05)."""
+    duplications (`>&2`, `2>&1`) and the device files in _NO_FILE_TARGETS write no file (UR-20261003-05); any
+    other /dev path (/dev/shm is a real file system) is a write target (release 89)."""
     out, targets, i = [], [], 0
     while i < len(words):
         w = words[i]
@@ -1047,7 +1056,7 @@ def _split_redirects(words: list[str]) -> tuple[list[str], list[str]]:
         if w in _REDIRECT_OPS:
             tgt = words[i + 1] if i + 1 < len(words) else ""
             if w in _REDIRECTS | {"&>", "&>>", "<>"} and tgt and not tgt.startswith("&") \
-                    and not tgt.startswith("/dev/") and not (w in (">&",) and tgt.isdigit()):
+                    and not _no_file_target(tgt) and not (w in (">&",) and tgt.isdigit()):
                 targets.append(tgt)
             i += 2
             continue
