@@ -1024,3 +1024,27 @@ class YamlSubset(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ModelWaiverWarnings(SiteCase):
+    """Release 89: a bootstrap model waiver that expired or ends within a week shows in `dureh status` warnings."""
+
+    def setUp(self):
+        super().setUp()
+        self.install()
+        self.s = self.site()
+
+    def test_expired_soon_and_far(self):
+        from datetime import date
+        self.s.config["models"] = {
+            "pm": {"model": "m", "qualification": "waived-bootstrap", "waiver_expires": "2026-10-31"},
+            "worker": {"model": "m", "qualification": "waived-bootstrap", "waiver_expires": "2026-11-05"},
+            "desk": {"model": "m", "qualification": "waived-bootstrap", "waiver_expires": "2026-12-31"},
+            "recount": {"model": "m", "qualification": "run-x"},
+        }
+        w = ops.model_waiver_warnings(self.s, today=date(2026, 11, 2))
+        self.assertEqual(len(w), 2)
+        self.assertIn("expired, dispatch refuses these tiers: pm (2026-10-31)", w[0])
+        self.assertIn("within 7 days: worker (2026-11-05)", w[1])
+        self.assertFalse(any("desk" in x or "recount" in x for x in w))
+        self.assertEqual(ops.model_waiver_warnings(self.s, today=date(2026, 10, 1)), [])

@@ -470,7 +470,7 @@ def status(site: Site) -> dict:
 def status_warnings(site: Site, wis: list[dict]) -> list[str]:
     """Config keys this release ignores, package/org load warnings, and open WIs whose role this organization no
     longer defines (release 46 removed roles from the harness default org)."""
-    out = config_errors(site) + config_warnings(site)
+    out = config_errors(site) + config_warnings(site) + model_waiver_warnings(site)
     try:
         out += site.org.warnings
         open_states = ("proposed", "approved", "dispatched", "staged", "rework", "verified")
@@ -481,6 +481,37 @@ def status_warnings(site: Site, wis: list[dict]) -> list[str]:
                        + "; stop them (`dispatch stop`/`wi amend`) or recreate them for a package role")
     except DurehError as exc:
         out.append(f"organization does not load: {exc}")
+    return out
+
+
+WAIVER_WARN_DAYS = 7
+
+
+def model_waiver_warnings(site: Site, today=None) -> list[str]:
+    """Model tiers whose bootstrap waiver has expired (dispatch refuses them) or ends within WAIVER_WARN_DAYS days
+    (release 89: a waiver that ran out unseen stopped every dispatch of a site)."""
+    from datetime import date
+
+    today = today or date.today()
+    expired, soon = [], []
+    for tier, e in sorted((site.config.get("models") or {}).items()):
+        if not isinstance(e, dict) or e.get("qualification") != "waived-bootstrap":
+            continue
+        try:
+            end = date.fromisoformat(str(e.get("waiver_expires")))
+        except ValueError:
+            continue
+        if end < today:
+            expired.append(f"{tier} ({end.isoformat()})")
+        elif (end - today).days <= WAIVER_WARN_DAYS:
+            soon.append(f"{tier} ({end.isoformat()})")
+    out = []
+    if expired:
+        out.append("model bootstrap waiver expired, dispatch refuses these tiers: " + ", ".join(expired)
+                   + "; ask DUREH (a qualification exam or a waiver decision by the Director)")
+    if soon:
+        out.append(f"model bootstrap waiver ends within {WAIVER_WARN_DAYS} days: " + ", ".join(soon)
+                   + "; ask DUREH now so dispatch does not stop")
     return out
 
 
