@@ -215,7 +215,13 @@ def relink_module(site: Site, actor: str, module_id: str, rev: str, branch: str 
     return out
 
 
-def link_project(site: Site, actor: str, name: str, source: str) -> dict:
+def link_project(site: Site, actor: str, name: str, source: str, approval: str | None = None,
+                 approved: dict | None = None) -> dict:
+    """DataLad-clone `source` into projects/<name> without fetching data. Release 89 (proposal site-permissions
+    section 5; CHARTER row 8, fail-closed): from an agent session the desk needs `approval`, a board Decision bound
+    to this exact step (`github item ask --permit` with [{"op": "link-project", "name": N, "source": S}]), or the
+    Director runs it from his own terminal; `approved` is the check a `site permit apply` plan already made. The
+    record carries the approval."""
     if site.org.role(actor).kind != "desk":
         fail("only the desk links projects")
     if not NAME.match(name):
@@ -223,6 +229,25 @@ def link_project(site: Site, actor: str, name: str, source: str) -> dict:
     dest = site.root / "projects" / name
     if dest.exists():
         fail(f"project already linked: {dest}")
+    from . import permits
+
+    if approved is None:
+        steps = [{"op": "link-project", "name": name, "source": source}]
+        who = permits._who(site, actor)
+        if approval:
+            approved = permits.check_approval(site, approval, steps)
+            used = [e for e in permits.approval_used(site, approved["record"])
+                    if (e["payload"].get("approval") or {}).get("binding") != approved["binding"]]
+            if used:
+                fail(f"refused: the Decision {approved['record']} ({approved['url']}) was already used"
+                     f" ({used[-1]['id']}); ask again for this link")
+        elif who != "Director":
+            fail("refused: a data project link is fail-closed (class C): ask on the board with `github item ask"
+                 " --class C --fail-closed --permit <plan>` (the plan [{\"op\": \"link-project\", \"name\": ..., \"source\":"
+                 " ...}]) and run `site link-project ... --approval <item URL>` after the Director's Decision, or the"
+                 " Director runs it from his own terminal")
+        else:
+            approved = {"by": "Director"}
     env = site.env()
     proc = subprocess.run(["datalad", "clone", source, str(dest)], capture_output=True, text=True, env=env, timeout=1800)
     if proc.returncode != 0:
@@ -236,7 +261,7 @@ def link_project(site: Site, actor: str, name: str, source: str) -> dict:
     if not installed:
         entry["install_error"] = (proc.stderr or proc.stdout).strip()[-500:]
     _config_add(site, "projects", entry)
-    Ledger(site).event("site.project-linked", actor, None, entry)
+    Ledger(site).event("site.project-linked", actor, None, {**entry, "approval": approved})
     entry["generated"] = _after_link(Site(site.root), name)
     return entry
 
