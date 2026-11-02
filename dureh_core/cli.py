@@ -978,7 +978,7 @@ def cmd_github(a):
         _print(github.item_ask(site, _actor(a), a.title, body, a.options, a.layer, a.wi, a.project, a.repo, a.units,
                                fail_closed=a.fail_closed, decide=a.decide, recommend=a.recommend,
                                otherwise=a.otherwise, on_hold=a.on_hold, ask_class=a.ask_class,
-                               command=a.command, state=a.state, priority=a.priority))
+                               command=a.command, state=a.state, priority=a.priority, permit=a.permit))
     elif a.item_command == "close":
         _print(github.item_close(site, _actor(a), a.wi, a.url, a.comment))
     else:
@@ -1846,6 +1846,9 @@ def parser() -> argparse.ArgumentParser:
                         " the Director's hands do (Waiting for Director, label waiting-director, no options; needs"
                         " --command)")
     x.add_argument("--command", help="with --class D: the exact command or step the Director runs")
+    x.add_argument("--permit", help="release 89: a `site permit` plan file (JSON list of steps) this ask binds by "
+                                    "sha256 to Approve 1; `site permit apply --file <plan> --approval <item URL>` "
+                                    "applies exactly it after the Director's Decision (docs/permits.md)")
     x.add_argument("--priority", help="release 87: P0..P3, the board's Priority (required on a layer-3 ask, --class D "
                                       "too; desk rule: P2 unless asked)")
     x.add_argument("--wi", help="the work item the ask belongs to")

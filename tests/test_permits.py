@@ -215,6 +215,113 @@ class Widening(unittest.TestCase):
         self.assertTrue(w({"policy": [loose]}, {"policy": [{**loose, "allow": {"standing_ff": True, "squash": True}}]}))
 
 
+class Approval(PermitBase):
+    """The desk asks on the board with --permit, the Director decides, `github watch` records the Decision, and the
+    desk applies exactly that plan with --approval."""
+
+    STEPS = [{"op": "add", "key": "push.policy", "value": PRIVATE}]
+    ITEM = f"https://github.com/{ORG}/office/issues/11"
+
+    def setUp(self):
+        super().setUp()
+        self.desk()
+        self.plan = self.tmp / "plan.json"
+        self.plan.write_text(json.dumps(self.STEPS))
+
+    def ask(self, *extra, plan=None):
+        (self.tmp / "body.md").write_text("Accept the organization's private repositories.")
+        return self.cli("github", "item", "ask", "--title", "Push policy", "--body-file", str(self.tmp / "body.md"),
+                        "--permit", str(plan or self.plan), *THREE, *extra)
+
+    def decide(self, to="Approve 1", state="OPEN", url=None):
+        self.gh.items = [node("PVTI_11", 11, "Push policy", status="Needs approval", decision=to, layer="3 Director",
+                              state=state)]
+        return Ledger(self.site()).event(github.DECIDED, "desk", None, {"item_id": "PVTI_11", "url": url or self.ITEM,
+                                                                        "from": None, "to": to, "layer": "3 Director",
+                                                                        "director_comments": []})
+
+    def test_ask_binds_the_plan(self):
+        code, out, err = self.ask()
+        self.assertEqual(code, 0, err)
+        [ask] = [e for e in Ledger(self.site()).events() if e["type"] == github.ASKED]
+        p = ask["payload"]
+        self.assertEqual(p["permit"]["sha256"], permits.binding(self.STEPS))
+        self.assertEqual((p["permit"]["option"], p["permit"]["class"], p["fail_closed"]), ("Approve 1", "C", True))
+        create = next(c for c in self.gh.calls if c["argv"][1:3] == ["issue", "create"])
+        self.assertIn(permits.binding(self.STEPS), create["input"])
+        self.assertIn('"org-private"', create["input"])
+
+    def test_ask_refusals(self):
+        b = self.tmp / "b.json"
+        b.write_text(json.dumps([{"op": "set", "key": "push.standing_ff", "value": False}]))
+        code, _, err = self.ask(plan=b)
+        self.assertIn("class B", err)
+        d = self.tmp / "d.json"
+        d.write_text(json.dumps([{"op": "set", "key": "github.director_login", "value": "x"}]))
+        code, _, err = self.ask(plan=d)
+        self.assertIn("class D key", err)
+        code, _, err = self.ask("--options", "one", "two")
+        self.assertIn("at most one option", err)
+        bad = self.tmp / "bad.json"
+        bad.write_text(json.dumps([{"op": "add", "key": "push.policy", "value": {"id": "x"}}]))
+        code, _, err = self.ask(plan=bad)
+        self.assertIn("resulting config is invalid", err)
+        self.assertNotIn(["issue", "create"], self.gh.commands())
+
+    def test_apply_with_the_bound_decision(self):
+        self.assertEqual(self.ask()[0], 0)
+        self.decide()
+        code, out, err = self.cli("site", "permit", "apply", "--file", str(self.plan), "--memo", "board decision",
+                                  "--approval", self.ITEM)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.config()["push"]["policy"], [PRIVATE])
+        [ev] = self.events()
+        a = ev["payload"]["approval"]
+        self.assertEqual((ev["type"], ev["payload"]["by"], a["url"], a["decision"]),
+                         ("site.permit.applied", "desk", self.ITEM, "Approve 1"))
+        comment = [c for c in self.gh.calls if c["argv"][1:3] == ["issue", "comment"]]
+        self.assertIn(ev["id"], comment[-1]["input"])
+        # the same change again is a no-op; another change with this Decision is refused
+        self.assertFalse(permits.apply(self.site(), "desk", self.STEPS, "again", self.ITEM)["applied"])
+        with self.assertRaisesRegex(DurehError, "approves plan .*not this change"):
+            permits.set_key(self.site(), "desk", "push.standing_ff", True, "m", self.ITEM)
+
+    def test_refused_decisions(self):
+        self.assertEqual(self.ask()[0], 0)
+        before = self.config()
+        for to, state, why in (("Discuss", "OPEN", "is Discuss, not Approve 1"),
+                               ("Rejected", "OPEN", "is Rejected"),
+                               ("Approve 2", "OPEN", "not Approve 1"),
+                               ("Approve 1", "CLOSED", "is closed")):
+            self.decide(to, state)
+            with self.assertRaisesRegex(DurehError, why):
+                permits.apply(self.site(), "desk", self.STEPS, "m", self.ITEM)
+        rec = self.decide("Approve 1")
+        self.gh.items = [node("PVTI_11", 11, "Push policy", decision="Discuss")]  # changed on the board since
+        with self.assertRaisesRegex(DurehError, "now Discuss on the board"):
+            permits.apply(self.site(), "desk", self.STEPS, "m", rec["id"])
+        self.gh.fail_next = "HTTP 502"
+        with self.assertRaisesRegex(DurehError, "could not be read.*fail-closed"):
+            permits.apply(self.site(), "desk", self.STEPS, "m", self.ITEM)
+        with self.assertRaisesRegex(DurehError, "no recorded Decision"):
+            permits.apply(self.site(), "desk", self.STEPS, "m", f"https://github.com/{ORG}/office/issues/99")
+        with self.assertRaisesRegex(DurehError, "no such record"):
+            permits.apply(self.site(), "desk", self.STEPS, "m", "EV-nothing")
+        self.unchanged(before)
+
+    def test_a_decision_without_a_permit_ask_binds_nothing(self):
+        self.decide()
+        with self.assertRaisesRegex(DurehError, "was not asked with `github item ask --permit"):
+            permits.apply(self.site(), "desk", self.STEPS, "m", self.ITEM)
+
+    def test_watch_moves_a_permit_ask_without_a_comment(self):
+        """Proposal Q1 (accepted with #112): the bound Decision is enough; other fail-closed asks keep waiting."""
+        self.assertEqual(self.ask()[0], 0)
+        it = {"id": "PVTI_11", "url": self.ITEM, "status": "Needs approval"}
+        lines = github._follow_decision(self.site(), "desk", github.config(self.site()), it, "Approve 1", [], None)
+        self.assertTrue(lines and "held" not in lines[0], lines)
+
+
 class LinkProject(PermitBase):
     def test_desk_needs_a_bound_decision(self):
         self.desk()
