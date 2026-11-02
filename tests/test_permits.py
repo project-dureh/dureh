@@ -420,6 +420,18 @@ class Migrate(PermitBase):
         with mock.patch.object(github, "config", return_value={}), mock.patch.object(github, "gh", side_effect=answer):
             return ops.push(self.site(), "desk", str(self.repo), f"git@github.com:{ORG}/other.git", "main", None)
 
+    def test_cli_migrate_prints_the_plan_unless_apply(self):
+        """Release 89.2: a company ran `migrate push` meaning the plan and it was applied; now --apply writes."""
+        os.environ["DUREH_ACTOR"] = "desk"
+        before = self.config()
+        code, out, err = self.cli("site", "permit", "migrate", "push")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(json.loads(out)["to"])
+        self.unchanged(before)
+        code, _, err = self.cli("site", "permit", "migrate", "push", "--apply")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(self.config()["push"]["policy"])
+
     def test_same_behaviour_after_migration(self):
         os.environ["DUREH_ACTOR"] = "desk"
         ev = self.push("private")

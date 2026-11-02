@@ -893,6 +893,40 @@ class Items(GithubBase):
         self.assertEqual(code, 2)
         self.assertIn("only the desk", err)
 
+    def test_sweep_closes_items_of_promoted_and_long_stopped_wis(self):
+        """Release 89.2: a company board kept a promoted WI and six stopped WIs in Today for a week (a Decision moved
+        them there and nothing moved them on). The sweep closes a WI's own item once the WI is promoted, or stopped
+        for a day; a stop the same day (stop, amend, re-stage) and an ask about the WI are left alone."""
+        from datetime import datetime, timedelta, timezone
+        from dureh_core.records import Ledger
+        self.run_cli("item", "add", "--wi", "WI-0001")  # issue 11, PVTI_11
+        ask = self.ask(wi="WI-0001")  # an ask about WI-0001 (issue 12): never closed by this rule
+        state = {"st": "stopped", "t": datetime.now(timezone.utc).isoformat()}
+        real_events = Ledger.events
+
+        def events(led, wi=None):
+            if wi == "WI-0001" and state["st"] == "stopped":
+                return [{"type": "wi.stopped", "ts": state["t"], "payload": {"reason": "framework frozen"}}]
+            return real_events(led, wi)
+        u = lambda n: f"https://github.com/{ORG}/office/issues/{n}"
+        self.gh.items = [node("PVTI_11", 11, "WI-0001 work", status="Today", decision="Approve 1"),
+                         node(ask["item_id"], ask["number"], "ask", status="Today", decision="Approve 1")]
+        with mock.patch.object(Ledger, "wi_status", lambda led, wi: {"status": state["st"]}), \
+                mock.patch.object(Ledger, "events", events):
+            code, out, err = self.run_cli("sweep", "--dry-run")
+            self.assertEqual(code, 0, err)
+            self.assertEqual(json.loads(out)["would_close"], [], "stopped today: it may be amended and re-staged")
+            state["t"] = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+            code, out, err = self.run_cli("sweep", "--dry-run")
+            self.assertEqual(json.loads(out)["would_close"], [u(11)])
+            state["st"] = "promoted"
+            code, out, err = self.run_cli("sweep")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["closed"], [u(11)])
+        close = [c["argv"] for c in self.gh.calls if c["argv"][1:3] == ["issue", "close"]]
+        self.assertEqual(len(close), 1)
+        self.assertIn("WI-0001 was promoted", close[0][close[0].index("--comment") + 1])
+
     def ask(self, *extra, wi="WI-0001"):
         body = self.tmp / "ask.md"
         body.write_text("Which order?")

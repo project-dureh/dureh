@@ -1457,17 +1457,55 @@ def sweep(site: Site, actor: str, dry_run: bool = False) -> dict:
     Decision and any fail-closed ask are kept (_sweep_keeps)."""
     _require_desk(site, actor)
     cfg = config(site)
-    done = [it for it in board(cfg)["items"] if it["type"] == "Issue" and it["state"] == "OPEN"
-            and it["status"] == "Done" and str(it.get("repo") or "").startswith(cfg["org"] + "/")]
-    links = _linked(site).values()
+    items = [it for it in board(cfg)["items"] if it["type"] == "Issue" and it["state"] == "OPEN"
+             and str(it.get("repo") or "").startswith(cfg["org"] + "/")]
+    linked = _linked(site)
+    finished = _finished_wi_items(site, items, linked)  # release 89.2: a promoted or long-stopped WI's own item
+    done = [it for it in items if it["status"] == "Done" or it["id"] in finished]
+    links = linked.values()
     fail_closed = {row["url"] for row in links if row.get("fail_closed") and row.get("url")}
     asks = {row["url"] for row in links if row.get("ask") and row.get("url")}
-    kept = [it["url"] for it in done if _sweep_keeps(it, fail_closed, asks)]
+    kept = [it["url"] for it in done if it["id"] not in finished and _sweep_keeps(it, fail_closed, asks)]
     todo = [it["url"] for it in done if it["url"] not in kept]
     if not dry_run:
         for url in todo:
-            gh(cfg, ["issue", "close", url, "--comment", f"Done on the board; closed by the desk's sweep.\n\n{DESK_MARK}"])
+            why = finished.get(next((it["id"] for it in done if it["url"] == url), ""))
+            gh(cfg, ["issue", "close", url, "--comment",
+                     (f"{why}; closed by the desk's sweep." if why else "Done on the board; closed by the desk's sweep.")
+                     + f"\n\n{DESK_MARK}"])
         if todo or kept:
-            Ledger(site).event(SWEPT, actor, None, {"closed": todo, "kept": kept})
+            Ledger(site).event(SWEPT, actor, None, {"closed": todo, "kept": kept,
+                                                    **({"finished_wis": sorted(finished.values())} if finished else {})})
     return {"dry_run": dry_run, "closed" if not dry_run else "would_close": todo, "kept": kept}
+
+
+STOPPED_GRACE_DAYS = 1  # a stopped WI may be amended and re-dispatched the same day (11-02: stop, amend, re-stage)
+
+
+def _finished_wi_items(site: Site, items: list[dict], linked: dict) -> dict[str, str]:
+    """Release 89.2 (a company board kept promoted and stopped WIs in Today for a week: a Decision on a WI's item
+    moves it to Today and nothing moved it on): {item_id: reason} for open items that are a WI's own board item (not
+    an ask about it) whose WI is promoted, or stopped for at least STOPPED_GRACE_DAYS days."""
+    from datetime import datetime, timedelta, timezone
+
+    led = Ledger(site)
+    now = datetime.now(timezone.utc)
+    out: dict[str, str] = {}
+    for it in items:
+        row = linked.get(it["id"]) or {}
+        wi = row.get("wi")
+        if not wi or row.get("ask") or it["status"] == "Done":
+            continue
+        st = (led.wi_status(wi) or {}).get("status")
+        if st == "promoted":
+            out[it["id"]] = f"{wi} was promoted"
+        elif st == "stopped":
+            stops = [e for e in led.events(wi) if e["type"] == "wi.stopped"]
+            try:
+                when = datetime.fromisoformat(stops[-1]["ts"].replace("Z", "+00:00")) if stops else None
+            except ValueError:
+                when = None
+            if when and now - when >= timedelta(days=STOPPED_GRACE_DAYS):
+                out[it["id"]] = f"{wi} was stopped ({str(stops[-1]['payload'].get('reason') or '')[:120]})"
+    return out
 

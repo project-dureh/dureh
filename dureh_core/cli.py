@@ -605,8 +605,9 @@ def cmd_site_permit(a):
         _print(permits.remove_item(site, _actor(a), a.key, a.item, a.memo or "", a.approval))
     else:
         if a.what != "push":
-            fail("usage: dureh site permit migrate push [--dry-run]")
-        _print(permits.migrate_push(site, _actor(a), a.dry_run, a.memo))
+            fail("usage: dureh site permit migrate push [--apply]")
+        # release 89.2: a plan unless --apply (a company applied it while asked for the plan only); --dry-run kept
+        _print(permits.migrate_push(site, _actor(a), not a.apply or a.dry_run, a.memo))
 
 
 def cmd_site_workday(a):
@@ -1536,10 +1537,11 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--approval")
     x.add_argument("--actor")
     x = add(pm, "migrate", cmd_site_permit, "migrate push: release-86 pattern entries of push.allowed_remotes -> "
-                                            "push.policy rules with the same meaning (class B); records "
-                                            "site.permit.migrated")
+                                            "push.policy rules with the same meaning (class B); prints the plan, "
+                                            "--apply writes it and records site.permit.migrated")
     x.add_argument("what", choices=["push"])
-    x.add_argument("--dry-run", action="store_true")
+    x.add_argument("--apply", action="store_true", help="write the migration (default: print the plan only)")
+    x.add_argument("--dry-run", action="store_true", help="the default since release 89.2; kept for scripts")
     x.add_argument("--memo")
     x.add_argument("--actor")
     x = add(st, "new-project", cmd_site, "create a records project projects/<id> (git: research-notes/, reports/, "
