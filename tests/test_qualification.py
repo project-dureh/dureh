@@ -201,7 +201,7 @@ class BuildRunScore(QualCase):
         q.build(self.s, "desk", "worker", 3)
         run = q.run(self.s, "desk", "worker", HAIKU)
         self.answer(run, good=False)
-        res = q.score(self.s, "desk", run["run"], local=True)
+        res = q.score(self.s, "desk", run["run"], local=True, rerun=False)
         self.assertEqual(res["status"], "fail")
         self.assertIn("0/3 below the pass rule (3/3)", res["reasons"][0])
 
@@ -239,7 +239,9 @@ class CompareAndPlan(QualCase):
         self.assertTrue(rows[0]["state"].startswith("passed"))
         self.assertEqual(rows[1]["state"], "needs a run (incumbent reference)")
         self.assertEqual(rows[2]["state"], "not needed (a cheaper candidate passed)")
-        self.assertIn("build", q.plan(self.s, "pm")["tiers"]["pm"]["next"])
+        pm = q.plan(self.s, "pm")["tiers"]["pm"]
+        self.assertFalse(pm["examinable"])
+        self.assertIn("not examinable", pm["next"])
 
     def test_cli_compare_and_plan_are_read_only(self):
         self.qual_record("worker", HAIKU)

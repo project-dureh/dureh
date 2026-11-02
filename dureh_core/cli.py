@@ -328,9 +328,9 @@ def cmd_exam(a):
     elif c == "run":
         _print(q.run(site, _actor(a), a.tier, a.model, a.exam_set))
     else:
-        r = q.score(site, _actor(a), a.run, a.local)
+        r = q.score(site, _actor(a), a.run, a.local, rerun=not a.no_rerun)
         _print(r)
-        if r["status"] != "pass":
+        if r["status"] == "fail":
             return 1
 
 
@@ -1367,6 +1367,8 @@ def parser() -> argparse.ArgumentParser:
             " qualification run")
     x.add_argument("--run", required=True)
     x.add_argument("--local", action="store_true")
+    x.add_argument("--no-rerun", action="store_true",
+                   help="score now: no rerun of failing tasks (a prepared rerun is dropped, its first attempt counts)")
     x.add_argument("--actor")
     for name, help_ in (("compare", "tier x model table (score, pass, units per task, date) and the recommendation:"
                                     " cheapest passing model; read-only, allowed with --observe"),
