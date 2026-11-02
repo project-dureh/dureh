@@ -32,6 +32,10 @@ HARNESS_OWNED = ("site", "harness", "startup", "schema_version", "state", "index
 LIST_KEYS = ("push.policy", "push.allowed_remotes")
 GITHUB_D_KEYS = ("enabled", "org", "project", "office_repo", "token_file", "app", "director_login")
 LATER_KEYS = ("models", "members", "office_hours", "containers", "slurm", "limits", "checks")  # release 90
+# TODO(release 90, model qualification exams, docs/exams.md): `models.<tier>` joins the catalog with the quiet-point
+# check: waiver -> `run-<id>` for the same model is class B (the desk; config_errors resolves the run id to a passing
+# qualification record of that tier and model), a new `model` with a passing run is class C (a board Decision), a
+# waiver set or extended is class C fail-closed (the Director only), `models.routing` / `models.fallback_tiers` class C.
 LATER_MODULE_KEYS = ("env_rebuild", "submit", "containers_cmd")
 CONFIG_OPS = ("set", "unset", "add", "remove")
 LINK_OPS = ("link-module", "new-module", "link-project", "new-project")
