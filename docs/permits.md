@@ -40,7 +40,7 @@ dureh site permit add <push.policy|push.allowed_remotes> <json> [--at N] --memo 
 dureh site permit remove <push.policy|push.allowed_remotes> <rule id | url> --memo M [--approval A]
 dureh site permit plan --file P [--json]
 dureh site permit apply --file P --memo M [--approval A]
-dureh site permit migrate push [--dry-run] [--memo M]
+dureh site permit migrate push [--apply] [--memo M]
 ```
 
 Keys are dotted paths (`push.policy`, `github.dashboard_issue`, `modules.<id>.push`). A plan file is a JSON list of
@@ -101,7 +101,8 @@ Turns each release-86 pattern entry of `push.allowed_remotes` (`{"url": "git@git
 entry's `branches`, `standing_ff` and `new_branches`, `tags: false`, `squash: false`, `decision: never`), placed at
 the top of the policy in the entries' order. When policy rules already follow, a `deny` rule over the same
 repositories (`<owner>-rest-private`) keeps what the pattern refused (another branch, a tag) refused. Exact entries
-and the site-wide `standing_ff` stay. Class B; `--dry-run` prints the rules and writes nothing.
+and the site-wide `standing_ff` stay. Class B. Without `--apply` it prints the rules and writes nothing (release
+89.2; `--dry-run` is still accepted); `--apply` writes them, with a backup and a `site.permit.migrated` record.
 
 ## Accepting a new project without DUREH
 
