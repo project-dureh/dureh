@@ -2021,9 +2021,11 @@ def _stale_verify(site: Site, wi: str, run: dict) -> bool:
     return head != run["payload"].get("head")
 
 
-def _supersede_verify(site: Site, actor: str, wi: str, run: dict, new_head: str | None) -> dict:
+def _supersede_verify(site: Site, actor: str, wi: str, run: dict, new_head: str | None,
+                      reason: str = "head moved") -> dict:
     """Record `verification.superseded` for a stale pending verify run (release 61, UR-20261013-02): the item's
-    head moved after submission, so the job's results describe nothing current. A job still pending or running
+    head moved after submission, or (release 89, UR-20261102-01) its declared checks were amended, so the job's
+    results describe nothing current. A job still pending or running
     is cancelled (`scancel`); its result is ignored either way. The slot is free for `verify --submit`."""
     from . import ops
 
@@ -2047,10 +2049,14 @@ def _supersede_verify(site: Site, actor: str, wi: str, run: dict, new_head: str 
         except (OSError, subprocess.SubprocessError):
             cancelled = False
     payload = {"run": run["id"], "old_head": p.get("head"), "new_head": new_head, "job_id": job_id,
-               "reason": "head moved", "job_state": first, "cancelled": cancelled}
+               "reason": reason, "job_state": first, "cancelled": cancelled}
     ev = led.event("verification.superseded", actor, wi, payload, [run["id"]])
-    note = (f"verify run {run['id']} (job {job_id}) was submitted on {str(p.get('head'))[:12]}; {wi} is now at"
-            f" {str(new_head)[:12]}, so its results are ignored")
+    if reason == "checks changed":
+        note = (f"verify run {run['id']} (job {job_id}) ran the checks declared before `wi amend` changed them, so its"
+                " results are ignored")
+    else:
+        note = (f"verify run {run['id']} (job {job_id}) was submitted on {str(p.get('head'))[:12]}; {wi} is now at"
+                f" {str(new_head)[:12]}, so its results are ignored")
     if first not in ops.TERMINAL_STATES:
         note += f"; job {job_id} was {first} and " + ("was cancelled" if cancelled else "may still run; its result is ignored")
     return {"superseded": run["id"], "event": ev["id"], "job_id": job_id, "old_head": p.get("head"), "new_head": new_head,
@@ -2072,11 +2078,14 @@ def verify_submit(site: Site, actor: str, wi: str, timeout: int = 1800) -> dict:
     _, head = changed_paths(site, wi)
     pend = pending_verify(led, wi)
     superseded = None
-    if pend and pend["payload"].get("head") == head:
+    same_checks = bool(pend) and pend["payload"].get("checks") == ctx["checks"]
+    if pend and pend["payload"].get("head") == head and same_checks:
         fail(f"{wi} already has verify run {pend['id']} (job {pend['payload']['job_id']}) waiting to be collected;"
              f" run `dureh verify --wi {wi} --collect` {ops.job_end_phrase(site)}")
-    if pend:  # release 61 (UR-20261013-02): the head moved since; the stale run is voided and this one replaces it
-        superseded = _supersede_verify(site, actor, wi, pend, head)
+    if pend:  # release 61 (UR-20261013-02): the head moved since, or (release 89, UR-20261102-01) the declared
+        # checks were amended: the stale run is voided and this one replaces it
+        superseded = _supersede_verify(site, actor, wi, pend, head,
+                                       "head moved" if pend["payload"].get("head") != head else "checks changed")
     cwd, troot = ctx["cwd"], ctx["troot"]
     _check_venv(wi, cwd)
     plan = _check_env_present(site, wi, cwd, troot)
@@ -2110,8 +2119,10 @@ def verify_collect(site: Site, actor: str, wi: str, run_id: str | None = None) -
             fail(f"verify run {run_id} was already collected as {done['id']} ({done['payload']['status']})")
         gone = _superseded(led, run_id, led.events(wi))
         if gone:
-            fail(f"verify run {run_id} was superseded ({gone['id']}: {wi} moved from {str(gone['payload'].get('old_head'))[:12]}"
-                 f" to {str(gone['payload'].get('new_head'))[:12]}); run `dureh verify --wi {wi} --submit`")
+            why = ("its declared checks were amended" if gone["payload"].get("reason") == "checks changed" else
+                   f"{wi} moved from {str(gone['payload'].get('old_head'))[:12]}"
+                   f" to {str(gone['payload'].get('new_head'))[:12]}")
+            fail(f"verify run {run_id} was superseded ({gone['id']}: {why}); run `dureh verify --wi {wi} --submit`")
     else:
         run = pending_verify(led, wi) or fail(f"{wi} has no submitted verify job to collect; run `dureh verify --wi {wi}"
                                               " --submit` first")
@@ -2120,6 +2131,11 @@ def verify_collect(site: Site, actor: str, wi: str, run_id: str | None = None) -
     paths, head = changed_paths(site, wi)
     if head != p.get("head"):  # release 61: the stale run is voided, whatever its job's state
         r = _supersede_verify(site, actor, wi, run, head)
+        r["next"] = f"run `dureh verify --wi {wi} --submit` (nothing was verified)"
+        r["note"] += f". Run `dureh verify --wi {wi} --submit`: nothing was verified"
+        return r
+    if p.get("checks") != ctx["checks"]:  # release 89 (UR-20261102-01): amended checks void the run, whatever its job
+        r = _supersede_verify(site, actor, wi, run, head, "checks changed")
         r["next"] = f"run `dureh verify --wi {wi} --submit` (nothing was verified)"
         r["note"] += f". Run `dureh verify --wi {wi} --submit`: nothing was verified"
         return r
@@ -2134,8 +2150,6 @@ def verify_collect(site: Site, actor: str, wi: str, run_id: str | None = None) -
     if first not in ops.TERMINAL_STATES and not (first == "UNKNOWN" and have_all):
         fail(f"verify run {run['id']}: job {job_id} is still {first}; nothing was recorded. End your turn: the desk"
              f" re-dispatches the checker {ops.job_end_phrase(site)}, then run `verify --wi {wi} --collect`")
-    if p.get("checks") != ctx["checks"]:
-        fail(f"the declared checks of {wi} changed after verify run {run['id']} was submitted; submit again")
     if not recorded or not recorded[1]:
         led.event("run.status", "desk", wi, {"run": run["id"], "job_id": job_id, "scheduler_state": state, "raw": raw,
                                              "final": True, "collected": True}, [run["id"]])
