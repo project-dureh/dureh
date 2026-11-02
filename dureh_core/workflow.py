@@ -207,7 +207,10 @@ def _local_output_check(site: Site, wi: str, payload: dict) -> None:
 
 
 # --------------------------------------------------------------- dispatch
-def _qualified(entry: dict) -> tuple[bool, str]:
+def _qualified(entry: dict, site: Site | None = None, tier: str | None = None) -> tuple[bool, str]:
+    """Whether a tier entry may be dispatched: a live bootstrap waiver, or (release 90, strict) `run-<id>` naming a
+    passing qualification record for this tier and this exact model, not expired (qualification.check_run). A run id
+    is never taken on trust: without the site to read it from, it is refused (fail-closed)."""
     q = entry.get("qualification")
     if q == "waived-bootstrap":
         exp = entry.get("waiver_expires")
@@ -217,7 +220,11 @@ def _qualified(entry: dict) -> tuple[bool, str]:
             return False, f"bootstrap waiver expired on {exp}"
         return True, f"bootstrap waiver until {exp} (not a qualification)"
     if isinstance(q, str) and q.startswith("run-"):
-        return True, f"qualification record {q}"
+        if site is None or tier is None:
+            return False, f"qualification {q} cannot be checked here (no site record store)"
+        from .qualification import check_run
+
+        return check_run(site, tier, entry)
     return False, "no qualification record or waiver"
 
 
@@ -753,10 +760,20 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None, tie
         if not (tier_reason or "").strip():
             fail("--tier needs --reason: why this item needs that tier (it is recorded with the dispatch)")
     tier = chosen or site.routing().get(kind) or role.tier
-    entry = site.model_for_tier("writer-academic" if p.get("academic") and not checking and not chosen else tier)
-    ok, why = _qualified(entry)
+    eff = "writer-academic" if p.get("academic") and not checking and not chosen else tier
+    entry = site.model_for_tier(eff)
+    ok, why = _qualified(entry, site, eff)
+    fallback = None
     if not ok:
-        fail(f"tier {tier} model {entry.get('model')} cannot be dispatched: {why}")
+        # release 90 (section 8 Q3): with `models.fallback_tiers` the work runs on the nearest qualified higher tier,
+        # recorded and warned; without it (the default) the dispatch is refused, as before
+        from .qualification import fallback_for
+
+        fb = fallback_for(site, eff)
+        if fb is None:
+            fail(f"tier {eff} model {entry.get('model')} cannot be dispatched: {why}")
+        fallback = {"from": eff, "to": fb[0], "reason": why}
+        entry, why = fb[1], f"tier {eff} not qualified ({why}); fallback to tier {fb[0]}: {fb[2]}"
     if not checking and not p.get("parent"):
         # lanes count top-level work with a live agent or a running job; items inside a bundle share their
         # bundle's lane (release 30: orphaned bundles and items waiting for the desk hold none)
@@ -807,6 +824,7 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None, tie
                                             "model": entry["model"], "kind": kind, "kind_reason": kind_reason,
                                             **({"tier": chosen, "tier_reason": tier_reason.strip()} if chosen else {}),
                                             "qualification": why,
+                                            **({"fallback_tier": fallback} if fallback else {}),
                                             "worktree": wt["worktree"], "base": wt["base"], "by": by,
                                             **({"worktree_env": wt["env"]} if wt.get("env") else {}),
                                             **({"verification_bytes": len(block.encode("utf-8"))} if block else {}),
@@ -818,6 +836,7 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None, tie
         save_brief(site, wi, digest, header + "\n\n" + full)
     return {"header": header, "brief": header + "\n\n" + full, "model": entry["model"], "kind": kind,
             "worktree": wt["worktree"], "subagent_type": role.name, "runtime": role.runtime,
+            **({"fallback_tier": fallback} if fallback else {}),
             **({"worktree_env": wt["env"]} if wt.get("env") else {})}
 
 

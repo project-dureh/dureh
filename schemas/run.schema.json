@@ -66,7 +66,8 @@
             "agent",
             "selftest",
             "promotion",
-            "member"
+            "member",
+            "qualification"
           ]
         },
         "status": {

@@ -13,7 +13,7 @@ from pathlib import Path
 from . import SCHEMA_VERSION, yamlsub
 from .org import HARNESS_ROOT, Org
 from .package import check as check_package, role_scope_conflicts
-from .site import RECORD_KINDS, Site
+from .site import MODELS_META_KEYS, RECORD_KINDS, Site
 from .util import DurehError, dumps, fail, git_revision, read_json, utc_now, write_replace
 
 FORBIDDEN_PACKAGE_DIRS = {"state", "records", "persona", "memory"}
@@ -366,6 +366,9 @@ def _config(site: Path, manifest: dict, startup: Path, preset: dict, rev: str | 
     models = {}
     waiver = (date.today() + timedelta(days=int(preset.get("waiver_days", 31)))).isoformat()
     for tier, model in {**DEFAULT_MODELS, **(preset.get("models") or {})}.items():
+        if tier in MODELS_META_KEYS:  # routing, candidates, fallback_tiers: not tiers, kept as given
+            models[tier] = model
+            continue
         entry = model if isinstance(model, dict) else {"model": model}
         entry.setdefault("qualification", "waived-bootstrap")
         if entry["qualification"] == "waived-bootstrap":

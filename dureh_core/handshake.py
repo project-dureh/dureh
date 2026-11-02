@@ -58,11 +58,29 @@ def _dispatch(site: Site) -> list[dict]:
                                          " dispatch refuses it; ask DUREH"))
             continue
         try:
-            ok, why = _qualified(entry)
+            ok, why = _qualified(entry, site, t)
         except ValueError:
             ok, why = False, f"waiver_expires {entry.get('waiver_expires')!r} is not a date"
+        if not ok:  # release 90: with models.fallback_tiers the tier runs on a higher one (warn), else FAIL
+            from .qualification import fallback_for
+
+            fb = fallback_for(site, t)
+            if fb is not None:
+                out.append(_line(name, WARN, f"{entry['model']}: {why}; dispatch falls back to tier {fb[0]}"
+                                             f" ({fb[1]['model']}: {fb[2]}), costs more; run the exam"))
+                continue
         out.append(_line(name, OK if ok else FAIL, f"{entry['model']}: {why}"))
     return out
+
+
+def _qualifications(site: Site, today: date | None) -> list[dict]:
+    """Release 90: `run-*` qualifications that do not hold (FAIL) or end within 7 days (warn)."""
+    from .qualification import warnings
+
+    lines = warnings(site, today=today)
+    if not lines:
+        return [_line("qualifications", OK, "no exam qualification failing or ending within 7 days")]
+    return [_line("qualifications", WARN if "ends within" in w else FAIL, w) for w in lines]
 
 
 def _waivers(site: Site, today: date | None) -> list[dict]:
@@ -220,6 +238,7 @@ def handshake(site: Site, today: date | None = None) -> dict:
     except (DurehError, OSError) as exc:
         st, ses = {}, [_line("session", WARN, f"not checked: {exc}")]
     checks = (_safe("dispatch", _dispatch, site) + _safe("waivers", _waivers, site, today)
+              + _safe("qualifications", _qualifications, site, today)
               + _safe("harness", _harness, site) + ses + _safe("asks", _director, site, st)
               + _safe("upstream", _upstream, site) + _safe("config", _config, site))
     levels = {c["level"] for c in checks}

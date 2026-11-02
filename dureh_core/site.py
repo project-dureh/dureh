@@ -12,7 +12,7 @@ from .util import DurehError, fail, is_within, read_json
 RECORD_KINDS = ("work-item", "run", "decision", "session", "finding", "event")
 READ_ONLY_SITE_DIRS = ("references", "startup")
 _VAR = re.compile(r"\$\{(\w+)(?::-([^}]*))?\}|\$(\w+)")
-TOOL_NAMES = ("wi", "dispatch", "verify", "ledger", "status", "slurm", "path-refs", "purge", "push", "usage", "upstream", "worktree", "day", "slack", "github", "report", "protected", "member")
+TOOL_NAMES = ("wi", "dispatch", "verify", "ledger", "status", "slurm", "path-refs", "purge", "push", "usage", "upstream", "worktree", "day", "slack", "github", "report", "protected", "member", "exam")
 
 # Company-specific names the harness used to carry in code (UP-0069): now config keys with generic defaults. A startup
 # package supplies its own values through `config_defaults` in startup.yaml (merged at install, docs/config.md).
@@ -283,7 +283,9 @@ class Site:
 
 
 ROUTING_KINDS = ("check", "doc", "triage", "build")  # release 54: the kinds of a work unit (an agent spawn)
-MODELS_META_KEYS = ("routing", "routing_doc_roles")  # keys under `models` that are not tiers
+# keys under `models` that are not tiers; release 90: `candidates` (exam candidates, cheapest first) and
+# `fallback_tiers` (the ordered fallback path for an unqualified tier; absent = fail-closed)
+MODELS_META_KEYS = ("routing", "routing_doc_roles", "candidates", "fallback_tiers")
 DEFAULT_ROUTING_DOC_ROLES = ("doc-writer",)
 
 

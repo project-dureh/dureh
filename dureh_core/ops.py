@@ -384,6 +384,9 @@ def config_errors(site: Site, config: dict | None = None, startup: Path | None =
     from .site import routing_errors
 
     out += routing_errors(conf)
+    from .qualification import config_errors as qualification_config_errors
+
+    out += qualification_config_errors(conf)
     from . import github, members, office_hours
 
     out += members.config_errors(site, conf) + office_hours.config_errors(site, conf, startup)
@@ -470,7 +473,9 @@ def status(site: Site) -> dict:
 def status_warnings(site: Site, wis: list[dict]) -> list[str]:
     """Config keys this release ignores, package/org load warnings, and open WIs whose role this organization no
     longer defines (release 46 removed roles from the harness default org)."""
-    out = config_errors(site) + config_warnings(site) + model_waiver_warnings(site)
+    from .qualification import warnings as qualification_warnings
+
+    out = config_errors(site) + config_warnings(site) + model_waiver_warnings(site) + qualification_warnings(site)
     try:
         out += site.org.warnings
         open_states = ("proposed", "approved", "dispatched", "staged", "rework", "verified")

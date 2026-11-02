@@ -41,8 +41,11 @@ class Handshake(ExampleSiteCase):
 
     def qualify_all(self, **override):
         models = dict(self.s.config.get("models") or {})
-        for t in self.s.model_tiers():
-            models[t] = {**models[t], "qualification": "run-x"}
+        for t in self.s.model_tiers():  # release 90: a run id must name a passing qualification record
+            rec = self.led.append("run", "qualification", "desk", None, {
+                "run_type": "qualification", "status": "pass", "tier": t, "model": models[t]["model"], "score": "4/4",
+                "expires": (date.today() + timedelta(days=90)).isoformat()})
+            models[t] = {**models[t], "qualification": rec["id"]}
         models.update(override)
         self.set_config(models=models)
 
