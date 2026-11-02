@@ -789,6 +789,12 @@ def _early_reason(a) -> str:
 def cmd_day(a):
     from . import workday
 
+    if a.day_command == "handshake":  # read-only, before the actor is resolved: works with --observe
+        from .handshake import handshake, render
+
+        res = handshake(_site(a))
+        _print(res if a.json else render(res))
+        return res["exit"]
     site, actor, c = _site(a), _actor(a), a.day_command
     if c == "status":
         st = workday.status(site)
@@ -1157,7 +1163,7 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--site", help="installed site directory (or DUREH_SITE)")
     p.add_argument("--observe", action="store_true",
                    help="read-only: allow only status, wi show/list, ledger query, upstream list/message/inbox (without "
-                        "--record; --watch included), path-refs, usage, verify --self, day status, site session status, "
+                        "--record; --watch included), path-refs, usage, verify --self, day status, day handshake, site session status, "
                         "protected list, member status, github status; never record anything (or DUREH_OBSERVE=1)")
     sub = p.add_subparsers(dest="command", required=True)
 
@@ -1594,6 +1600,11 @@ def parser() -> argparse.ArgumentParser:
                         ).add_subparsers(dest="day_command", required=True)
     x = add(dy, "status", cmd_day, "phase of the day and today's Claude usage against the daily share")
     x.add_argument("--json", action="store_true")
+    x = add(dy, "handshake", cmd_day, "start-of-day check before any work (read-only, allowed with --observe): one "
+                                      "ok/warn/FAIL/skip line per check (dispatch per model tier, model waivers, harness "
+                                      "release, session job, day state, open board asks, blocked WIs, upstream mailbox, "
+                                      "config errors); exit 2 on a FAIL, 1 on a warning, else 0")
+    x.add_argument("--json", action="store_true")
     x = add(dy, "plan", cmd_day, "record the day plan for the Director (text from --file or stdin); with --addendum, "
                                  "an addendum to today's approved, open plan")
     x.add_argument("--goal", help="the day's goal (required for a day plan; optional with --addendum)")
@@ -1927,7 +1938,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 OBSERVE_ALLOWED = {("status", None), ("wi", "show"), ("wi", "list"), ("ledger", "query"), ("upstream", "list"), ("upstream", "message"), ("upstream", "inbox"),
-                   ("path-refs", None), ("usage", None), ("verify", None), ("day", "status"), ("site", "session"),
+                   ("path-refs", None), ("usage", None), ("verify", None), ("day", "status"), ("day", "handshake"), ("site", "session"),
                    ("protected", "list"), ("member", "status"), ("github", "status")}
 
 
@@ -1948,8 +1959,8 @@ def main(argv=None) -> int:
     try:
         args = parser().parse_args(argv)
         _check_observe(args)
-        args.func(args)
-        return 0
+        rc = args.func(args)  # a handler may return its exit code (`day handshake`: 0 ok, 1 warn, 2 FAIL)
+        return rc if isinstance(rc, int) and not isinstance(rc, bool) else 0
     except DurehError as exc:
         print(f"dureh: error: {exc}", file=sys.stderr)
         return 2
