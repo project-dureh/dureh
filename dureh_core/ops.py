@@ -371,13 +371,13 @@ def config_errors(site: Site, config: dict | None = None, startup: Path | None =
                    " of name patterns; empty or absent lists none)")
     push_cfg = conf.get("push")
     if push_cfg is not None and not isinstance(push_cfg, dict):
-        out.append("config push must be an object (allowed_remotes, standing_ff, standing_ff_new_branches)")
+        out.append("config push must be an object (allowed_remotes, standing_ff, standing_ff_new_branches, policy)")
     else:
         for key in ("standing_ff", "standing_ff_new_branches"):
             v = (push_cfg or {}).get(key)
             if v is not None and not isinstance(v, bool):
                 out.append(f"config push.{key} must be true or false (release 58; default false)")
-        out += push_remote_errors(push_cfg or {})
+        out += push_remote_errors(push_cfg or {}) + push_policy_errors(push_cfg or {})
     for i, e in enumerate(conf.get("modules") or []):
         if isinstance(e, dict) and "public" in e and not isinstance(e["public"], bool):
             out.append(f"config modules[{i}].public must be true or false (release 82; default false)")
@@ -462,7 +462,8 @@ def status(site: Site) -> dict:
         "external_jobs": external_jobs(site, led),
         "labels": led.labels(),  # UR-20261008-02: `WI-xxxx (short title)` wherever the text names a WI
         "warnings": status_warnings(site, wis),
-        "push": [push_rule_line(r) for r in push_rules(site.config.get("push") or {})],  # release 82
+        "push": [push_rule_line(r) for r in push_rules(site.config.get("push") or {})]  # release 82
+        + [push_policy_line(r) for r in push_policy(site.config.get("push") or {})],  # release 89
     }
 
 
@@ -2263,20 +2264,298 @@ def squash_message_refusal(message: str | None) -> str | None:
     return None
 
 
-def _squash_commit(site: Site, repo_path: Path, remote: str, dest: str, rev: str, message: str) -> dict:
+def _squash_commit(site: Site, repo_path: Path, remote: str, dest: str, rev: str, message: str,
+                   root: bool = False) -> dict:
     """One commit with `rev`'s tree on top of the remote tip of `dest` (an existing branch), so the push is a
-    fast-forward by construction and none of the local history goes out."""
+    fast-forward by construction and none of the local history goes out. Release 89 (dureh-team#111): `root` (a
+    push.policy rule whose `new_branches` lists the branch, on an empty remote) lets the commit be the root commit
+    of the repository's first branch instead."""
     env = site.env()
     if not dest.startswith("refs/heads/"):
         fail(f"--squash pushes to a branch, not {dest}")
     ff = fast_forward(repo_path, remote, dest, rev, env)
+    tree = git(["rev-parse", f"{rev}^{{tree}}"], repo_path, env=env)
+    if ff["new_branch"] and root and not git(["ls-remote", "--heads", remote], repo_path, env=env).strip():
+        commit = git(["commit-tree", tree, "-m", message], repo_path, env=env)
+        return {"commit": commit, "tree": tree, "parent": None, "source": rev, "root": True}
     if ff["new_branch"]:
-        fail(f"{dest} does not exist on {remote}: --squash goes on top of an existing branch")
-    tip, tree = ff["remote_tip"], git(["rev-parse", f"{rev}^{{tree}}"], repo_path, env=env)
+        fail(f"{dest} does not exist on {remote}: --squash goes on top of an existing branch (or, under a push.policy"
+             " rule whose new_branches lists it, starts an empty repository)")
+    tip = ff["remote_tip"]
     if git(["rev-parse", f"{tip}^{{tree}}"], repo_path, env=env) == tree:
         fail(f"nothing to push: {rev[:12]} has the same tree as the remote tip {tip[:12]}")
     commit = git(["commit-tree", tree, "-p", tip, "-m", message], repo_path, env=env)
     return {"commit": commit, "tree": tree, "parent": tip, "source": rev}
+
+
+# ------------------------------------------------------------ push.policy
+# Release 89 (Director 2026-10-30, dureh-team#111 Approve 1; proposal site-permissions-2026-10-30 section 4): ordered
+# rules over GitHub remotes, matched by owner, repository name, visibility, destination branch and emptiness, after
+# every exact and pattern entry of push.allowed_remotes. The first rule that matches applies; none refuses.
+POLICY_KEYS = ("id", "match", "allow", "require", "deny")
+POLICY_MATCH_KEYS = ("owner", "name", "visibility", "branches", "empty")
+POLICY_ALLOW_KEYS = ("standing_ff", "new_branches", "tags", "squash")
+POLICY_REQUIRE_KEYS = ("decision", "cleanup")
+POLICY_VISIBILITY = ("private", "public", "any")
+POLICY_DECISION = ("never", "first", "always")
+OWNER_RE = re.compile(r"^[A-Za-z0-9-]+$")
+
+
+def _glob_list(v) -> bool:
+    return isinstance(v, list) and all(isinstance(g, str) and g.strip() for g in v)
+
+
+def push_policy_errors(pcfg: dict) -> list[str]:
+    """Shape of `push.policy` (release 89): a list of rules {id, match {owner, name, visibility, branches, empty},
+    allow {standing_ff, new_branches, tags, squash}, require {decision, cleanup}, deny}; unknown keys are refused and
+    ids are unique."""
+    pol = pcfg.get("policy")
+    if pol is None:
+        return []
+    if not isinstance(pol, list):
+        return ["config push.policy must be a list of rules {id, match, allow, require, deny} (release 89)"]
+    out, seen = [], set()
+    for i, r in enumerate(pol):
+        where = f"config push.policy[{i}]"
+        if not isinstance(r, dict):
+            out.append(f"{where} must be an object {{id, match, allow, require, deny}} (release 89)")
+            continue
+        unknown = sorted(set(r) - set(POLICY_KEYS))
+        if unknown:
+            out.append(f"{where} has unknown key(s) {', '.join(unknown)} (allowed: {', '.join(POLICY_KEYS)})")
+        rid = r.get("id")
+        if not isinstance(rid, str) or not rid.strip():
+            out.append(f"{where}.id is required and must be a non-empty string (release 89)")
+        elif rid in seen:
+            out.append(f"{where}.id {rid!r} is used by an earlier rule: ids are unique (release 89)")
+        else:
+            seen.add(rid)
+            where = f"config push.policy[{i}] ({rid})"
+        for part, keys in (("match", POLICY_MATCH_KEYS), ("allow", POLICY_ALLOW_KEYS),
+                           ("require", POLICY_REQUIRE_KEYS)):
+            v = r.get(part)
+            if v is None and part != "match":
+                continue
+            if not isinstance(v, dict):
+                out.append(f"{where}.{part} must be an object with keys {', '.join(keys)}" +
+                           (" (required: match.owner names the account or organization)" if part == "match" else ""))
+                continue
+            unknown = sorted(set(v) - set(keys))
+            if unknown:
+                out.append(f"{where}.{part} has unknown key(s) {', '.join(unknown)} (allowed: {', '.join(keys)})")
+        m = r.get("match") if isinstance(r.get("match"), dict) else {}
+        a = r.get("allow") if isinstance(r.get("allow"), dict) else {}
+        q = r.get("require") if isinstance(r.get("require"), dict) else {}
+        own = m.get("owner")
+        if isinstance(r.get("match"), dict) and not (isinstance(own, list) and own and all(
+                isinstance(o, str) and OWNER_RE.match(o) for o in own)):
+            out.append(f"{where}.match.owner must be a non-empty list of GitHub accounts or organizations (exact names,"
+                       " never globs) (release 89)")
+        for key, v in (("match.name", m.get("name")), ("match.branches", m.get("branches")),
+                       ("allow.new_branches", a.get("new_branches"))):
+            if v is not None and not _glob_list(v):
+                out.append(f"{where}.{key} must be a list of globs (non-empty strings) (release 89)")
+        if m.get("visibility") is not None and m.get("visibility") not in POLICY_VISIBILITY:
+            out.append(f"{where}.match.visibility must be one of {', '.join(POLICY_VISIBILITY)} (release 89; default any)")
+        if m.get("empty") is not None and not isinstance(m.get("empty"), bool):
+            out.append(f"{where}.match.empty must be true, false or null (release 89; default null = either)")
+        for key, v in (("allow.standing_ff", a.get("standing_ff")), ("allow.squash", a.get("squash")),
+                       ("require.cleanup", q.get("cleanup")), ("deny", r.get("deny"))):
+            if v is not None and not isinstance(v, bool):
+                out.append(f"{where}.{key} must be true or false (release 89)")
+        if a.get("tags") is not None and a.get("tags") not in (False, "decision"):
+            out.append(f'{where}.allow.tags must be false or "decision" (release 89; default false)')
+        if q.get("decision") is not None and q.get("decision") not in POLICY_DECISION:
+            out.append(f"{where}.require.decision must be one of {', '.join(POLICY_DECISION)} (release 89; default always)")
+        if q.get("cleanup") is True and a.get("squash") is not True and r.get("deny") is not True:
+            out.append(f"{where}: require.cleanup true needs allow.squash true (a cleaned push is a --squash push)")
+    return out
+
+
+def push_policy(pcfg: dict) -> list[dict]:
+    """`push.policy` as normalized rules (release 89), fail-closed where a key is absent: visibility any, every
+    branch, empty either; standing_ff false, no new branches, tags false, squash false; decision always; cleanup None
+    (= on when GitHub says the repository is public)."""
+    out = []
+    pol = pcfg.get("policy")
+    for r in pol if isinstance(pol, list) else []:
+        if not (isinstance(r, dict) and isinstance(r.get("id"), str) and isinstance(r.get("match"), dict)):
+            continue
+        m, a, q = r["match"], r.get("allow") or {}, r.get("require") or {}
+        own = m.get("owner") if isinstance(m.get("owner"), list) else []
+        out.append({"id": r["id"],
+                    "match": {"owner": [str(o) for o in own if isinstance(o, str)],
+                              "name": list(m["name"]) if _glob_list(m.get("name")) else None,
+                              "visibility": m.get("visibility") if m.get("visibility") in POLICY_VISIBILITY else "any",
+                              "branches": list(m["branches"]) if _glob_list(m.get("branches")) else None,
+                              "empty": m.get("empty") if isinstance(m.get("empty"), bool) else None},
+                    "allow": {"standing_ff": a.get("standing_ff") is True,
+                              "new_branches": list(a["new_branches"]) if _glob_list(a.get("new_branches")) else [],
+                              "tags": "decision" if a.get("tags") == "decision" else False,
+                              "squash": a.get("squash") is True},
+                    "require": {"decision": q.get("decision") if q.get("decision") in POLICY_DECISION else "always",
+                                "cleanup": q.get("cleanup") if isinstance(q.get("cleanup"), bool) else None},
+                    "deny": r.get("deny") is True})
+    return out
+
+
+def _policy_names(rule: dict, owner: str, name: str) -> bool:
+    return owner.lower() in [o.lower() for o in rule["match"]["owner"]] and _globs(rule["match"]["name"], name)
+
+
+def push_policy_covers(pcfg: dict, *urls: str) -> bool:
+    """Could a `push.policy` rule that does not deny push to one of `urls` (owner and name only; the facts are read
+    at push time)? Used where a module counts as push-off (release 89)."""
+    for u in urls:
+        m = GITHUB_REMOTE.match(u or "")
+        if m and any(not r["deny"] and _policy_names(r, *m.groups()) for r in push_policy(pcfg)):
+            return True
+    return False
+
+
+def push_policy_line(rule: dict) -> str:
+    """One status line for a push.policy rule (release 89)."""
+    m, a, q = rule["match"], rule["allow"], rule["require"]
+    head = (f"policy {rule['id']}: GitHub {', '.join(m['owner'])}/{', '.join(m['name']) if m['name'] else '*'};"
+            f" visibility {m['visibility']}; branches {', '.join(m['branches']) if m['branches'] is not None else 'all'}"
+            + ("" if m["empty"] is None else f"; {'empty' if m['empty'] else 'non-empty'} repositories"))
+    if rule["deny"]:
+        return f"{head} -> refused (deny)"
+    cleanup = {True: "on", False: "off", None: "on public repositories"}[q["cleanup"]]
+    return (f"{head} -> standing fast-forward {'on' if a['standing_ff'] else 'off'}; new branches"
+            f" {', '.join(a['new_branches']) or 'none'}; tags {'with a decision' if a['tags'] else 'refused'};"
+            f" squash {'allowed' if a['squash'] else 'refused'}; decision {q['decision']}; cleanup {cleanup}")
+
+
+def github_visibility(site: Site, owner: str, name: str) -> str:
+    """The repository's visibility as GitHub reports it (`gh api repos/<o>/<n> --jq .visibility`, config `github`);
+    any failure raises (release 89, fail-closed)."""
+    from . import github
+
+    cfg = github.config(site)
+    v = github.gh(cfg, ["api", f"repos/{owner}/{name}", "--jq", ".visibility"], timeout=30).strip().lower()
+    if v not in ("private", "public", "internal"):
+        fail(f"GitHub answered {v!r} for the visibility of {owner}/{name}")
+    return v
+
+
+def _first_push(led: Ledger, owner: str, name: str) -> bool:
+    """No `push.completed` to this repository (any URL form of owner/name) in the ledger."""
+    for e in led.events():
+        if e["type"] == "push.completed":
+            m = GITHUB_REMOTE.match(str((e.get("payload") or {}).get("remote") or ""))
+            if m and m.group(1).lower() == owner.lower() and m.group(2).lower() == name.lower():
+                return False
+    return True
+
+
+def push_policy_rule(site: Site, led: Ledger, repo_path: Path, remote: str, url: str, dest: str,
+                     rev: str) -> tuple[dict, dict]:
+    """The first `push.policy` rule that covers pushing `rev` to `dest` on `url`, and the facts it was matched on
+    (release 89, proposal 4.2): visibility from GitHub, empty from `git ls-remote --heads`, new branch and
+    fast-forward from fast_forward(), first = no push.completed to the repository yet. A fact that cannot be read, a
+    `deny` rule or no matching rule refuses."""
+    m = GITHUB_REMOTE.match(url)
+    if not m:
+        fail(f"remote {url!r} is not in push.allowed_remotes (push.policy covers GitHub remotes only)")
+    owner, name = m.groups()
+    rules = [r for r in push_policy(site.config.get("push") or {}) if _policy_names(r, owner, name)]
+    if not rules:
+        fail(f"remote {url!r} is not in push.allowed_remotes and no push.policy rule covers {owner}/{name}: a config"
+             " change (the Director's approval) adds one")
+    env = site.env()
+    facts: dict = {"owner": owner, "name": name}
+    try:
+        facts["visibility"] = github_visibility(site, owner, name)
+    except DurehError as exc:
+        fail(f"push.policy needs the visibility of {owner}/{name} and GitHub could not be asked: {exc}"
+             " (refused, fail-closed)")
+    try:
+        facts["empty"] = not git(["ls-remote", "--heads", remote], repo_path, env=env).strip()
+        if dest.startswith("refs/heads/"):
+            ff = fast_forward(repo_path, remote, dest, rev, env)
+            facts.update(new_branch=ff["new_branch"], fast_forward=ff["fast_forward"], remote_tip=ff["remote_tip"])
+    except DurehError as exc:
+        fail(f"push.policy could not read {url} (refused, fail-closed): {exc}")
+    from .util import utc_now
+
+    facts.update(first=_first_push(led, owner, name), checked_at=utc_now())
+    branch = dest[len("refs/heads/"):] if dest.startswith("refs/heads/") else None
+    for r in rules:
+        mm = r["match"]
+        if mm["visibility"] != "any" and mm["visibility"] != facts["visibility"]:
+            continue
+        if mm["empty"] is not None and mm["empty"] != facts["empty"]:
+            continue
+        if branch is not None:
+            if not _globs(mm["branches"], branch):
+                continue
+        elif dest.startswith("refs/tags/"):  # a tag matches a rule that allows tags (or denies every ref)
+            if not (r["allow"]["tags"] if not r["deny"] else mm["branches"] is None):
+                continue
+        else:
+            continue
+        if r["deny"]:
+            fail(f"config push.policy rule {r['id']} refuses pushing {dest} to {owner}/{name} (deny)")
+        return r, facts
+    fail(f"no push.policy rule covers {dest} on {owner}/{name} ({facts['visibility']},"
+         f" {'empty' if facts['empty'] else 'not empty'}): a config change (the Director's approval) adds one")
+
+
+def push_policy_refusal(rule: dict, facts: dict, dest: str, approval: bool, squash: str | None) -> str | None:
+    """Why the matched policy rule refuses this push, or None (release 89). `require.cleanup` (default: on for a
+    public repository) needs --squash with a clean message; `require.decision` never = standing pushes as allowed
+    (a fast-forward of an existing branch with `allow.standing_ff`, a branch in `allow.new_branches`), anything else
+    with a bound decision; first = always until a push.completed to the repository is recorded; always = a decision
+    every time. A --squash push creates a branch only as the first branch of an empty repository in new_branches."""
+    where = f"config push.policy rule {rule['id']}"
+    a, q = rule["allow"], rule["require"]
+    tag = dest.startswith("refs/tags/")
+    branch = dest[len("refs/heads/"):] if dest.startswith("refs/heads/") else dest
+    cleanup = q["cleanup"] if q["cleanup"] is not None else facts.get("visibility") == "public"
+    if cleanup and not tag and squash is None:
+        return (f"{where} requires cleanup ({'require.cleanup' if q['cleanup'] else 'the repository is public'}): push"
+                " with --squash --message (one commit, no WI ids or assistant trailers); a history push is refused")
+    if squash is not None:
+        if not a["squash"]:
+            return f"{where} does not allow --squash (allow.squash false)"
+        if facts.get("new_branch") and not (facts.get("empty") and _globs(a["new_branches"], branch)):
+            return (f"{dest} does not exist on {facts['owner']}/{facts['name']}: --squash creates a branch only as the"
+                    f" first branch of an empty repository listed in {where} new_branches"
+                    f" ({', '.join(a['new_branches']) or 'none'})")
+    decision = q["decision"] if q["decision"] != "first" else ("always" if facts.get("first") else "never")
+    if approval:
+        return None
+    if tag:
+        return f"{dest} is a tag: a tag push needs a Director decision ({where}); {PUSH_APPROVAL_HINT}"
+    if decision == "always":
+        why = "the first push to this repository needs one" if q["decision"] == "first" else "require.decision always"
+        return f"--approval DECISION is required ({where}: {why}); {PUSH_APPROVAL_HINT}"
+    if facts.get("new_branch"):
+        if not _globs(a["new_branches"], branch):
+            return (f"{dest} does not exist on {facts['owner']}/{facts['name']}: a new branch is not covered by the"
+                    f" standing push ({where} has new_branches {', '.join(a['new_branches']) or 'none'});"
+                    f" {PUSH_APPROVAL_HINT}")
+        return None
+    if not a["standing_ff"]:
+        return f"--approval DECISION is required ({where} has standing_ff off); {PUSH_APPROVAL_HINT}"
+    if not facts.get("fast_forward") and squash is None:
+        return (f"pushing to {dest} on {facts['owner']}/{facts['name']} is not a fast-forward (the remote tip"
+                f" {(facts.get('remote_tip') or '')[:12]} is not an ancestor); the standing authorization covers"
+                f" fast-forwards only, and nothing is ever forced; {PUSH_APPROVAL_HINT}")
+    return None
+
+
+def _rule_after_pattern(site: Site, rule: dict | None, url: str) -> dict | None:
+    """The allowed_remotes rule that applies, after the release-86 private check of a pattern rule. Release 89: when
+    push.policy has rules, a repository the pattern does not cover because GitHub says it is not private falls to the
+    policy (None); a failure to ask still refuses."""
+    refused = rule and pattern_private_refusal(site, rule, rule.get("matched") or url)
+    if not refused:
+        return rule
+    if "could not be asked" not in refused and push_policy(site.config.get("push") or {}):
+        return None
+    fail(refused)
 
 
 def push(site: Site, actor: str, repo: str, remote: str, ref: str, approval: str | None, dry_run: bool = False,
@@ -2289,24 +2568,25 @@ def push(site: Site, actor: str, repo: str, remote: str, ref: str, approval: str
     string entry keeps the earlier meaning. The record carries the matched rule.
     Release 85 (dureh-team#91): `squash` (the commit message) pushes one new commit with the revision's tree on top of
     the remote branch tip instead of the local history; it always needs a decision approved with the same message
-    (`push --approve --squash --message`), and the message carries no WI ids or assistant trailers."""
+    (`push --approve --squash --message`), and the message carries no WI ids or assistant trailers.
+    Release 89 (dureh-team#111): a GitHub remote no allowed_remotes entry covers is checked against `push.policy`
+    (push_policy_rule, push_policy_refusal); there a --squash push follows the rule's decision setting and may start
+    an empty repository. The record carries `policy` {source exact|pattern|policy, rule_id, facts}."""
     if site.org.role(actor).kind != "desk":
         fail("only the desk pushes")
     if squash is not None:
         why = squash_message_refusal(squash)
         if why:
             fail(why)
-        if not approval:
-            fail(f"--squash needs --approval: a squashed push always takes a Director decision; {PUSH_APPROVAL_HINT}")
     led = Ledger(site)
     repo_path = Path(repo).resolve()
     url = git(["remote", "get-url", remote], repo_path, check=False) or remote
-    rule = push_rule(site, url, remote)
-    if rule is None:
+    rule = _rule_after_pattern(site, push_rule(site, url, remote), url)
+    by_policy = rule is None
+    if by_policy and not (push_policy(site.config.get("push") or {}) and GITHUB_REMOTE.match(url)):
         fail(f"remote {url!r} is not in push.allowed_remotes")
-    refused = pattern_private_refusal(site, rule, rule.get("matched") or url)
-    if refused:
-        fail(refused)
+    if squash is not None and not approval and not by_policy:
+        fail(f"--squash needs --approval: a squashed push always takes a Director decision; {PUSH_APPROVAL_HINT}")
     rev = git(["rev-parse", ref], repo_path)
     if approval:
         dec = led.get("decision", approval)
@@ -2317,12 +2597,26 @@ def push(site: Site, actor: str, repo: str, remote: str, ref: str, approval: str
             fail(f"decision {approval} approves " + (f"a squashed push with message {b['squash']!r}" if b.get("squash")
                  else "pushing the history, not a squash") + "; approve this push as it will run")
         dest = _dest_ref(b.get("ref") or ref)
-        refused = push_limit_refusal(rule, dest, True)
+    else:
+        dest = _dest_ref(ref)
+    if by_policy:
+        rule, facts = push_policy_rule(site, led, repo_path, remote, url, dest, rev)
+        refused = push_policy_refusal(rule, facts, dest, bool(approval), squash)
+        if refused:
+            fail(refused)
+        policy = {"source": "policy", "rule_id": rule["id"], "facts": facts}
+    else:
+        policy = {"source": "pattern" if rule.get("pattern") else "exact"}
+    if approval:
+        refused = None if by_policy else push_limit_refusal(rule, dest, True)
         if refused:
             fail(refused)
         wi, refs, extra = dec.get("wi"), [approval], {"decision": approval}
+    elif by_policy:
+        wi, refs = None, []
+        extra = {"approval": STANDING_FF, "fast_forward": True, "remote_tip": facts.get("remote_tip"),
+                 "new_branch": bool(facts.get("new_branch"))}
     else:
-        dest = _dest_ref(ref)
         refused = push_limit_refusal(rule, dest, False)
         if refused:
             fail(refused)
@@ -2346,13 +2640,14 @@ def push(site: Site, actor: str, repo: str, remote: str, ref: str, approval: str
         extra = {"approval": STANDING_FF, "fast_forward": True, "remote_tip": ff["remote_tip"], "new_branch": ff["new_branch"]}
     out_rev = rev
     if squash is not None:
-        sq = _squash_commit(site, repo_path, remote, dest, rev, squash)
+        sq = _squash_commit(site, repo_path, remote, dest, rev, squash,
+                            root=by_policy and bool(facts.get("empty")))  # release 89: checked by the policy above
         out_rev, extra = sq["commit"], {**extra, "squash": {**sq, "message": squash}, "fast_forward": True}
     if not dry_run:
         git(["push", remote, f"{out_rev}:{dest}"], repo_path, env=site.env())
     return led.event("push.completed" if not dry_run else "push.planned", actor, wi,
                      {"repo": str(repo_path), "remote": url, "revision": rev, "ref": dest, **extra,
-                      "rule": rule, "action_class": "compensatable"}, refs)
+                      "rule": rule, "policy": policy, "action_class": "compensatable"}, refs)
 
 
 def push_approve(site: Site, actor: str, repo: str, remote: str, ref: str, memo: str, by: str = "Director",
@@ -2364,9 +2659,18 @@ def push_approve(site: Site, actor: str, repo: str, remote: str, ref: str, memo:
     repo_path = Path(repo).resolve()
     rev = git(["rev-parse", ref], repo_path)
     url = git(["remote", "get-url", remote], repo_path, check=False) or remote
-    rule = push_rule(site, url, remote)
-    refused = rule and (pattern_private_refusal(site, rule, rule.get("matched") or url)
-                        or push_limit_refusal(rule, _dest_ref(ref), True))
+    try:
+        rule = _rule_after_pattern(site, push_rule(site, url, remote), url)
+        if rule is not None:
+            refused = push_limit_refusal(rule, _dest_ref(ref), True)
+        elif push_policy(site.config.get("push") or {}) and GITHUB_REMOTE.match(url):
+            # release 89: a remote under push.policy gets a decision only for a push its rule would take
+            prule, facts = push_policy_rule(site, Ledger(site), repo_path, remote, url, _dest_ref(ref), rev)
+            refused = push_policy_refusal(prule, facts, _dest_ref(ref), True, squash)
+        else:
+            refused = None
+    except DurehError as exc:
+        refused = str(exc)
     if refused:  # release 82: no decision for a push the remote's rule refuses anyway
         fail(refused + "; nothing was recorded")
     return Ledger(site).append("decision", "push-approval", actor, None,

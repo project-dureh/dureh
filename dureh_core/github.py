@@ -485,7 +485,15 @@ def _linked(site: Site) -> dict[str, dict]:
                 row["layer"] = layer
             if e["payload"].get("fail_closed"):
                 row["fail_closed"] = True
+            if e["payload"].get("permit"):
+                row["permit"] = True
     return out
+
+
+def ask_permit(site: Site, url: str | None) -> bool:
+    """Release 89: True when the board ask at `url` binds a `site permit` plan (`github item ask --permit`)."""
+    target = (url or "").strip()
+    return bool(target) and any(row.get("url") == target and row.get("permit") for row in _linked(site).values())
 
 
 def ask_fail_closed(site: Site, url: str | None) -> bool:
@@ -854,7 +862,8 @@ def _follow_decision(site: Site, actor: str, cfg: dict, it: dict, dec, said: lis
     want = decision_status(dec, it.get("status"))
     if not want or not it.get("id"):
         return []
-    if decision_value(dec) != REJECT and ask_fail_closed(site, it.get("url") or "") and not said:
+    if (decision_value(dec) != REJECT and ask_fail_closed(site, it.get("url") or "") and not said
+            and not ask_permit(site, it.get("url") or "")):  # release 89 (proposal Q1): the bound Decision is enough
         return [f"status: {_ref(it)} held: a fail-closed ask moves with a Director comment beside the Decision"]
     try:
         _edit(cfg, _meta(cfg), it["id"], {FIELD_STATUS: want})
@@ -1234,7 +1243,7 @@ def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] |
              wi: str | None = None, project=None, repo: str | None = None, units=None,
              fail_closed: bool = False, decide: str | None = None, recommend: str | None = None,
              otherwise: str | None = None, on_hold: bool = False, ask_class: str | None = None,
-             command: str | None = None, state: str | None = None, priority=None) -> dict:
+             command: str | None = None, state: str | None = None, priority=None, permit=None) -> dict:
     """A decision ask: a `kind:decision` issue (layer 3: assigned to config github.director_login, Status Waiting for
     Director), on the board with its Layer; the answer is the board's Decision, read by `watch`/`status`.
     Release 80 (dureh-team#30 Option 1, the Director's three-line ask of dureh-team#49): a layer-3 ask opens with three
@@ -1251,10 +1260,38 @@ def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] |
     keeps `fail_closed: true` so `day decide --ask <url>` refuses a provisional choice on it.
     Release 83 (the release-82 WIP limit, dureh-team#74): a layer 1-2 ask opens In progress, so it is refused like
     `item set --status "In progress"` while the company already has WIP_IN_PROGRESS open items In progress (one
-    board read, before anything is created); `on_hold` opens it with Status Today and the label `on-hold` instead."""
+    board read, before anything is created); `on_hold` opens it with Status Today and the label `on-hold` instead.
+    Release 89 (proposal site-permissions 3.2): `permit` (a plan file of `dureh site permit`) binds the change to this
+    ask: the plan is checked as `site permit plan` checks it (a B-only plan needs no ask, a class D plan is the
+    Director's terminal only), shown in the body, bound to Approve 1 (at most one option), and the record carries
+    `permit: {sha256, steps, summary, option, class}`; the ask is fail-closed. `site permit apply --approval <url>`
+    then applies exactly that plan after the Director's Decision."""
     from .records import FAIL_CLOSED_LABEL, fallback_lines
 
     _require_desk(site, actor)
+    bound = None
+    if permit is not None:
+        from . import permits
+
+        if ask_class == "D":
+            fail("--permit goes with a decision (--class C), not a --class D step")
+        steps = permits.load_plan(permit)
+        pl = permits.plan(site, steps)
+        if pl["class"] == "B":
+            fail("refused: this plan only tightens or is display/accept (class B): it needs no ask; the desk applies it"
+                 " with `dureh site permit apply --file <plan> --memo ...`")
+        if pl["class"] == "D":
+            fail("refused: this plan changes a class D key (GitHub identity or credentials): only the Director's own"
+                 " terminal runs it; file the exact command with `github item ask --class D --command ...`")
+        if len([o for o in options or [] if o.strip()]) > 1:
+            fail("refused: a --permit ask binds its plan to Approve 1: give at most one option")
+        summary = "; ".join(f"{r['op']} {r.get('key') or r.get('name')}" for r in pl["steps"])[:300]
+        bound = {"sha256": pl["binding"], "steps": len(steps), "summary": summary, "option": permits.PERMIT_OPTION,
+                 "class": pl["class"]}
+        fail_closed = True
+        body = ((body or "").rstrip() + f"\n\n**Permit plan** (class {pl['class']}, {len(steps)} step(s), sha256"
+                f" `{pl['binding']}`; Approve 1 applies exactly this with `dureh site permit apply --approval <this"
+                f" item>`):\n\n```json\n{json.dumps(steps, indent=2, ensure_ascii=False)}\n```\n")
     if ask_class is not None and ask_class not in ("C", "D"):
         fail(f"--class takes C (a decision: Needs approval) or D (a step only the Director's hands do), not {ask_class!r};"
              " classes A and B are not asked (approval-balance plan 3.1)")
@@ -1345,6 +1382,8 @@ def item_ask(site: Site, actor: str, title: str, body: str, options: list[str] |
            "options": len(options), "assignee": assignee, "fields": fields, "chars": len(text)}
     if fail_closed:
         rec["fail_closed"] = True
+    if bound:
+        rec["permit"] = bound
     if on_hold:
         rec["labels"] = {"add": [ON_HOLD_LABEL]}
     Ledger(site).event(ASKED, actor, wi, rec, [wi] if wi else None)

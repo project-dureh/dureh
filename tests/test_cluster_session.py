@@ -445,7 +445,7 @@ class ClusterSession(SiteCase):
         with self.assertRaisesRegex(DurehError, r"this array's first task .*--time 04:00:00 \(from the sbatch-arg, "
                                                 r"per task\).*after today's end"):
             ops.slurm_submit(self.s, "desk", w, script, extra=["--time=04:00:00"], each="sub-01,sub-02")
-        self.assertEqual(list((self.site_root / "logs" / "slurm" / w).glob("each-*")), before, "refusal leaves nothing")
+        self.assertEqual(sorted((self.site_root / "logs" / "slurm" / w).glob("each-*")), before, "refusal leaves nothing")
 
     def test_submit_not_checked_when_workday_off(self):
         w, script = self._job()

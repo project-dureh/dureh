@@ -371,9 +371,15 @@ def _github_rule(site: Site, dureh) -> str:
             " approval) and never set that Decision yourself. Never ask the Director for a decision or an approval in"
             " the chat (release 87, Director, dureh-team#108): it goes on the board with `github item ask`, and the"
             " chat holds only one status line with the item's link. An option that is a step only the Director's hands"
-            " do is not a choice: file it with `github item ask --class D --command \"...\" --priority P2`. Harness and"
-            " company config values (for example `github.dashboard_issue`, push rules) are DUREH's (layer 2): ask DUREH"
-            " by mailbox (`upstream draft`, a UR) or a notice, never the Director on the board; a review"
+            " do is not a choice: file it with `github item ask --class D --command \"...\" --priority P2`. Company"
+            f" permissions in the harness catalog (push rules, a module's push, `github.dashboard_issue`, a data project"
+            f" link; `{dureh} site permit list`) change only through `{dureh} site permit` (release 89), never by"
+            " editing config.json: a class B change (tightening, display) you apply yourself with `site permit"
+            " set|add|remove|apply ... --memo`; for a class C change write the plan file, check it with `site permit"
+            " plan --file <plan>`, ask with `github item ask --class C --fail-closed --permit <plan> ...` and, after"
+            " the Director's Decision, run `site permit apply --file <plan> --memo ... --approval <item URL>` (the"
+            " same for `site link-project --approval <item URL>`). Other harness config values are DUREH's (layer 2):"
+            " ask DUREH by mailbox (`upstream draft`, a UR) or a notice, never the Director on the board; a review"
             " request is Status Needs approval too, with the request letter; a step only the Director does (a command, a"
             " dataset, a login) is Status Waiting for Director. DUREH passes on every Decision (ANSWER, labels, Status)"
             " and sends you a notice; act on the notice. Decision values (Director 2026-10-27): Approve 1, Approve 2,"
@@ -1028,10 +1034,19 @@ def _strip_heredocs(command: str, quoted_only: bool = False) -> str:
 _REDIRECT_OPS = _REDIRECTS | {">&", "<", "<&", "<>", "&>", "&>>", "<<<"}
 
 
+_NO_FILE_TARGETS = {"/dev/null", "/dev/zero", "/dev/stdout", "/dev/stderr", "/dev/stdin", "/dev/tty"}
+
+
+def _no_file_target(tgt: str) -> bool:
+    """True for a redirection target that is a device, not a file: /dev/null and the like, /dev/fd/N."""
+    return tgt in _NO_FILE_TARGETS or re.fullmatch(r"/dev/fd/\d+", tgt) is not None
+
+
 def _split_redirects(words: list[str]) -> tuple[list[str], list[str]]:
     """(words without redirections, file targets of output redirections). `2>/dev/null` arrives as
     `2`, `>`, `/dev/null`: an fd number right before an operator belongs to the redirection, and
-    duplications (`>&2`, `2>&1`) and /dev/* write no file (UR-20261003-05)."""
+    duplications (`>&2`, `2>&1`) and the device files in _NO_FILE_TARGETS write no file (UR-20261003-05); any
+    other /dev path (/dev/shm is a real file system) is a write target (release 89)."""
     out, targets, i = [], [], 0
     while i < len(words):
         w = words[i]
@@ -1041,7 +1056,7 @@ def _split_redirects(words: list[str]) -> tuple[list[str], list[str]]:
         if w in _REDIRECT_OPS:
             tgt = words[i + 1] if i + 1 < len(words) else ""
             if w in _REDIRECTS | {"&>", "&>>", "<>"} and tgt and not tgt.startswith("&") \
-                    and not tgt.startswith("/dev/") and not (w in (">&",) and tgt.isdigit()):
+                    and not _no_file_target(tgt) and not (w in (">&",) and tgt.isdigit()):
                 targets.append(tgt)
             i += 2
             continue

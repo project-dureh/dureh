@@ -10,7 +10,8 @@ from pathlib import Path
 from .util import DurehError, dumps, fail
 
 
-RESERVED_EVENT_PREFIXES = ("workday.", "day.", "session.", "hours.", "slack.", "github.", "harness.", "member.", "office-hours.")  # harness.switched: session start only
+RESERVED_EVENT_PREFIXES = ("workday.", "day.", "session.", "hours.", "slack.", "github.", "harness.", "member.", "office-hours.",
+                           "site.permit.")  # harness.switched: session start only
 
 
 def _percent(value: str) -> float:
@@ -569,7 +570,43 @@ def cmd_site(a):
     elif a.site_command == "new-project":
         _print(sitelinks.new_project(site, _actor(a), a.id, a.purpose))
     else:
-        _print(sitelinks.link_project(site, _actor(a), a.name, a.source))
+        _print(sitelinks.link_project(site, _actor(a), a.name, a.source, approval=a.approval))
+
+
+def _json_value(text: str):
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        fail(f"the value must be JSON (for example 141, false, \"text\" or {{...}}): {exc}")
+
+
+def cmd_site_permit(a):
+    """Release 89 (proposal site-permissions-2026-10-30 sections 2-3): the permit catalog at the site."""
+    from . import permits
+
+    site, c = _site(a), a.permit_command
+    if c == "list":
+        rows = permits.list_rows(site)
+        _print(rows if a.json else permits.render_list(rows))
+    elif c == "show":
+        _print(permits.show(site, a.key, a.history))
+    elif c == "plan":
+        pl = permits.plan(site, permits.load_plan(a.file))
+        _print(permits.public_plan(pl) if a.json else permits.render_plan(pl))
+    elif c == "apply":
+        _print(permits.apply(site, _actor(a), permits.load_plan(a.file), a.memo or "", a.approval))
+    elif c == "set":
+        _print(permits.set_key(site, _actor(a), a.key, _json_value(a.value), a.memo or "", a.approval))
+    elif c == "unset":
+        _print(permits.unset_key(site, _actor(a), a.key, a.memo or "", a.approval))
+    elif c == "add":
+        _print(permits.add_item(site, _actor(a), a.key, _json_value(a.value), a.memo or "", a.at, a.approval))
+    elif c == "remove":
+        _print(permits.remove_item(site, _actor(a), a.key, a.item, a.memo or "", a.approval))
+    else:
+        if a.what != "push":
+            fail("usage: dureh site permit migrate push [--dry-run]")
+        _print(permits.migrate_push(site, _actor(a), a.dry_run, a.memo))
 
 
 def cmd_site_workday(a):
@@ -941,7 +978,7 @@ def cmd_github(a):
         _print(github.item_ask(site, _actor(a), a.title, body, a.options, a.layer, a.wi, a.project, a.repo, a.units,
                                fail_closed=a.fail_closed, decide=a.decide, recommend=a.recommend,
                                otherwise=a.otherwise, on_hold=a.on_hold, ask_class=a.ask_class,
-                               command=a.command, state=a.state, priority=a.priority))
+                               command=a.command, state=a.state, priority=a.priority, permit=a.permit))
     elif a.item_command == "close":
         _print(github.item_close(site, _actor(a), a.wi, a.url, a.comment))
     else:
@@ -1452,9 +1489,58 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--dry-run", action="store_true", help="list every step with its paths and the refusal it would hit; change nothing")
     x.add_argument("--force", action="store_true", help="retire despite structural references (never a dirty or unpushed checkout)")
     x.add_argument("--actor")
-    x = add(st, "link-project", cmd_site, "DataLad-clone a project into projects/<name> without fetching data")
+    x = add(st, "link-project", cmd_site, "DataLad-clone a project into projects/<name> without fetching data; "
+            "release 89: fail-closed, from an agent session it needs --approval (a board Decision bound to this link "
+            "with `github item ask --permit`), or the Director runs it from his own terminal")
     x.add_argument("--name", required=True)
     x.add_argument("--source", required=True)
+    x.add_argument("--approval", help="release 89: the board item URL (or its github.decision.changed record id) whose "
+                                      "Decision approves the plan [{\"op\": \"link-project\", \"name\": N, \"source\": S}]")
+    x.add_argument("--actor")
+    pm = add(st, "permit", cmd_site_permit, "release 89 (docs/permits.md): company permissions switched at the site from "
+             "the harness catalog: list, show, set, unset, add, remove, plan, apply, migrate. The Director's own "
+             "terminal switches any catalog key; the desk applies class B (tightening, display) alone and class C "
+             "with --approval (a board Decision bound by `github item ask --permit`); class D keys are the "
+             "Director's terminal only").add_subparsers(dest="permit_command", required=True)
+    x = add(pm, "list", cmd_site_permit, "the catalog: class, fail-closed, who may switch each key, current value")
+    x.add_argument("--json", action="store_true")
+    x = add(pm, "show", cmd_site_permit, "one key: catalog row and value; --history adds its site.permit.* records")
+    x.add_argument("key")
+    x.add_argument("--history", action="store_true")
+    for name, help_ in (("set", "set a catalog key to a JSON value"), ("unset", "remove a catalog key"),
+                        ("add", "add a rule or entry to push.policy or push.allowed_remotes (JSON)"),
+                        ("remove", "remove a push.policy rule (by id) or a push.allowed_remotes entry (by url)")):
+        event = {"set": "set", "unset": "unset", "add": "added", "remove": "removed"}[name]
+        x = add(pm, name, cmd_site_permit, f"{help_}; validated, backed up under state/config-history/, recorded"
+                                           f" site.permit.{event}")
+        x.add_argument("key")
+        if name in ("set", "add"):
+            x.add_argument("value", help="JSON")
+        if name == "remove":
+            x.add_argument("item", help="the rule id (push.policy) or the entry's url (push.allowed_remotes)")
+        if name == "add":
+            x.add_argument("--at", type=int, help="list index to insert at (default: the end; 0 = the top)")
+        x.add_argument("--memo", required=True)
+        x.add_argument("--approval", help="class C from the desk: the board item URL (or github.decision.changed id) "
+                                          "whose Decision approves exactly this one step")
+        x.add_argument("--actor")
+    x = add(pm, "plan", cmd_site_permit, "dry run of a plan file (a JSON list of steps): validation, each step's "
+                                         "class and old -> new, the approval it needs, the binding sha256")
+    x.add_argument("--file", required=True)
+    x.add_argument("--json", action="store_true")
+    x = add(pm, "apply", cmd_site_permit, "run a plan file in order (config steps and link-module, new-module, "
+                                          "link-project, new-project); a failed step stops and records "
+                                          "site.permit.failed with how to undo; records site.permit.applied")
+    x.add_argument("--file", required=True)
+    x.add_argument("--memo", required=True)
+    x.add_argument("--approval")
+    x.add_argument("--actor")
+    x = add(pm, "migrate", cmd_site_permit, "migrate push: release-86 pattern entries of push.allowed_remotes -> "
+                                            "push.policy rules with the same meaning (class B); records "
+                                            "site.permit.migrated")
+    x.add_argument("what", choices=["push"])
+    x.add_argument("--dry-run", action="store_true")
+    x.add_argument("--memo")
     x.add_argument("--actor")
     x = add(st, "new-project", cmd_site, "create a records project projects/<id> (git: research-notes/, reports/, "
             "runs/; no data, no DataLad) where the package allows it (startup.yaml `projects: {records: true}`); "
@@ -1760,6 +1846,9 @@ def parser() -> argparse.ArgumentParser:
                         " the Director's hands do (Waiting for Director, label waiting-director, no options; needs"
                         " --command)")
     x.add_argument("--command", help="with --class D: the exact command or step the Director runs")
+    x.add_argument("--permit", help="release 89: a `site permit` plan file (JSON list of steps) this ask binds by "
+                                    "sha256 to Approve 1; `site permit apply --file <plan> --approval <item URL>` "
+                                    "applies exactly it after the Director's Decision (docs/permits.md)")
     x.add_argument("--priority", help="release 87: P0..P3, the board's Priority (required on a layer-3 ask, --class D "
                                       "too; desk rule: P2 unless asked)")
     x.add_argument("--wi", help="the work item the ask belongs to")

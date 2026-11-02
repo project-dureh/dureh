@@ -1176,6 +1176,9 @@ class DeskText(GithubBase):
         self.assertIn("the chat holds only one status line with the item's link", text)
         self.assertIn("--layer 3 --priority P2 [--state <현재 상태>] --decide", text)
         self.assertIn("are DUREH's (layer 2): ask DUREH by mailbox (`upstream draft`, a UR) or a notice", text)
+        # release 89: catalog keys change through `site permit`, a class C one with a bound board Decision
+        self.assertIn("site permit list`) change only through", text)
+        self.assertIn("github item ask --class C --fail-closed --permit <plan>", text)
         self.assertIn("github item ask --class D --command \"...\" --priority P2", text)
 
     def test_rule_when_off(self):
