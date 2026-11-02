@@ -304,7 +304,34 @@ def cmd_dispatch_brief(a):
     else:
         print(f"# spawn subagent_type={r['subagent_type']} model={r['model']} kind={r['kind']};"
               " pass everything below as the prompt (pass model= to the Agent tool; the hook refuses another model)")
+    if r.get("fallback_tier"):
+        fb = r["fallback_tier"]
+        print(f"# WARN tier {fb['from']} is not qualified ({fb['reason']}); this brief runs on tier {fb['to']}"
+              f" (models.fallback_tiers): it costs more; run the exam (`dureh exam plan --tier {fb['from']}`)")
     print(r["brief"], end="")
+
+
+def cmd_exam(a):
+    from . import qualification as q
+
+    site = _site(a)
+    c = a.exam_command
+    if c in ("compare", "plan"):
+        res = (q.compare if c == "compare" else q.plan)(site, None if a.all else a.tier)
+        if a.json:
+            _print(res)
+        else:
+            print((q.render_compare if c == "compare" else q.render_plan)(res))
+        return
+    if c == "build":
+        _print(q.build(site, _actor(a), a.tier, a.count))
+    elif c == "run":
+        _print(q.run(site, _actor(a), a.tier, a.model, a.exam_set))
+    else:
+        r = q.score(site, _actor(a), a.run, a.local)
+        _print(r)
+        if r["status"] != "pass":
+            return 1
 
 
 def cmd_dispatch_stop(a):
@@ -1159,7 +1186,7 @@ def _early_args(x, what: str) -> None:
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="dureh", description="DUREH harness tools: wi, dispatch, verify, ledger, event, status, "
                                 "slurm, path-refs, purge, push, usage, site, day, upstream, slack, github, report, "
-                                "authorize-write, worktree, protected, artifact, member (plus install, adapter, hook).")
+                                "authorize-write, worktree, protected, artifact, member, exam (plus install, adapter, hook).")
     p.add_argument("--site", help="installed site directory (or DUREH_SITE)")
     p.add_argument("--observe", action="store_true",
                    help="read-only: allow only status, wi show/list, ledger query, upstream list/message/inbox (without "
@@ -1323,6 +1350,33 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--task")
     x.add_argument("--answers")
     x.add_argument("--actor")
+
+    ex = sub.add_parser("exam", help="per-tier model qualification exams and efficiency selection (release 90)"
+                        ).add_subparsers(dest="exam_command", required=True)
+    x = add(ex, "build", cmd_exam, "freeze 3-5 promoted work items of a tier as an exam set (state/exams/<tier>/)")
+    x.add_argument("--tier", required=True)
+    x.add_argument("--count", type=int, default=4)
+    x.add_argument("--actor")
+    x = add(ex, "run", cmd_exam, "prepare one workspace and one brief per task for a candidate model; the desk spawns"
+            " each brief with that model")
+    x.add_argument("--tier", required=True)
+    x.add_argument("--model", required=True, help="full provider:model string")
+    x.add_argument("--set", dest="exam_set", help="exam set id (default: the tier's newest)")
+    x.add_argument("--actor")
+    x = add(ex, "score", cmd_exam, "run each task's declared checks (one scheduler job, or --local), score, record the"
+            " qualification run")
+    x.add_argument("--run", required=True)
+    x.add_argument("--local", action="store_true")
+    x.add_argument("--actor")
+    for name, help_ in (("compare", "tier x model table (score, pass, units per task, date) and the recommendation:"
+                                    " cheapest passing model; read-only, allowed with --observe"),
+                        ("plan", "per tier, candidate models cheapest first and which still need a run; read-only,"
+                                 " allowed with --observe")):
+        x = add(ex, name, cmd_exam, help_)
+        g = x.add_mutually_exclusive_group(required=True)
+        g.add_argument("--tier")
+        g.add_argument("--all", action="store_true")
+        x.add_argument("--json", action="store_true")
 
     led = sub.add_parser("ledger", help="records").add_subparsers(dest="ledger_command", required=True)
     x = add(led, "add", cmd_ledger_add, "append a record (finding, event, decision)")
@@ -1939,7 +1993,8 @@ def parser() -> argparse.ArgumentParser:
 
 OBSERVE_ALLOWED = {("status", None), ("wi", "show"), ("wi", "list"), ("ledger", "query"), ("upstream", "list"), ("upstream", "message"), ("upstream", "inbox"),
                    ("path-refs", None), ("usage", None), ("verify", None), ("day", "status"), ("day", "handshake"), ("site", "session"),
-                   ("protected", "list"), ("member", "status"), ("github", "status")}
+                   ("protected", "list"), ("member", "status"), ("github", "status"),
+                   ("exam", "compare"), ("exam", "plan")}
 
 
 def _check_observe(args) -> None:

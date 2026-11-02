@@ -777,7 +777,13 @@ def _claude_md(site: Site) -> str:
               "Reference paths are read-only. Records are append-only: correct history by appending an event, never by editing a record."
               + _protected_text(site, dureh), "",
               "## Core values", "", values, "",
-              f"Status and pending gates are injected at session start. For more: `{dureh} status`, `{dureh} ledger query \"SELECT ...\"`, `{dureh} usage`."]
+              f"Status and pending gates are injected at session start. For more: `{dureh} status`, `{dureh} ledger query \"SELECT ...\"`, `{dureh} usage`.",
+              "",
+              f"Model qualification (release 90): a tier runs on a model only with a live waiver or a passing exam of that exact"
+              f" model (`qualification: run-<id>`). `{dureh} exam plan --all` lists the candidate models that still need a run,"
+              f" cheapest first; `{dureh} exam build --tier T`, `{dureh} exam run --tier T --model M` (spawn each printed brief"
+              f" with that model), `{dureh} exam score --run R`, `{dureh} exam compare --all`. Exams run within the daily share;"
+              " applying a pass to config is a `models.<tier>` change (same model class B, a new model class C)."]
     return "\n".join(lines) + "\n"
 
 
