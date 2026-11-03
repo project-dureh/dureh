@@ -215,6 +215,39 @@ def _director(site: Site, st: dict) -> list[dict]:
     return out
 
 
+def _verify_runs(site: Site) -> list[dict]:
+    """Release 91: a staged item whose pending verify job was submitted on an older head, or before `wi amend`
+    changed its declared checks. Its result would be voided at `--collect`; the desk resubmits first."""
+    from .records import Ledger
+    from .workflow import changed_paths, pending_verify
+
+    led = Ledger(site)
+    events = led.events()
+    payloads = led.work_item_payloads(events)
+    stale = []
+    for wi, st in sorted(led._project(events).items()):
+        if st["status"] != "staged":
+            continue
+        run = pending_verify(led, wi)
+        if not run:
+            continue
+        p, why = run["payload"], []
+        try:
+            _, head = changed_paths(site, wi)
+        except DurehError:
+            head = None
+        if head and head != p.get("head"):
+            why.append(f"head moved {str(p.get('head'))[:12]} -> {head[:12]}")
+        if list(p.get("checks") or []) != list((payloads.get(wi) or {}).get("checks") or []):
+            why.append("declared checks amended since")
+        if why:
+            stale.append(f"{wi} run {run['id']} (job {p.get('job_id')}): {', '.join(why)}")
+    if not stale:
+        return [_line("verify runs", OK, "no pending verify run on a moved head or amended checks")]
+    return [_line("verify runs", WARN, "; ".join(stale) + "; its result would be voided at --collect:"
+                  " run `dureh verify --wi <wi> --submit` (supersedes it)")]
+
+
 def _upstream(site: Site) -> list[dict]:
     from .upstream import collaboration
 
@@ -255,7 +288,7 @@ def handshake(site: Site, today: date | None = None) -> dict:
     checks = (_safe("dispatch", _dispatch, site) + _safe("waivers", _waivers, site, today)
               + _safe("qualifications", _qualifications, site, today)
               + _safe("newer models", _newer_models, site)
-              + _safe("harness", _harness, site) + ses + _safe("asks", _director, site, st)
+              + _safe("harness", _harness, site) + ses + _safe("verify runs", _verify_runs, site) + _safe("asks", _director, site, st)
               + _safe("upstream", _upstream, site) + _safe("config", _config, site))
     levels = {c["level"] for c in checks}
     code = 2 if FAIL in levels else 1 if WARN in levels else 0

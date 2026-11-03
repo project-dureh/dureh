@@ -330,6 +330,7 @@ prints one line per check, each `ok`, `warn`, `FAIL` or `skip` (not checked here
 | `harness` | | the mailbox's newest `landed` release is newer than the pinned harness | no `upstream.exchange`: the newest release is not known |
 | `session` (`site session status`) | | no recorded session job, the job is gone or not RUNNING, under 1 h left, an unrecorded session-like job | squeue unavailable |
 | `day` | | an earlier day's plan is still open; past the end | |
+| `verify runs` (release 91) | | a staged item's pending verify job was submitted on an older head or before `wi amend` changed its declared checks (its result would be voided at `--collect`; resubmit with `verify --wi <wi> --submit`) | |
 | `director actions`, `asks` | | an ask or Director step still open with a Decision set (from the GitHub watch's cached view); open asks with no cached view | GitHub off |
 | `blocked WIs` | | WIs blocked on an open upstream request | |
 | `mailbox` | | unread messages from upstream | no exchange |

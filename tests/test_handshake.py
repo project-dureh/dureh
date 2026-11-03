@@ -70,11 +70,35 @@ class Handshake(ExampleSiteCase):
         self.assertEqual(bad, [])
         self.assertEqual(res["exit"], 0)
         names = [c["check"] for c in res["checks"]]
-        for n in ("waivers", "harness", "session", "day", "asks", "blocked WIs", "mailbox", "config"):
+        for n in ("waivers", "harness", "session", "day", "verify runs", "asks", "blocked WIs", "mailbox", "config"):
             self.assertIn(n, names)
         self.assertTrue(any(n.startswith("dispatch ") for n in names))
         self.assertEqual(self.levels(res, "harness"), [hs.SKIP])  # no exchange: the newest release is not known
         self.assertEqual(self.levels(res, "asks"), [hs.SKIP])  # github off
+
+    def test_stale_pending_verify_runs_warn(self):
+        from dureh_core import workflow
+        run = {"id": "run-1", "payload": {"job_id": "77", "head": "a" * 40, "checks": ["pytest -q"]}}
+        proj = {"WI-0001": {"wi": "WI-0001", "status": "staged"}, "WI-0002": {"wi": "WI-0002", "status": "open"}}
+        pay = {"WI-0001": {"checks": ["pytest -q"]}}
+        with unittest.mock.patch.object(Ledger, "_project", return_value=proj), \
+                unittest.mock.patch.object(Ledger, "work_item_payloads", return_value=pay), \
+                unittest.mock.patch.object(workflow, "pending_verify", return_value=run), \
+                unittest.mock.patch.object(workflow, "changed_paths", return_value=([], "a" * 40)):
+            self.assertEqual(hs._verify_runs(self.s)[0]["level"], hs.OK)
+            pay["WI-0001"] = {"checks": ["pytest -q", "ruff check"]}
+            line = hs._verify_runs(self.s)[0]
+            self.assertEqual(line["level"], hs.WARN)
+            self.assertIn("WI-0001 run run-1 (job 77): declared checks amended since", line["text"])
+            self.assertNotIn("WI-0002", line["text"])
+        pay["WI-0001"] = {"checks": ["pytest -q"]}
+        with unittest.mock.patch.object(Ledger, "_project", return_value=proj), \
+                unittest.mock.patch.object(Ledger, "work_item_payloads", return_value=pay), \
+                unittest.mock.patch.object(workflow, "pending_verify", return_value=run), \
+                unittest.mock.patch.object(workflow, "changed_paths", return_value=([], "b" * 40)):
+            line = hs._verify_runs(self.s)[0]
+            self.assertEqual(line["level"], hs.WARN)
+            self.assertIn("head moved aaaaaaaaaaaa -> bbbbbbbbbbbb", line["text"])
 
     def test_expired_waiver_fails_and_soon_warns(self):
         today = date.today()
