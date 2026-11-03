@@ -31,11 +31,13 @@ HARNESS_OWNED = ("site", "harness", "startup", "schema_version", "state", "index
                  "upstream", "session", "env")
 LIST_KEYS = ("push.policy", "push.allowed_remotes")
 GITHUB_D_KEYS = ("enabled", "org", "project", "office_repo", "token_file", "app", "director_login")
-LATER_KEYS = ("models", "members", "office_hours", "containers", "slurm", "limits", "checks")  # release 90
-# TODO(release 90, model qualification exams, docs/exams.md): `models.<tier>` joins the catalog with the quiet-point
-# check: waiver -> `run-<id>` for the same model is class B (the desk; config_errors resolves the run id to a passing
-# qualification record of that tier and model), a new `model` with a passing run is class C (a board Decision), a
-# waiver set or extended is class C fail-closed (the Director only), `models.routing` / `models.fallback_tiers` class C.
+LATER_KEYS = ("members", "office_hours", "containers", "slurm", "limits", "checks")  # release 90
+# Release 91 (docs/exams.md): `models.<tier>` is in the catalog with the quiet-point check (no agent running):
+# waiver -> `run-<id>` for the same model is class B (config_errors resolves the run id to a passing qualification
+# record of that tier and model), a new `model` is class C (a board Decision), a waiver set or extended is the
+# Director's own (class D here: his terminal), `models.routing` / `models.fallback_tiers` / `models.candidates` class C.
+MODEL_TABLE_KEYS = ("routing", "fallback_tiers", "candidates")
+MODEL_TIER_FIELDS = ("model", "qualification", "waiver_expires", "note")
 LATER_MODULE_KEYS = ("env_rebuild", "submit", "containers_cmd")
 CONFIG_OPS = ("set", "unset", "add", "remove")
 LINK_OPS = ("link-module", "new-module", "link-project", "new-project")
@@ -74,6 +76,11 @@ CATALOG = [
      "notes": "plan step; a records project where the package allows it"},
     {"key": "link-project", "class": "C", "fail_closed": True, "T": True, "D+": True, "Desk": False,
      "notes": "plan step, or `site link-project --approval`; a data project link"},
+    {"key": "models.<tier>", "class": "B run id for the same model, C new model, D waiver", "fail_closed": True,
+     "T": True, "D+": True, "Desk": "waiver -> passing run id of the same model; note",
+     "notes": "release 91; only at a quiet point (no agent running); a waiver set or extended is the Director's terminal"},
+    *[{"key": f"models.{k}", "class": "C", "fail_closed": True, "T": True, "D+": True, "Desk": False,
+       "notes": "release 91; only at a quiet point (no agent running)"} for k in MODEL_TABLE_KEYS],
     *[{"key": f"github.{k}", "class": "D", "fail_closed": True, "T": True, "D+": False, "Desk": False,
        "notes": "GitHub identity and credentials: the Director's terminal only"} for k in GITHUB_D_KEYS],
     *[{"key": k, "class": "C (release 90)", "fail_closed": True, "T": False, "D+": False, "Desk": False,
@@ -113,6 +120,13 @@ def catalog_key(key: str) -> str:
     if p[0] in LATER_KEYS or (p[0] == "modules" and len(p) == 3 and p[2] in LATER_MODULE_KEYS):
         fail(f"{key} changes running behaviour: it becomes switchable at the site in release 90 (with the quiet-point"
              " check); until then it stays a config change made under the Director's rule")
+    if p[0] == "models":  # release 91
+        if len(p) == 2 and p[1] in MODEL_TABLE_KEYS:
+            return key
+        if len(p) == 2 or (len(p) == 3 and p[2] in MODEL_TIER_FIELDS and p[1] not in MODEL_TABLE_KEYS):
+            return "models.<tier>"
+        fail(f"{key} is not in the permit catalog: models.<tier>[.{'|'.join(MODEL_TIER_FIELDS)}] and"
+             f" models.{{{','.join(MODEL_TABLE_KEYS)}}} are")
     if p[0] == "push" and len(p) == 2 and p[1] in ("policy", "allowed_remotes", "standing_ff", "standing_ff_new_branches"):
         return key
     if p[0] == "modules" and len(p) == 3 and p[2] == "push":
@@ -338,7 +352,41 @@ def step_class(old_cfg: dict, new_cfg: dict, step: dict) -> tuple[str, list[str]
         return ("B", []) if op == "set" and step["value"] is False else ("C", ["a module's push turns on or is cleared"])
     if row == "github.dashboard_issue":
         return "B", []
+    if row.startswith("models."):
+        return model_class(old_cfg, new_cfg, step["key"])
     return "D", [f"{step['key']} is the Director's key (GitHub identity and credentials)"]
+
+
+def model_class(old_cfg: dict, new_cfg: dict, key: str) -> tuple[str, list[str]]:
+    """Release 91: the class of a `models.*` change (docs/exams.md, Permit catalog)."""
+    p = key.split(".")
+    if p[1] in MODEL_TABLE_KEYS:
+        return "C", [f"models.{p[1]} changes which model runs which work"]
+    tier = p[1]
+    old = ((old_cfg.get("models") or {}).get(tier) or {})
+    new = ((new_cfg.get("models") or {}).get(tier) or {})
+    if not isinstance(old, dict) or not isinstance(new, dict):
+        return "C", [f"models.{tier} is not a mapping"]
+    if not new:
+        return "B", []  # the tier is unmapped: its dispatch is refused (narrowing)
+    q_old, q_new = old.get("qualification"), new.get("qualification")
+    if q_new == "waived-bootstrap" and (q_old != "waived-bootstrap"
+                                        or str(new.get("waiver_expires") or "") > str(old.get("waiver_expires") or "")
+                                        or new.get("model") != old.get("model")):
+        return "D", [f"a bootstrap waiver for {tier} is set or extended: the Director's own switch"]
+    if new.get("model") != old.get("model"):
+        return "C", [f"{tier} moves from {old.get('model')} to {new.get('model')}"]
+    if q_new != q_old and not str(q_new or "").startswith("run-"):
+        return "C", [f"{tier} qualification becomes {q_new!r}"]
+    return "B", []  # waiver -> a passing run id of the same model (config_errors checks the record), note, end date
+
+
+def quiet_point(site: Site) -> list[str]:
+    """Release 91: the agents running now (a models change waits for none)."""
+    from .ops import status
+    from .upstream import _live_agents
+
+    return _live_agents(status(site))
 
 
 # ------------------------------------------------------------------ simulate
@@ -612,6 +660,10 @@ def apply(site: Site, actor: str, steps: list[dict], memo: str, approval: str | 
                             " nothing to do"}
     pl = plan(site, steps)
     _approval_for(who, pl["class"], appr, "this change")
+    if any(str(s.get("key") or "").startswith("models") for s in steps if s["op"] in CONFIG_OPS):
+        live = quiet_point(site)
+        if live:
+            fail("refused: a models change waits for a quiet point (no agent running); running: " + ", ".join(live))
     raw_text = site.config_path.read_text(encoding="utf-8")
     backup = _backup(site, raw_text)
     done, written = [], False

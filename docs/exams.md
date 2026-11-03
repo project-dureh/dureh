@@ -52,8 +52,17 @@ prints a `# WARN` line and `day handshake` shows the tier as warn (not FAIL). Ab
 
 `exam score` never writes config. On a pass it prints `config_entry` (`{model, qualification: run-<id>,
 qualified_on, expires, note}`) and the class: the same model re-qualified (waiver -> run id) is class B, the desk's;
-a new model for a tier is class C (one board Decision per company round). `models.<tier>` is not yet a `site permit`
-catalog key (release 90 TODO in `permits.py`); until then the entry is applied under the Director's config rule.
+a new model for a tier is class C (one board Decision per company round). Since release 91 the entry is applied with
+`dureh site permit set models.<tier> '<config_entry JSON>' --memo ...` (or one field, `models.<tier>.qualification`):
+
+| change | class | who |
+|---|---|---|
+| waiver -> a passing `run-<id>` of the same model; `note`; unmapping a tier | B | the desk alone |
+| a new `model` with a passing run of that model; `models.routing`, `models.fallback_tiers`, `models.candidates` | C | the desk with a bound board Decision (`github item ask --permit`), or the Director's terminal |
+| a bootstrap waiver set or extended (also a new model under the waiver) | D | the Director's terminal only |
+
+A `models` change is applied only at a quiet point: `site permit apply|set` refuses while any agent runs and names
+them. `config_errors` still checks the result (a run id must be a passing qualification of that tier and model).
 
 ## Exam spawns (phase 2: the Claude Code hooks)
 
@@ -113,6 +122,6 @@ week and asks for the switch with the scores; the harness never switches by itse
 ## Not yet (after phase 2)
 
 - pm, desk and planner task kinds (draft validation, typed decisions, plan JSON); spread over lanes and targets.
-- `models.<tier>` in the permit catalog; a finding on a failed exam.
+- A finding on a failed exam.
 - Example tasks run in the session, not in the scheduler job; replay and example tasks are not mixed in one set.
 - Exam spawns are admitted for the Claude Code runtime only (member runtimes are not examined).
