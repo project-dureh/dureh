@@ -407,6 +407,28 @@ class AsyncVerify(SiteCase):
         wf.wi_approve(self.s, "desk", fresh, "ok")
         self.assertNotIn("Last verification", wf.dispatch_brief(self.s, fresh, "pm-modules")["brief"])
 
+    def test_rework_brief_quotes_the_first_error_and_keeps_the_tmp_tree(self):
+        cmd = ("echo collected; echo 'Traceback (most recent call last):'; echo '  File \"x.py\", line 3';"
+               " echo 'ValueError: bad placeholder'; echo \"tmp=$TMPDIR\"; for i in $(seq 1 40); do echo noise-$i; done;"
+               " exit 1")
+        wi = self.item([cmd])
+        self.running()
+        sub = self.submit(wi)
+        self.finish(sub)
+        wf.verify_collect(self.s, "checker", wi)
+        run = self.led.get("run", sub["run"])["payload"]
+        script = open(run["script"]).read()
+        self.assertIn(f"export TMPDIR={run['prefix']}.tmp", script)
+        brief = wf.dispatch_brief(self.s, wi, "pm-modules")["brief"]
+        block = brief.split("Last verification", 1)[1]
+        self.assertIn("first error:\n    Traceback (most recent call last):", block)
+        self.assertIn("ValueError: bad placeholder", block)
+        self.assertIn("last lines:", block)
+        self.assertIn("noise-40", block)
+        self.assertLessEqual(len(wf.last_verification_block(self.led, wi).encode()), wf.VERIFICATION_BLOCK_BYTES)
+        self.assertEqual(wf.first_error("all good\n"), "")
+        self.assertTrue(wf.first_error("a\nE   assert 1 == 2\nb").startswith("E   assert"))
+
     def test_block_is_outside_the_budget_and_capped(self):
         noisy = "python3 -c \"print(('x' * 190 + chr(10)) * 40)\"; exit 1"
         wi = self.item([noisy, noisy + " ", noisy + "  "])

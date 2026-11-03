@@ -976,7 +976,7 @@ def last_verification_block(led: Ledger, wi: str) -> str:
     job = p.get("job") or {}
     here = lambda x: str(led.site.relocate(x)) if x else x  # noqa: E731 - log paths recorded before a site move
 
-    def render(tail_lines: int) -> str:
+    def render(tail_lines: int, err_lines: int = 0) -> str:
         lines = ["", f"Last verification (run {run['id']}, {run['ts'][:19]}Z, head {str(p.get('head') or '-')[:12]}):"
                      f" FAIL, {p.get('note', '')}"]
         for i, c in enumerate(p.get("checks") or [], 1):
@@ -985,7 +985,13 @@ def last_verification_block(led: Ledger, wi: str) -> str:
             secs = f", {c['seconds']} s" if c.get("seconds") is not None else ""
             lines.append(f"- check {i} `{c['command']}`: exit {c['exit']}{secs}"
                          + (f"; log {here(c['log'])}" if c.get("log") else ""))
+            err = (c.get("first_error") or "").splitlines()[:err_lines]
+            if err:  # release 91 (UR-20261103-01): the first error, not only the last lines
+                lines.append("  first error:")
+                lines += [f"    {ln}" for ln in err]
             tail = [ln for ln in (c.get("tail") or "").rstrip("\n").splitlines()][-tail_lines:] if tail_lines else []
+            if tail and err:
+                lines.append("  last lines:")
             lines += [f"    {ln}" for ln in tail]
         if p.get("violations"):
             lines.append("- outside the role's write scope: " + ", ".join(p["violations"]))
@@ -994,11 +1000,14 @@ def last_verification_block(led: Ledger, wi: str) -> str:
         if job.get("log_out"):
             lines.append(f"- job {job.get('job_id')} ({job.get('state')}) logs: {here(job['log_out'])},"
                          f" {here(job.get('log_err'))}")
+            tmp = Path(str(here(job["log_out"]))).with_suffix(".tmp")
+            if tmp.is_dir():
+                lines.append(f"- the checks' temporary files are kept in {tmp}")
         lines.append("Fix these before staging again; the same head fails the same way.")
         return "\n".join(lines) + "\n"
 
-    for n in (VERIFICATION_TAIL_LINES, 10, 5, 2, 0):
-        out = render(n)
+    for n, e in ((VERIFICATION_TAIL_LINES, FIRST_ERROR_LINES), (10, 25), (5, 15), (2, 8), (0, 4), (0, 0)):
+        out = render(n, e)
         if len(out.encode("utf-8")) <= VERIFICATION_BLOCK_BYTES:
             return out
     cut = "\n... (truncated)\n"
@@ -1783,6 +1792,22 @@ def _checks_env(site: Site, wi: str, cwd: Path, troot: Path, plan: dict | None =
     return _apply_exports(env, (plan or {}).get("exports") or {})
 
 
+FIRST_ERROR = re.compile(r"^(Traceback \(most recent call last\)|E {3}|_{3,} .* _{3,}$|FAILED |ERROR |\S*(Error|Exception)\b:?)")
+FIRST_ERROR_LINES = 40
+FIRST_ERROR_CHARS = 3000
+
+
+def first_error(text: str) -> str:
+    """Release 91 (UR-20261103-01): the first error region of a check's output: from the first line that looks like
+    a traceback, an assertion line, a failed-test header or an `...Error:` line, at most FIRST_ERROR_LINES lines and
+    FIRST_ERROR_CHARS characters. Empty when nothing matches (the last lines are then all there is)."""
+    lines = (text or "").splitlines()
+    for i, ln in enumerate(lines):
+        if FIRST_ERROR.match(ln):
+            return "\n".join(lines[i:i + FIRST_ERROR_LINES])[:FIRST_ERROR_CHARS]
+    return ""
+
+
 def _run_checks_local(site: Site, wi: str, cwd: Path, troot: Path, checks: list[str], timeout: int,
                       plan: dict | None = None) -> list[dict]:
     results = []
@@ -1794,10 +1819,12 @@ def _run_checks_local(site: Site, wi: str, cwd: Path, troot: Path, checks: list[
         t0 = time.monotonic()
         try:
             proc = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env)
-            rc, out = proc.returncode, (proc.stdout + proc.stderr)[-2000:]
+            full = proc.stdout + proc.stderr
+            rc, out = proc.returncode, full[-2000:]
         except subprocess.TimeoutExpired:
-            rc, out = "timeout", ""
-        results.append({"command": cmd, "exit": rc, "seconds": round(time.monotonic() - t0, 2), "tail": out})
+            rc, out, full = "timeout", "", ""
+        results.append({"command": cmd, "exit": rc, "seconds": round(time.monotonic() - t0, 2), "tail": out,
+                        **({"first_error": first_error(full)} if rc != 0 and first_error(full) else {})})
     return results
 
 
@@ -1812,7 +1839,10 @@ def _checks_script(wi: str, cwd: Path, troot: Path, site_root: Path, prefix: Pat
              f"cd {shlex.quote(str(cwd))} || exit 96",
              f"export PYTHONDONTWRITEBYTECODE=1 DUREH_SITE={shlex.quote(str(site_root))} DUREH_WORK_ROOT={shlex.quote(str(cwd))}"
              f" DUREH_TARGET_ROOT={shlex.quote(str(troot))} DUREH_WI={shlex.quote(wi)}",
-             "unset DUREH_ACTOR DUREH_AGENT_ID", "status=0"]
+             "unset DUREH_ACTOR DUREH_AGENT_ID", "status=0",
+             # release 91 (UR-20261103-01): the checks' temporary tree (pytest's default basetemp follows TMPDIR)
+             # is kept next to the job log, so a failure can be read after the job
+             f"mkdir -p {shlex.quote(f'{prefix}.tmp')} && export TMPDIR={shlex.quote(f'{prefix}.tmp')}"]
     plan = plan or {"mode": "none", "exports": {}}
     if plan.get("venv"):
         lines.append(f"# checks environment: {plan['mode']} ({plan.get('venv')})")
@@ -1894,10 +1924,13 @@ def _read_check_results(prefix: str, checks: list[str], job_id: str, state: str)
             rc = int(exit_file.read_text().strip())
             ms = ms_file.read_text().strip() if ms_file.is_file() else ""
             seconds = round(int(ms) / 1000, 2) if ms.isdigit() else None
-            tail = out_file.read_text(encoding="utf-8", errors="replace")[-2000:] if out_file.is_file() else ""
+            full = out_file.read_text(encoding="utf-8", errors="replace") if out_file.is_file() else ""
+            tail = full[-2000:]
         else:
-            rc, seconds, tail = "not-run", None, f"no result from job {job_id} ({state})"
-        results.append({"command": check, "exit": rc, "seconds": seconds, "tail": tail, "log": str(out_file)})
+            rc, seconds, tail, full = "not-run", None, f"no result from job {job_id} ({state})", ""
+        err = first_error(full) if rc != 0 else ""
+        results.append({"command": check, "exit": rc, "seconds": seconds, "tail": tail, "log": str(out_file),
+                        **({"first_error": err} if err else {})})
     return results
 
 
