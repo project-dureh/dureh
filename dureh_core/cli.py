@@ -225,7 +225,8 @@ def cmd_wi_amend(a):
     fields = {"acceptance": a.acceptance, "checks": a.check, "constraints": a.constraint, "outputs": a.output,
               "checks_runner": a.checks_runner, "requirements": a.requirements}
     _print(wi_amend(_site(a), _actor(a), a.wi, a.memo, {k: v for k, v in fields.items() if v is not None},
-                    a.rebase, add_constraints=a.add_constraint, reopen=a.reopen))
+                    a.rebase, add_constraints=a.add_constraint, reopen=a.reopen,
+                    rework_notes=a.rework_note))
 
 
 def cmd_wi_show(a):
@@ -1256,7 +1257,9 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--check", action="append", help="replaces the whole list (repeat)")
     x.add_argument("--constraint", action="append", help="replaces the whole list (repeat)")
     x.add_argument("--add-constraint", action="append",
-                   help="appends to the constraints (repeat); the only amendment allowed on a staged item")
+                   help="appends to the constraints (repeat); with --rework-note the only amendments allowed on a staged item")
+    x.add_argument("--rework-note", action="append",
+                   help="an instruction for the next rework (repeat); the next brief carries it outside the brief budget")
     x.add_argument("--output", action="append", help="replaces the whole list (repeat)")
     x.add_argument("--rebase", nargs="?", const="", default=None,
                    help="move the base to REV (default: the target's current HEAD); the next brief tells the worker to rebase")

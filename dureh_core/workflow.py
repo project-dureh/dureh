@@ -595,13 +595,18 @@ AMENDABLE = ("acceptance", "checks", "constraints", "outputs", "checks_runner", 
 
 
 def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: str | None = None,
-             add_constraints: list[str] | None = None, reopen: bool = False) -> dict:
+             add_constraints: list[str] | None = None, reopen: bool = False,
+             rework_notes: list[str] | None = None) -> dict:
     """Change a WI's acceptance, checks, constraints or outputs, or move its base, without a replacement WI.
 
     The goal, role and target never change (that is a new WI). The amendment is approved like Gate 1:
     --memo carries the Director's words (or, in workday mode, the plan approval that covers it).
     `add_constraints` (`--add-constraint`, release 37, UR-20261005-02) appends to the constraints (after any
     `--constraint` replacement); it alone is allowed on a staged item, since it only adds context for a rework.
+    `rework_notes` (`--rework-note`, release 91) records instructions for the next rework on the amendment event,
+    not in the payload: the next worker or checker brief carries them in a block outside the brief budget
+    (rework_notes_block), so a long rework instruction never pushes a brief over its limit. Allowed where
+    `--add-constraint` is (also on a staged item).
     `reopen` (`--reopen`, release 45) re-opens a verified item that is not promoted: the amendment records
     `reopened_from: verified`, a `wi.reopened` event voids the verification and moves the item back to approved
     for a new dispatch, with no `dispatch stop`. Fields are optional with it. A promoted item never changes."""
@@ -617,6 +622,9 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
     adds = [c for c in (add_constraints or []) if c is not None]
     if any(not c.strip() for c in adds):
         fail("--add-constraint needs text")
+    notes = [n for n in (rework_notes or []) if n is not None]
+    if any(not n.strip() for n in notes):
+        fail("--rework-note needs text")
     if reopen and st != "verified":
         fail(f"{wi} is {st}; --reopen is for a verified item that is not promoted"
              + (" (amend this item without it)" if st in ("approved", "rework", "dispatched", "proposed", "stopped") else ""))
@@ -627,16 +635,16 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
     parent = rec["payload"].get("parent")
     if reopen and parent and led.wi_status(parent)["status"] in ("verified", "promoted"):
         fail(f"{wi} belongs to bundle {parent}, which is {led.wi_status(parent)['status']}; re-open the bundle first")
-    only_adds = bool(adds) and not any(v is not None for v in fields.values()) and rebase is None
+    only_adds = bool(adds or notes) and not any(v is not None for v in fields.values()) and rebase is None
     # release 45: the checks runner alone may change on a staged item (it changes where checks run, not the work)
-    only_runner = not adds and rebase is None and [k for k, v in fields.items() if v is not None] in (["checks_runner"],
+    only_runner = not adds and not notes and rebase is None and [k for k, v in fields.items() if v is not None] in (["checks_runner"],
                                                                                                        ["requirements"])
     pend = pending_verify(led, wi) if st == "staged" and only_runner else None
     # release 61 (UR-20261013-02): a pending job whose head moved is stale; the next `verify --submit` supersedes it
     if pend and not _stale_verify(site, wi, pend):
         fail(f"{wi} has a submitted verify job; collect it before changing its checks runner or requirements")
     if st == "staged" and not (only_adds or only_runner):
-        fail(f"{wi} is staged; only --add-constraint (which appends) is allowed on a staged item. To change"
+        fail(f"{wi} is staged; only --add-constraint (which appends) and --rework-note are allowed on a staged item. To change"
              f" acceptance, checks, constraints, outputs or the base: `dureh dispatch stop --wi {wi} --reason ...`, then"
              f" `dureh wi amend --wi {wi} --memo ...` with the change (the amendment re-opens the stopped item)")
     if st not in ("approved", "rework", "dispatched", "proposed", "stopped", "staged", "verified"):
@@ -663,9 +671,9 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
         if root is None or not (root / ".git").exists():
             fail(f"{wi} targets {rec['payload']['target']}, which is not a git repository")
         rebase_onto = git(["rev-parse", rebase or "HEAD"], root)
-    if not fields and not rebase_onto and not reopen:
-        fail("nothing to amend: give --acceptance, --check, --constraint, --add-constraint, --output, --checks-runner,"
-             " --requirements or --rebase")
+    if not fields and not rebase_onto and not reopen and not notes:
+        fail("nothing to amend: give --acceptance, --check, --constraint, --add-constraint, --rework-note, --output,"
+             " --checks-runner, --requirements or --rebase")
     draft = {"id": wi, "payload": {**rec["payload"], **fields}}
     role = site.org.role(rec["payload"]["role"])
     n, limit = brief_bytes(site, draft), _brief_limit(site, role)
@@ -678,6 +686,7 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
     ev = led.event("wi.amended", actor, wi, {"fields": fields, "before": before, "rebase_onto": rebase_onto,
                                               "memo": memo, "by": "Director",
                                               **({"added_constraints": adds, "status": st} if adds else {}),
+                                              **({"rework_notes": notes, "status": st} if notes else {}),
                                               **({"reopened_from": "verified"} if reopen else {})})
     if st == "stopped":  # an amended stopped item is re-opened with the same approval words
         # release 78: the re-approval names the approver of the item's last Gate 1, never an assumed Director
@@ -816,6 +825,7 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None, tie
     # release 70 (UR-20261016-01): a checker brief carries the staging summary the same way, with its own cap
     staging = staging_summary_block(led, wi) if checking else ""
     block += staging
+    block += rework_notes_block(led, wi)  # release 91: the desk's rework instructions, outside the budget
     block += _env_brief_line(wt)  # release 47: outside the budget, as the verification block
     full = text + block
     digest = hashlib.sha256(full.encode("utf-8")).hexdigest()[:16]
@@ -905,6 +915,31 @@ VERIFICATION_TAIL_LINES = 20
 
 
 STAGING_BLOCK_BYTES = 1024  # release 70: the checker brief's staging summary, outside the brief budget
+
+
+REWORK_NOTES_BYTES = 2048  # release 91: the desk's rework instructions, outside the brief budget
+
+
+def rework_notes_block(led: Ledger, wi: str) -> str:
+    """The "Rework instructions" block (release 91): every `wi amend --rework-note` of the WI, oldest first, at most
+    REWORK_NOTES_BYTES (the oldest notes are dropped first, then the newest is cut). Empty without notes."""
+    notes = [(e["ts"][:16], n) for e in led.events(wi) if e["type"] == "wi.amended"
+             for n in (e["payload"].get("rework_notes") or [])]
+    if not notes:
+        return ""
+    head = "\nRework instructions from the desk (wi amend --rework-note; oldest first, outside the brief budget):\n"
+    rows = [f"- {ts}Z {' '.join(n.split())}\n" for ts, n in notes]
+    dropped = 0
+    while len(rows) > 1 and len((head + "".join(rows)).encode("utf-8")) > REWORK_NOTES_BYTES:
+        rows.pop(0)
+        dropped += 1
+    if dropped:
+        head += f"- ({dropped} older note(s) left out; `dureh wi show --wi {wi}` lists them)\n"
+    out = head + "".join(rows)
+    if len(out.encode("utf-8")) > REWORK_NOTES_BYTES:
+        cut = " ... (truncated)\n"
+        out = out.encode("utf-8")[:REWORK_NOTES_BYTES - len(cut.encode("utf-8"))].decode("utf-8", "ignore") + cut
+    return out
 
 
 def staging_summary_block(led: Ledger, wi: str) -> str:
