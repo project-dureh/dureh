@@ -205,6 +205,16 @@ def _director(site: Site, st: dict) -> list[dict]:
         return out + [_line("asks", WARN, f"{len(open_asks)} open ({', '.join(ref(p) for p in open_asks)}); Decisions not"
                                           " checked (no cached board view): read them with `github status`")]
     decisions = cache.get("decisions") or {}
+    items = cache.get("items") or {}
+    done = lambda p: (items.get(p.get("item_id")) or {}).get("state") in ("CLOSED", "MERGED") \
+        or (items.get(p.get("item_id")) or {}).get("status") == "Done"  # noqa: E731
+    gone = [p for p in open_asks if done(p)]
+    open_asks = [p for p in open_asks if not done(p)]
+    if gone:
+        out.append(_line("asks", OK, f"{len(gone)} closed or Done on the board, not in the records: "
+                                     f"{', '.join(ref(p) for p in gone)}"))
+    if not open_asks:
+        return out
     decided = [f"{ref(p)} -> {decisions[p['item_id']]}" for p in open_asks if decisions.get(p.get("item_id"))]
     waiting = [ref(p) for p in open_asks if not decisions.get(p.get("item_id"))]
     seen = f" (board view of {cache.get('polled') or '?'})"

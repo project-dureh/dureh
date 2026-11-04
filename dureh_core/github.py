@@ -726,8 +726,11 @@ def poll(site: Site, actor: str, cfg: dict) -> list[str]:
         new_com[iid] = sorted(before | set(ids))[-200:]
     follow, pending = _followups(b["items"], {} if first else dict(old.get("followups") or {}), first, changed)
     lines += follow
+    # item state and Status beside the Decisions: the desk handshake leaves out asks closed or Done on the board
+    # (an ask closed by hand on GitHub has no ledger close event; 2026-11-04 both desks warned on closed items)
+    states = {it["id"]: {"state": it.get("state"), "status": it.get("status")} for it in b["items"]}
     _save_state(site, {"board": f"{cfg['org']}/{cfg['project']}", "decisions": new_dec, "comments": new_com,
-                       "followups": pending,
+                       "items": states, "followups": pending,
                        "polled": time.strftime("%Y-%m-%dT%H:%M:%S"),
                        "polled_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **issue_state})
     return lines + issue_lines

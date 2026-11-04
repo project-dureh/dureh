@@ -188,6 +188,19 @@ class Handshake(ExampleSiteCase):
         self.assertEqual([x["level"] for x in lines], [hs.OK, hs.OK, hs.WARN])
         self.assertIn("1 wait for the Director: office#2", lines[1]["text"])
         self.assertIn("office#1 -> Approve 1", lines[2]["text"])
+        # an ask closed by hand on GitHub (no ledger close) or Done on the board is not "decided, still open"
+        github._save_state(self.s, {"board": "example-org/1", "decisions": {"I1": "Approve 1", "I2": "Approve 1"},
+                                    "items": {"I1": {"state": "CLOSED", "status": "Done"},
+                                              "I2": {"state": "OPEN", "status": "Done"}}})
+        lines = hs._director(self.s, {})
+        self.assertEqual([x["level"] for x in lines], [hs.OK])
+        self.assertIn("2 closed or Done on the board, not in the records: office#1, office#2", lines[0]["text"])
+        github._save_state(self.s, {"board": "example-org/1", "decisions": {"I1": "Approve 1", "I2": "Approve 1"},
+                                    "items": {"I1": {"state": "CLOSED", "status": "Done"},
+                                              "I2": {"state": "OPEN", "status": "Today"}}})
+        lines = hs._director(self.s, {})
+        self.assertEqual([x["level"] for x in lines], [hs.OK, hs.WARN])
+        self.assertIn("decided, still open: office#2 -> Approve 1", lines[1]["text"])
 
     def test_cli_exit_json_and_observe(self):
         self.qualify_all()
