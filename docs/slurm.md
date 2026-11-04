@@ -335,7 +335,11 @@ dureh verify --wi <WI> --collect [RUN]   # checker, re-dispatched: record the ve
 - **Rework briefs.** `dispatch brief` for an item with rework > 0 appends a "Last verification" block from the
   latest failed verify run: failed check ids and commands, exit codes, the last 20 output lines of each, per-check
   log paths and the job logs, violations and missing outputs. The block is outside the 2048-byte brief budget
-  (which covers the desk-written part) and capped at 4 KB.
+  (which covers the desk-written part) and capped at 4 KB. Since release 91 (UR-20261103-01) each failed check also
+  shows its **first error** (from the first traceback, `E   ` assertion, failed-test header or `...Error:` line, up to
+  40 lines; shortened first when the block is over its cap), and the checks job runs with `TMPDIR` set to
+  `<prefix>.tmp` next to its log (pytest's default basetemp follows it), kept after the job and named in the block.
+  A long rework instruction from the desk goes in `wi amend --rework-note` (its own block, outside the budget, 2 KB).
 - **Checker briefs (release 70, UR-20261016-01).** `dispatch brief --role <checker>` for a staged item appends a
   "Staged" block: the latest `wi.staged` record, its head, who staged it and its summary (the stager's own
   account, not evidence). Like the rework block it is outside the brief budget, capped at 1 KB

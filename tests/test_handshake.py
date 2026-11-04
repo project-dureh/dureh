@@ -70,11 +70,35 @@ class Handshake(ExampleSiteCase):
         self.assertEqual(bad, [])
         self.assertEqual(res["exit"], 0)
         names = [c["check"] for c in res["checks"]]
-        for n in ("waivers", "harness", "session", "day", "asks", "blocked WIs", "mailbox", "config"):
+        for n in ("waivers", "harness", "session", "day", "verify runs", "asks", "blocked WIs", "mailbox", "config"):
             self.assertIn(n, names)
         self.assertTrue(any(n.startswith("dispatch ") for n in names))
         self.assertEqual(self.levels(res, "harness"), [hs.SKIP])  # no exchange: the newest release is not known
         self.assertEqual(self.levels(res, "asks"), [hs.SKIP])  # github off
+
+    def test_stale_pending_verify_runs_warn(self):
+        from dureh_core import workflow
+        run = {"id": "run-1", "payload": {"job_id": "77", "head": "a" * 40, "checks": ["pytest -q"]}}
+        proj = {"WI-0001": {"wi": "WI-0001", "status": "staged"}, "WI-0002": {"wi": "WI-0002", "status": "open"}}
+        pay = {"WI-0001": {"checks": ["pytest -q"]}}
+        with unittest.mock.patch.object(Ledger, "_project", return_value=proj), \
+                unittest.mock.patch.object(Ledger, "work_item_payloads", return_value=pay), \
+                unittest.mock.patch.object(workflow, "pending_verify", return_value=run), \
+                unittest.mock.patch.object(workflow, "changed_paths", return_value=([], "a" * 40)):
+            self.assertEqual(hs._verify_runs(self.s)[0]["level"], hs.OK)
+            pay["WI-0001"] = {"checks": ["pytest -q", "ruff check"]}
+            line = hs._verify_runs(self.s)[0]
+            self.assertEqual(line["level"], hs.WARN)
+            self.assertIn("WI-0001 run run-1 (job 77): declared checks amended since", line["text"])
+            self.assertNotIn("WI-0002", line["text"])
+        pay["WI-0001"] = {"checks": ["pytest -q"]}
+        with unittest.mock.patch.object(Ledger, "_project", return_value=proj), \
+                unittest.mock.patch.object(Ledger, "work_item_payloads", return_value=pay), \
+                unittest.mock.patch.object(workflow, "pending_verify", return_value=run), \
+                unittest.mock.patch.object(workflow, "changed_paths", return_value=([], "b" * 40)):
+            line = hs._verify_runs(self.s)[0]
+            self.assertEqual(line["level"], hs.WARN)
+            self.assertIn("head moved aaaaaaaaaaaa -> bbbbbbbbbbbb", line["text"])
 
     def test_expired_waiver_fails_and_soon_warns(self):
         today = date.today()
@@ -164,6 +188,19 @@ class Handshake(ExampleSiteCase):
         self.assertEqual([x["level"] for x in lines], [hs.OK, hs.OK, hs.WARN])
         self.assertIn("1 wait for the Director: office#2", lines[1]["text"])
         self.assertIn("office#1 -> Approve 1", lines[2]["text"])
+        # an ask closed by hand on GitHub (no ledger close) or Done on the board is not "decided, still open"
+        github._save_state(self.s, {"board": "example-org/1", "decisions": {"I1": "Approve 1", "I2": "Approve 1"},
+                                    "items": {"I1": {"state": "CLOSED", "status": "Done"},
+                                              "I2": {"state": "OPEN", "status": "Done"}}})
+        lines = hs._director(self.s, {})
+        self.assertEqual([x["level"] for x in lines], [hs.OK])
+        self.assertIn("2 closed or Done on the board, not in the records: office#1, office#2", lines[0]["text"])
+        github._save_state(self.s, {"board": "example-org/1", "decisions": {"I1": "Approve 1", "I2": "Approve 1"},
+                                    "items": {"I1": {"state": "CLOSED", "status": "Done"},
+                                              "I2": {"state": "OPEN", "status": "Today"}}})
+        lines = hs._director(self.s, {})
+        self.assertEqual([x["level"] for x in lines], [hs.OK, hs.WARN])
+        self.assertIn("decided, still open: office#2 -> Approve 1", lines[1]["text"])
 
     def test_cli_exit_json_and_observe(self):
         self.qualify_all()

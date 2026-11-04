@@ -407,6 +407,28 @@ class AsyncVerify(SiteCase):
         wf.wi_approve(self.s, "desk", fresh, "ok")
         self.assertNotIn("Last verification", wf.dispatch_brief(self.s, fresh, "pm-modules")["brief"])
 
+    def test_rework_brief_quotes_the_first_error_and_keeps_the_tmp_tree(self):
+        cmd = ("echo collected; echo 'Traceback (most recent call last):'; echo '  File \"x.py\", line 3';"
+               " echo 'ValueError: bad placeholder'; echo \"tmp=$TMPDIR\"; for i in $(seq 1 40); do echo noise-$i; done;"
+               " exit 1")
+        wi = self.item([cmd])
+        self.running()
+        sub = self.submit(wi)
+        self.finish(sub)
+        wf.verify_collect(self.s, "checker", wi)
+        run = self.led.get("run", sub["run"])["payload"]
+        script = open(run["script"]).read()
+        self.assertIn(f"export TMPDIR={run['prefix']}.tmp", script)
+        brief = wf.dispatch_brief(self.s, wi, "pm-modules")["brief"]
+        block = brief.split("Last verification", 1)[1]
+        self.assertIn("first error:\n    Traceback (most recent call last):", block)
+        self.assertIn("ValueError: bad placeholder", block)
+        self.assertIn("last lines:", block)
+        self.assertIn("noise-40", block)
+        self.assertLessEqual(len(wf.last_verification_block(self.led, wi).encode()), wf.VERIFICATION_BLOCK_BYTES)
+        self.assertEqual(wf.first_error("all good\n"), "")
+        self.assertTrue(wf.first_error("a\nE   assert 1 == 2\nb").startswith("E   assert"))
+
     def test_block_is_outside_the_budget_and_capped(self):
         noisy = "python3 -c \"print(('x' * 190 + chr(10)) * 40)\"; exit 1"
         wi = self.item([noisy, noisy + " ", noisy + "  "])
@@ -516,6 +538,32 @@ class AsyncVerify(SiteCase):
             main(["--site", str(self.site_root), "wi", "amend", "--wi", wi, "--memo", "ok", "--add-constraint", "D.",
                   "--add-constraint", "E.", "--actor", "desk"])
         self.assertEqual(self.led.get("work-item", wi)["payload"]["constraints"], ["A.", "B.", "C.", "D.", "E."])
+
+    def test_rework_note_rides_outside_the_brief_budget(self):
+        wi = self.item(["true"], constraints=["No push."])
+        r0 = wf.dispatch_brief(self.s, wi, "pm-modules", as_role="checker")
+        b0 = [e for e in self.led.events(wi) if e["type"] == "dispatch.prepared"][-1]["payload"]["bytes"]
+        long = "Rebuild the phantom from the pinned spec; " * 60  # far over the 2048-byte budget on its own
+        ev = wf.wi_amend(self.s, "desk", wi, "plan ok", {}, rework_notes=[long, "Then rerun check 2."])
+        self.assertEqual(ev["payload"]["rework_notes"][1], "Then rerun check 2.")
+        self.assertEqual(self.led.wi_status(wi)["status"], "staged", "a note does not move the item")
+        self.assertEqual(self.led.get("work-item", wi)["payload"]["constraints"], ["No push."], "not in the payload")
+        block = wf.rework_notes_block(self.led, wi)
+        self.assertLessEqual(len(block.encode()), wf.REWORK_NOTES_BYTES)
+        self.assertIn("1 older note(s) left out", block)
+        self.assertIn("Then rerun check 2.", block)
+        r = wf.dispatch_brief(self.s, wi, "pm-modules", as_role="checker")
+        prep = [e for e in self.led.events(wi) if e["type"] == "dispatch.prepared"][-1]["payload"]
+        self.assertEqual(prep["bytes"], b0, "the notes do not count against the budget")
+        self.assertIn(block, r["brief"])
+        self.assertNotIn("Rework instructions", r0["brief"])
+        with self.assertRaisesRegex(DurehError, "needs text"):
+            wf.wi_amend(self.s, "desk", wi, "ok", {}, rework_notes=[" "])
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            main(["--site", str(self.site_root), "wi", "amend", "--wi", wi, "--memo", "ok", "--rework-note", "CLI note.",
+                  "--actor", "desk"])
+        self.assertIn("CLI note.", wf.rework_notes_block(self.led, wi))
 
     def test_staged_items_take_add_constraint_only(self):
         wi = self.item(["true"], constraints=["No push."])

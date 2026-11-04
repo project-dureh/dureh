@@ -595,13 +595,18 @@ AMENDABLE = ("acceptance", "checks", "constraints", "outputs", "checks_runner", 
 
 
 def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: str | None = None,
-             add_constraints: list[str] | None = None, reopen: bool = False) -> dict:
+             add_constraints: list[str] | None = None, reopen: bool = False,
+             rework_notes: list[str] | None = None) -> dict:
     """Change a WI's acceptance, checks, constraints or outputs, or move its base, without a replacement WI.
 
     The goal, role and target never change (that is a new WI). The amendment is approved like Gate 1:
     --memo carries the Director's words (or, in workday mode, the plan approval that covers it).
     `add_constraints` (`--add-constraint`, release 37, UR-20261005-02) appends to the constraints (after any
     `--constraint` replacement); it alone is allowed on a staged item, since it only adds context for a rework.
+    `rework_notes` (`--rework-note`, release 91) records instructions for the next rework on the amendment event,
+    not in the payload: the next worker or checker brief carries them in a block outside the brief budget
+    (rework_notes_block), so a long rework instruction never pushes a brief over its limit. Allowed where
+    `--add-constraint` is (also on a staged item).
     `reopen` (`--reopen`, release 45) re-opens a verified item that is not promoted: the amendment records
     `reopened_from: verified`, a `wi.reopened` event voids the verification and moves the item back to approved
     for a new dispatch, with no `dispatch stop`. Fields are optional with it. A promoted item never changes."""
@@ -617,6 +622,9 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
     adds = [c for c in (add_constraints or []) if c is not None]
     if any(not c.strip() for c in adds):
         fail("--add-constraint needs text")
+    notes = [n for n in (rework_notes or []) if n is not None]
+    if any(not n.strip() for n in notes):
+        fail("--rework-note needs text")
     if reopen and st != "verified":
         fail(f"{wi} is {st}; --reopen is for a verified item that is not promoted"
              + (" (amend this item without it)" if st in ("approved", "rework", "dispatched", "proposed", "stopped") else ""))
@@ -627,16 +635,16 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
     parent = rec["payload"].get("parent")
     if reopen and parent and led.wi_status(parent)["status"] in ("verified", "promoted"):
         fail(f"{wi} belongs to bundle {parent}, which is {led.wi_status(parent)['status']}; re-open the bundle first")
-    only_adds = bool(adds) and not any(v is not None for v in fields.values()) and rebase is None
+    only_adds = bool(adds or notes) and not any(v is not None for v in fields.values()) and rebase is None
     # release 45: the checks runner alone may change on a staged item (it changes where checks run, not the work)
-    only_runner = not adds and rebase is None and [k for k, v in fields.items() if v is not None] in (["checks_runner"],
+    only_runner = not adds and not notes and rebase is None and [k for k, v in fields.items() if v is not None] in (["checks_runner"],
                                                                                                        ["requirements"])
     pend = pending_verify(led, wi) if st == "staged" and only_runner else None
     # release 61 (UR-20261013-02): a pending job whose head moved is stale; the next `verify --submit` supersedes it
     if pend and not _stale_verify(site, wi, pend):
         fail(f"{wi} has a submitted verify job; collect it before changing its checks runner or requirements")
     if st == "staged" and not (only_adds or only_runner):
-        fail(f"{wi} is staged; only --add-constraint (which appends) is allowed on a staged item. To change"
+        fail(f"{wi} is staged; only --add-constraint (which appends) and --rework-note are allowed on a staged item. To change"
              f" acceptance, checks, constraints, outputs or the base: `dureh dispatch stop --wi {wi} --reason ...`, then"
              f" `dureh wi amend --wi {wi} --memo ...` with the change (the amendment re-opens the stopped item)")
     if st not in ("approved", "rework", "dispatched", "proposed", "stopped", "staged", "verified"):
@@ -663,9 +671,9 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
         if root is None or not (root / ".git").exists():
             fail(f"{wi} targets {rec['payload']['target']}, which is not a git repository")
         rebase_onto = git(["rev-parse", rebase or "HEAD"], root)
-    if not fields and not rebase_onto and not reopen:
-        fail("nothing to amend: give --acceptance, --check, --constraint, --add-constraint, --output, --checks-runner,"
-             " --requirements or --rebase")
+    if not fields and not rebase_onto and not reopen and not notes:
+        fail("nothing to amend: give --acceptance, --check, --constraint, --add-constraint, --rework-note, --output,"
+             " --checks-runner, --requirements or --rebase")
     draft = {"id": wi, "payload": {**rec["payload"], **fields}}
     role = site.org.role(rec["payload"]["role"])
     n, limit = brief_bytes(site, draft), _brief_limit(site, role)
@@ -678,6 +686,7 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
     ev = led.event("wi.amended", actor, wi, {"fields": fields, "before": before, "rebase_onto": rebase_onto,
                                               "memo": memo, "by": "Director",
                                               **({"added_constraints": adds, "status": st} if adds else {}),
+                                              **({"rework_notes": notes, "status": st} if notes else {}),
                                               **({"reopened_from": "verified"} if reopen else {})})
     if st == "stopped":  # an amended stopped item is re-opened with the same approval words
         # release 78: the re-approval names the approver of the item's last Gate 1, never an assumed Director
@@ -816,6 +825,7 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None, tie
     # release 70 (UR-20261016-01): a checker brief carries the staging summary the same way, with its own cap
     staging = staging_summary_block(led, wi) if checking else ""
     block += staging
+    block += rework_notes_block(led, wi)  # release 91: the desk's rework instructions, outside the budget
     block += _env_brief_line(wt)  # release 47: outside the budget, as the verification block
     full = text + block
     digest = hashlib.sha256(full.encode("utf-8")).hexdigest()[:16]
@@ -907,6 +917,31 @@ VERIFICATION_TAIL_LINES = 20
 STAGING_BLOCK_BYTES = 1024  # release 70: the checker brief's staging summary, outside the brief budget
 
 
+REWORK_NOTES_BYTES = 2048  # release 91: the desk's rework instructions, outside the brief budget
+
+
+def rework_notes_block(led: Ledger, wi: str) -> str:
+    """The "Rework instructions" block (release 91): every `wi amend --rework-note` of the WI, oldest first, at most
+    REWORK_NOTES_BYTES (the oldest notes are dropped first, then the newest is cut). Empty without notes."""
+    notes = [(e["ts"][:16], n) for e in led.events(wi) if e["type"] == "wi.amended"
+             for n in (e["payload"].get("rework_notes") or [])]
+    if not notes:
+        return ""
+    head = "\nRework instructions from the desk (wi amend --rework-note; oldest first, outside the brief budget):\n"
+    rows = [f"- {ts}Z {' '.join(n.split())}\n" for ts, n in notes]
+    dropped = 0
+    while len(rows) > 1 and len((head + "".join(rows)).encode("utf-8")) > REWORK_NOTES_BYTES:
+        rows.pop(0)
+        dropped += 1
+    if dropped:
+        head += f"- ({dropped} older note(s) left out; `dureh wi show --wi {wi}` lists them)\n"
+    out = head + "".join(rows)
+    if len(out.encode("utf-8")) > REWORK_NOTES_BYTES:
+        cut = " ... (truncated)\n"
+        out = out.encode("utf-8")[:REWORK_NOTES_BYTES - len(cut.encode("utf-8"))].decode("utf-8", "ignore") + cut
+    return out
+
+
 def staging_summary_block(led: Ledger, wi: str) -> str:
     """The "Staged" block of a checker brief (release 70, UR-20261016-01): the latest `wi.staged` record's head, who
     staged it and its summary, at most STAGING_BLOCK_BYTES (the summary is cut first). Outside the brief budget, as
@@ -941,7 +976,7 @@ def last_verification_block(led: Ledger, wi: str) -> str:
     job = p.get("job") or {}
     here = lambda x: str(led.site.relocate(x)) if x else x  # noqa: E731 - log paths recorded before a site move
 
-    def render(tail_lines: int) -> str:
+    def render(tail_lines: int, err_lines: int = 0) -> str:
         lines = ["", f"Last verification (run {run['id']}, {run['ts'][:19]}Z, head {str(p.get('head') or '-')[:12]}):"
                      f" FAIL, {p.get('note', '')}"]
         for i, c in enumerate(p.get("checks") or [], 1):
@@ -950,7 +985,13 @@ def last_verification_block(led: Ledger, wi: str) -> str:
             secs = f", {c['seconds']} s" if c.get("seconds") is not None else ""
             lines.append(f"- check {i} `{c['command']}`: exit {c['exit']}{secs}"
                          + (f"; log {here(c['log'])}" if c.get("log") else ""))
+            err = (c.get("first_error") or "").splitlines()[:err_lines]
+            if err:  # release 91 (UR-20261103-01): the first error, not only the last lines
+                lines.append("  first error:")
+                lines += [f"    {ln}" for ln in err]
             tail = [ln for ln in (c.get("tail") or "").rstrip("\n").splitlines()][-tail_lines:] if tail_lines else []
+            if tail and err:
+                lines.append("  last lines:")
             lines += [f"    {ln}" for ln in tail]
         if p.get("violations"):
             lines.append("- outside the role's write scope: " + ", ".join(p["violations"]))
@@ -959,11 +1000,14 @@ def last_verification_block(led: Ledger, wi: str) -> str:
         if job.get("log_out"):
             lines.append(f"- job {job.get('job_id')} ({job.get('state')}) logs: {here(job['log_out'])},"
                          f" {here(job.get('log_err'))}")
+            tmp = Path(str(here(job["log_out"]))).with_suffix(".tmp")
+            if tmp.is_dir():
+                lines.append(f"- the checks' temporary files are kept in {tmp}")
         lines.append("Fix these before staging again; the same head fails the same way.")
         return "\n".join(lines) + "\n"
 
-    for n in (VERIFICATION_TAIL_LINES, 10, 5, 2, 0):
-        out = render(n)
+    for n, e in ((VERIFICATION_TAIL_LINES, FIRST_ERROR_LINES), (10, 25), (5, 15), (2, 8), (0, 4), (0, 0)):
+        out = render(n, e)
         if len(out.encode("utf-8")) <= VERIFICATION_BLOCK_BYTES:
             return out
     cut = "\n... (truncated)\n"
@@ -1748,6 +1792,22 @@ def _checks_env(site: Site, wi: str, cwd: Path, troot: Path, plan: dict | None =
     return _apply_exports(env, (plan or {}).get("exports") or {})
 
 
+FIRST_ERROR = re.compile(r"^(Traceback \(most recent call last\)|E {3}|_{3,} .* _{3,}$|FAILED |ERROR |\S*(Error|Exception)\b:?)")
+FIRST_ERROR_LINES = 40
+FIRST_ERROR_CHARS = 3000
+
+
+def first_error(text: str) -> str:
+    """Release 91 (UR-20261103-01): the first error region of a check's output: from the first line that looks like
+    a traceback, an assertion line, a failed-test header or an `...Error:` line, at most FIRST_ERROR_LINES lines and
+    FIRST_ERROR_CHARS characters. Empty when nothing matches (the last lines are then all there is)."""
+    lines = (text or "").splitlines()
+    for i, ln in enumerate(lines):
+        if FIRST_ERROR.match(ln):
+            return "\n".join(lines[i:i + FIRST_ERROR_LINES])[:FIRST_ERROR_CHARS]
+    return ""
+
+
 def _run_checks_local(site: Site, wi: str, cwd: Path, troot: Path, checks: list[str], timeout: int,
                       plan: dict | None = None) -> list[dict]:
     results = []
@@ -1759,10 +1819,12 @@ def _run_checks_local(site: Site, wi: str, cwd: Path, troot: Path, checks: list[
         t0 = time.monotonic()
         try:
             proc = subprocess.run(cmd, shell=True, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env)
-            rc, out = proc.returncode, (proc.stdout + proc.stderr)[-2000:]
+            full = proc.stdout + proc.stderr
+            rc, out = proc.returncode, full[-2000:]
         except subprocess.TimeoutExpired:
-            rc, out = "timeout", ""
-        results.append({"command": cmd, "exit": rc, "seconds": round(time.monotonic() - t0, 2), "tail": out})
+            rc, out, full = "timeout", "", ""
+        results.append({"command": cmd, "exit": rc, "seconds": round(time.monotonic() - t0, 2), "tail": out,
+                        **({"first_error": first_error(full)} if rc != 0 and first_error(full) else {})})
     return results
 
 
@@ -1777,7 +1839,10 @@ def _checks_script(wi: str, cwd: Path, troot: Path, site_root: Path, prefix: Pat
              f"cd {shlex.quote(str(cwd))} || exit 96",
              f"export PYTHONDONTWRITEBYTECODE=1 DUREH_SITE={shlex.quote(str(site_root))} DUREH_WORK_ROOT={shlex.quote(str(cwd))}"
              f" DUREH_TARGET_ROOT={shlex.quote(str(troot))} DUREH_WI={shlex.quote(wi)}",
-             "unset DUREH_ACTOR DUREH_AGENT_ID", "status=0"]
+             "unset DUREH_ACTOR DUREH_AGENT_ID", "status=0",
+             # release 91 (UR-20261103-01): the checks' temporary tree (pytest's default basetemp follows TMPDIR)
+             # is kept next to the job log, so a failure can be read after the job
+             f"mkdir -p {shlex.quote(f'{prefix}.tmp')} && export TMPDIR={shlex.quote(f'{prefix}.tmp')}"]
     plan = plan or {"mode": "none", "exports": {}}
     if plan.get("venv"):
         lines.append(f"# checks environment: {plan['mode']} ({plan.get('venv')})")
@@ -1859,10 +1924,13 @@ def _read_check_results(prefix: str, checks: list[str], job_id: str, state: str)
             rc = int(exit_file.read_text().strip())
             ms = ms_file.read_text().strip() if ms_file.is_file() else ""
             seconds = round(int(ms) / 1000, 2) if ms.isdigit() else None
-            tail = out_file.read_text(encoding="utf-8", errors="replace")[-2000:] if out_file.is_file() else ""
+            full = out_file.read_text(encoding="utf-8", errors="replace") if out_file.is_file() else ""
+            tail = full[-2000:]
         else:
-            rc, seconds, tail = "not-run", None, f"no result from job {job_id} ({state})"
-        results.append({"command": check, "exit": rc, "seconds": seconds, "tail": tail, "log": str(out_file)})
+            rc, seconds, tail, full = "not-run", None, f"no result from job {job_id} ({state})", ""
+        err = first_error(full) if rc != 0 else ""
+        results.append({"command": check, "exit": rc, "seconds": seconds, "tail": tail, "log": str(out_file),
+                        **({"first_error": err} if err else {})})
     return results
 
 

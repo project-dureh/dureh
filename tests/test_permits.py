@@ -475,3 +475,71 @@ class Reserved(PermitBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class Models(PermitBase):
+    """Release 91: `models.<tier>` and the models tables in the catalog, with the quiet-point check."""
+
+    def tier(self):
+        models = self.config()["models"]
+        t = next(k for k, v in models.items() if isinstance(v, dict) and v.get("model"))
+        return t, models[t]
+
+    def passing_run(self, tier, model):
+        from datetime import date, timedelta
+        return Ledger(self.site()).append("run", "qualification", "desk", None, {
+            "run_type": "qualification", "status": "pass", "tier": tier, "model": model, "score": "4/4",
+            "expires": (date.today() + timedelta(days=90)).isoformat()})["id"]
+
+    def test_classes(self):
+        old = {"models": {"w": {"model": "m1", "qualification": "waived-bootstrap", "waiver_expires": "2026-11-30"}}}
+        def cls(new):
+            return permits.model_class(old, {"models": {"w": new}}, "models.w")[0]
+        self.assertEqual(cls({"model": "m1", "qualification": "run-1"}), "B")
+        self.assertEqual(cls({**old["models"]["w"], "note": "x"}), "B")
+        self.assertEqual(cls({**old["models"]["w"], "waiver_expires": "2026-12-31"}), "D")
+        self.assertEqual(cls({"model": "m2", "qualification": "run-2"}), "C")
+        self.assertEqual(cls({"model": "m2", "qualification": "waived-bootstrap", "waiver_expires": "2026-11-30"}), "D")
+        self.assertEqual(cls({}), "B")
+        self.assertEqual(permits.model_class(old, old, "models.routing")[0], "C")
+        self.assertEqual(permits.catalog_key("models.w.qualification"), "models.<tier>")
+        self.assertEqual(permits.catalog_key("models.fallback_tiers"), "models.fallback_tiers")
+        with self.assertRaisesRegex(DurehError, "not in the permit catalog"):
+            permits.catalog_key("models.w.other")
+
+    def test_desk_moves_a_waiver_to_a_passing_run_alone(self):
+        tier, entry = self.tier()
+        run = self.passing_run(tier, entry["model"])
+        self.desk()
+        with mock.patch.object(permits, "quiet_point", return_value=[]):
+            out = permits.set_key(self.site(), "desk", f"models.{tier}.qualification", run, "exam passed")
+        self.assertEqual((out["class"], out["by"]), ("B", "desk"))
+        self.assertEqual(self.config()["models"][tier]["qualification"], run)
+
+    def test_desk_cannot_extend_a_waiver_or_change_a_model_alone(self):
+        tier, entry = self.tier()
+        self.conf(models={**self.config()["models"], tier: {**entry, "qualification": "waived-bootstrap",
+                                                            "waiver_expires": "2099-01-01"}})
+        before = self.config()
+        self.desk()
+        with mock.patch.object(permits, "quiet_point", return_value=[]):
+            with self.assertRaisesRegex(DurehError, "class D key"):
+                permits.set_key(self.site(), "desk", f"models.{tier}.waiver_expires", "2099-12-31", "more time")
+            with self.assertRaisesRegex(DurehError, "class D key"):  # a new model under the waiver: a new waiver
+                permits.set_key(self.site(), "desk", f"models.{tier}.model", "anthropic:other-model", "cheaper")
+        run = self.passing_run(tier, "anthropic:other-model")
+        before = self.config()
+        with mock.patch.object(permits, "quiet_point", return_value=[]):
+            with self.assertRaisesRegex(DurehError, "class C"):
+                permits.set_key(self.site(), "desk", f"models.{tier}",
+                                {"model": "anthropic:other-model", "qualification": run}, "cheaper, exam passed")
+        self.assertEqual(self.config(), before)
+
+    def test_quiet_point(self):
+        tier, entry = self.tier()
+        run = self.passing_run(tier, entry["model"])
+        before = self.config()
+        with mock.patch.object(permits, "quiet_point", return_value=["WI-0007"]):
+            with self.assertRaisesRegex(DurehError, "quiet point.*WI-0007"):
+                permits.set_key(self.site(), "desk", f"models.{tier}.qualification", run, "exam passed")
+        self.unchanged(before)

@@ -470,15 +470,38 @@ def _mem_bytes(text: str) -> int | None:
     return int(float(m.group(1)) * 1024 ** (1 + "KMGT".index(m.group(2).upper() or "K")))  # no unit: K (sstat)
 
 
+def _cgroup_anon(job: str, proc_cgroup: str = "/proc/self/cgroup", root: str = "/sys/fs/cgroup") -> int | None:
+    """Current anonymous + shared memory of job <job>'s cgroup (v2), read from inside that job: page cache is left
+    out because the kernel reclaims it before the job hits --mem. None outside the job or without cgroup v2."""
+    try:
+        line = next(x for x in Path(proc_cgroup).read_text().splitlines() if x.startswith("0::"))
+    except (OSError, StopIteration):
+        return None
+    m = re.search(rf"^(.*/job_{re.escape(str(job))})(/|$)", line[3:])
+    if not m:
+        return None
+    try:
+        stat = dict(x.split() for x in (Path(root + m.group(1)) / "memory.stat").read_text().splitlines() if " " in x)
+        return int(stat.get("anon", 0)) + int(stat.get("shmem", 0))
+    except (OSError, ValueError):
+        return None
+
+
 def _mem_use(site: Site, job: str, requested: str) -> dict | None:
-    """Peak resident memory of the running job's batch step against its --mem (H3: 6999586 ended OUT_OF_MEMORY at
-    the 16G default while agents and their local builds shared it)."""
+    """Resident memory of the running job against its --mem (H3: 6999586 ended OUT_OF_MEMORY at the 16G default while
+    agents and their local builds shared it). Inside the job: the cgroup's current anon + shmem (11-04: a company's
+    session read 100 % for hours from sstat MaxRSS, a peak that counts 15.7 GB of page cache over 0.46 GB of anon
+    and never drops, so the guard held the desk). Elsewhere: sstat MaxRSS of the batch step (a peak; may include
+    cache), marked as such."""
+    req = _mem_bytes(requested if re.search(r"[KMGT]$", requested, re.I) else requested + "M")
+    anon = _cgroup_anon(job)
+    if anon is not None and req:
+        return {"rss": anon, "mem": requested, "share": round(anon / req, 2), "source": "cgroup anon"}
     out = _slurm(site, ["sstat", "-n", "-P", "-j", f"{job}.batch", "-o", "MaxRSS"])
     rss = _mem_bytes((out or "").strip().splitlines()[0]) if (out or "").strip() else None
-    req = _mem_bytes(requested if re.search(r"[KMGT]$", requested, re.I) else requested + "M")
     if not rss or not req:
         return None
-    return {"rss": rss, "mem": requested, "share": round(rss / req, 2)}
+    return {"rss": rss, "mem": requested, "share": round(rss / req, 2), "source": "sstat MaxRSS (peak)"}
 
 
 MEM_REFUSE = 0.9  # past this share of the job's --mem the Bash guard refuses work other than dureh commands

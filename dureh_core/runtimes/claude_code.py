@@ -622,7 +622,8 @@ def _claude_md(site: Site) -> str:
               + _verify_end_rule(site) +
               " A pending verify job holds the item's lane."
               " A rework brief carries the last failed verification (check ids, exit codes, last lines, log paths) outside the brief budget;"
-              " add context to a staged or reworked item with `wi amend --add-constraint TEXT` (appends; `--constraint` replaces the list)."
+              " add context to a staged or reworked item with `wi amend --add-constraint TEXT` (appends; `--constraint` replaces the list);"
+              " a long rework instruction goes in `wi amend --rework-note TEXT` (next brief, outside the budget)."
               " Requirements too long for the brief go in a file inside the site, pinned with `--requirements <file>` (sha256; the brief names it;"
               " dispatch and verify refuse while it differs, until `wi amend --requirements <file>` re-pins it)."
               " Nobody runs a module's test suite (`pytest`, `unittest discover`) in the session: tests are checks or `slurm submit` jobs."
