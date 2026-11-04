@@ -100,5 +100,23 @@ class MemoryGate(SiteCase):
         self.assertEqual(m.call_count, 1)
 
 
+class CgroupMemory(unittest.TestCase):
+    def test_anon_of_the_job_cgroup_not_page_cache(self):
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "cg"
+            job = root / "system.slice/slurmstepd.scope/job_300"
+            (job / "step_1/user/task_0").mkdir(parents=True)
+            (job / "memory.stat").write_text("anon 463093760\nfile 15660113920\nshmem 1000\ninactive_file 4178333696\n")
+            pc = Path(d) / "cgroup"
+            pc.write_text("0::/system.slice/slurmstepd.scope/job_300/step_1/user/task_0\n")
+            self.assertEqual(sessions._cgroup_anon("300", str(pc), str(root)), 463094760)
+            self.assertIsNone(sessions._cgroup_anon("301", str(pc), str(root)))  # another job: not ours to read
+            with mock.patch.object(sessions, "_cgroup_anon", return_value=463094760):
+                use = sessions._mem_use(None, "300", "16384")
+            self.assertEqual((use["share"], use["source"]), (0.03, "cgroup anon"))
+
+
 if __name__ == "__main__":
     unittest.main()
