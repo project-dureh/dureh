@@ -224,7 +224,8 @@ agent runs or a deferred start of the role may still bind, the refusal is unchan
 
 Without `--module`, `submit` works as before: the job script is submitted as it is (job directory = the WI
 target, logs under `<slurm.log_dir>/<WI>/` (see above; a script's own name is kept only as a basename there), config `slurm.time` as the fallback
-`--time`, the workday start check) and a `run` record is written. The start check refuses a job that would end
+`--time` and config `slurm.account`/`partition` as the fallback `--account`/`--partition` (release 92: the script's
+`#SBATCH -A/-p` or an `--sbatch-arg` wins), the workday start check) and a `run` record is written. The start check refuses a job that would end
 after the day's end time, except a job for a plan item or a fix for one (finish-plan rule, Director 2026-10-06):
 that one is submitted with `start_check.past_end: true`, the overtime recorded by the harness and a warning, unless
 a stop (usage share, urgent, wall time) holds; `workday.finish_plan: false` refuses it as before.
@@ -340,6 +341,11 @@ dureh verify --wi <WI> --collect [RUN]   # checker, re-dispatched: record the ve
   40 lines; shortened first when the block is over its cap), and the checks job runs with `TMPDIR` set to
   `<prefix>.tmp` next to its log (pytest's default basetemp follows it), kept after the job and named in the block.
   A long rework instruction from the desk goes in `wi amend --rework-note` (its own block, outside the budget, 2 KB).
+- **Jobs in a re-dispatched brief (release 92).** A brief for a WI that is re-dispatched (its agent ended or never
+  started) or reworked appends "Jobs of this work item": every Slurm, verify or member job of the WI, newest first,
+  with its script name, array size, submit time and last recorded state, or "not recorded: ask `dureh slurm status
+  --run R`". Records only, outside the brief budget, capped at 1.5 KB (`workflow.JOBS_BLOCK_BYTES`). The agent that
+  takes over reads the run record before it submits the work again.
 - **Checker briefs (release 70, UR-20261016-01).** `dispatch brief --role <checker>` for a staged item appends a
   "Staged" block: the latest `wi.staged` record, its head, who staged it and its summary (the stager's own
   account, not evidence). Like the rework block it is outside the brief budget, capped at 1 KB

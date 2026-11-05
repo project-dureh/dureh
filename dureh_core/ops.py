@@ -914,8 +914,10 @@ def slurm_submit(site: Site, actor: str, wi: str, script: str | None, dry_run: b
     job_name = own_name or f"{job_prefix(site)}-{wi}"
     if own_name is None:
         cmd.append(f"--job-name={job_name}")
-    for key, flag in (("account", "--account"), ("partition", "--partition")):
-        if cfg.get(key):
+    # config slurm.account/partition are fallbacks like slurm.time: the script's #SBATCH directive or an sbatch
+    # argument wins (fnd 2039c341: a config partition replaced the script's -p, so a GPU job went to the wrong queue)
+    for key, short, flag in (("account", "-A", "--account"), ("partition", "-p", "--partition")):
+        if cfg.get(key) and _sbatch_opt(path, extra, short, flag) is None:
             cmd.append(f"{flag}={cfg[key]}")
     wall, wall_source = _requested_time(path, extra, cfg)
     if wall_source == "config":

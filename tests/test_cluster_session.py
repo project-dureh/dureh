@@ -419,6 +419,24 @@ class ClusterSession(SiteCase):
         self.assertEqual(run["payload"]["start_check"]["time_source"], "sbatch-arg")
         self.assertEqual(run["payload"]["start_check"]["expected_end"], "2026-10-03T14:30:00-04:00")
 
+    def test_config_partition_and_account_are_fallbacks(self):
+        # fnd 2039c341: config slurm.partition was passed on the command line and replaced the script's #SBATCH -p
+        self._on_duty()
+        w, script = self._job()
+        self._sbatch("2026-10-03T14:00:00")
+        self.config(slurm={"account": "acct-x", "partition": "general", "time": "01:00:00", "each_level": "any"})
+        Path(script).write_text("#!/bin/sh\n#SBATCH -p gpu\n#SBATCH --account=acct-y\n#SBATCH -t 00:30:00\necho hi\n")
+        cmd = " ".join(ops.slurm_submit(self.s, "desk", w, script)["payload"]["command"])
+        self.assertNotIn("--partition=general", cmd)
+        self.assertNotIn("--account=acct-x", cmd)
+        Path(script).write_text("#!/bin/sh\n#SBATCH -t 00:30:00\necho hi\n")
+        cmd = " ".join(ops.slurm_submit(self.s, "desk", w, script)["payload"]["command"])
+        self.assertIn("--partition=general", cmd)
+        self.assertIn("--account=acct-x", cmd)
+        cmd = " ".join(ops.slurm_submit(self.s, "desk", w, script, extra=["--partition=l40-gpu"])["payload"]["command"])
+        self.assertNotIn("--partition=general", cmd)
+        self.assertIn("--partition=l40-gpu", cmd)
+
     def test_submit_check_unavailable_or_skipped(self):
         self._on_duty()
         w, script = self._job()
