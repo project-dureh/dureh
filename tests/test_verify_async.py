@@ -588,6 +588,7 @@ class AsyncVerify(SiteCase):
         block = wf.jobs_block(self.led, wi)
         self.assertLessEqual(len(block.encode()), wf.JOBS_BLOCK_BYTES)
         self.assertEqual(wf.jobs_block(self.led, self.bundle), "")
+        self.assertIn(wf.SCRIPT_FILE_LINE, brief, "workers get the script-file line, outside the budget")
 
     def test_staged_items_take_add_constraint_only(self):
         wi = self.item(["true"], constraints=["No push."])

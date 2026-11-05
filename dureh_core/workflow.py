@@ -829,6 +829,8 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None, tie
     if not checking and (supersedes or led.wi_status(wi)["rework"] > 0):
         block += jobs_block(led, wi)  # release 92 (fnd 68509358): a re-dispatch says which jobs already ran
     block += _env_brief_line(wt)  # release 47: outside the budget, as the verification block
+    if role.write_scopes and not checking and not role.is_manager:
+        block += SCRIPT_FILE_LINE  # release 92: roles that write files; outside the budget
     full = text + block
     digest = hashlib.sha256(full.encode("utf-8")).hexdigest()[:16]
     header = f"{BRIEF_TAG} {wi} role={role.name} brief={digest}"
@@ -944,6 +946,9 @@ def rework_notes_block(led: Ledger, wi: str) -> str:
     return out
 
 
+SCRIPT_FILE_LINE = ("\nShell: write a multi-line script to a file in your work root (or $TMPDIR) and run it"
+                    " (`python3 -I <file>`); a heredoc piped into an interpreter is refused by the permission check.\n")
+# release 92: 38 of 84 guard refusals in a company week were heredoc-into-python (outside the budget)
 JOBS_BLOCK_BYTES = 1536  # release 92 (fnd 68509358): the WI's jobs in a re-dispatched brief, outside the budget
 
 
