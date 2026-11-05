@@ -565,6 +565,30 @@ class AsyncVerify(SiteCase):
                   "--actor", "desk"])
         self.assertIn("CLI note.", wf.rework_notes_block(self.led, wi))
 
+    def test_redispatch_brief_lists_the_wis_jobs(self):
+        # release 92 (fnd 68509358): an agent that takes over a WI was not told that its jobs had already ended
+        wi = wf.wi_new(self.s, "desk", "run", "g", "py-writer", "modules/demo", ["ok"], parent=self.bundle)["id"]
+        wf.wi_approve(self.s, "desk", wi, "ok")
+        first = wf.dispatch_brief(self.s, wi, "pm-modules")["brief"]
+        self.assertNotIn("Jobs of this work item", first)
+        self.led.event("wi.dispatched", "desk", wi, {"role": "py-writer", "brief": "1" * 16, "by": "desk"})
+        done = self.led.append("run", "slurm", "desk", wi, {"run_type": "slurm", "status": "submitted", "job_id": "7001",
+                                                            "script": "/x/g3-array.sh", "array": {"count": 62}})
+        self.led.event("run.status", "desk", wi, {"run": done["id"], "job_id": "7001", "scheduler_state": "COMPLETED",
+                                                  "final": True})
+        open_run = self.led.append("run", "slurm", "desk", wi, {"run_type": "slurm", "status": "submitted",
+                                                                "job_id": "7002", "script": "/x/summary.sh"})
+        self.led.event("agent.finished", "py-writer", wi, {"role": "py-writer"})  # the agent ended; re-adopt
+        brief = wf.dispatch_brief(self.s, wi, "pm-modules")["brief"]
+        self.assertIn("Jobs of this work item", brief)
+        self.assertIn(f"- {done['id']} job 7001 slurm g3-array.sh, array 62 items", brief)
+        self.assertIn("COMPLETED", brief)
+        self.assertIn(f"not recorded: ask `dureh slurm status --run {open_run['id']}`", brief)
+        self.assertLess(brief.index("job 7002"), brief.index("job 7001"), "newest first")
+        block = wf.jobs_block(self.led, wi)
+        self.assertLessEqual(len(block.encode()), wf.JOBS_BLOCK_BYTES)
+        self.assertEqual(wf.jobs_block(self.led, self.bundle), "")
+
     def test_staged_items_take_add_constraint_only(self):
         wi = self.item(["true"], constraints=["No push."])
         ev = wf.wi_amend(self.s, "desk", wi, "plan ok", {}, add_constraints=["Log is at logs/x."])

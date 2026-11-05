@@ -826,6 +826,8 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None, tie
     staging = staging_summary_block(led, wi) if checking else ""
     block += staging
     block += rework_notes_block(led, wi)  # release 91: the desk's rework instructions, outside the budget
+    if not checking and (supersedes or led.wi_status(wi)["rework"] > 0):
+        block += jobs_block(led, wi)  # release 92 (fnd 68509358): a re-dispatch says which jobs already ran
     block += _env_brief_line(wt)  # release 47: outside the budget, as the verification block
     full = text + block
     digest = hashlib.sha256(full.encode("utf-8")).hexdigest()[:16]
@@ -939,6 +941,44 @@ def rework_notes_block(led: Ledger, wi: str) -> str:
     if len(out.encode("utf-8")) > REWORK_NOTES_BYTES:
         cut = " ... (truncated)\n"
         out = out.encode("utf-8")[:REWORK_NOTES_BYTES - len(cut.encode("utf-8"))].decode("utf-8", "ignore") + cut
+    return out
+
+
+JOBS_BLOCK_BYTES = 1536  # release 92 (fnd 68509358): the WI's jobs in a re-dispatched brief, outside the budget
+
+
+def jobs_block(led: Ledger, wi: str) -> str:
+    """The "Jobs of this work item" block of a re-dispatched brief (release 92, fnd 68509358): every Slurm, verify
+    or member job submitted for the WI, newest first, with its last recorded state (or "not recorded: ask
+    `dureh slurm status --run R` before you submit again"), at most JOBS_BLOCK_BYTES. A new agent that takes over
+    a WI learns which jobs already ran and where their run record is, instead of submitting the work again.
+    Records only (no scheduler call). Empty when the WI has no job."""
+    from .ops import TERMINAL_STATES, _recorded_states, _tracked_runs
+
+    runs = [r for r in _tracked_runs(led) if r.get("wi") == wi]
+    if not runs:
+        return ""
+    states = _recorded_states(led.events(wi))
+    head = ("\nJobs of this work item (newest first; recorded states, outside the brief budget). Read the run record"
+            " before submitting again:\n")
+    rows = []
+    for r in reversed(runs):
+        p = r["payload"]
+        st = states.get(r["id"])
+        if st is None:
+            state = f"not recorded: ask `dureh slurm status --run {r['id']}`"
+        else:
+            state = st[0] + ("" if st[1] or st[0] in TERMINAL_STATES else " (not final)")
+        kind = p.get("run_type") or "run"
+        extra = f", array {p['array']['count']} items" if isinstance(p.get("array"), dict) and p["array"].get("count") else ""
+        script = f" {Path(p['script']).name}" if p.get("script") else ""
+        rows.append(f"- {r['id']} job {p['job_id']} {kind}{script}{extra}, submitted {r['ts'][:16]}Z: {state}\n")
+    out = head
+    for i, row in enumerate(rows):
+        if len((out + row).encode("utf-8")) > JOBS_BLOCK_BYTES - 80:
+            out += f"- ({len(rows) - i} older job(s) left out; `dureh wi show --wi {wi}` lists them)\n"
+            break
+        out += row
     return out
 
 
