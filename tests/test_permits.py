@@ -88,12 +88,18 @@ class Catalog(PermitBase):
         self.assertIn("push.policy | C (B when it only tightens) | yes | yes | yes | tightening only", out)
         self.assertIn("github.director_login | D | yes | yes | no | no | \"example-director\"", out)
         self.assertIn("harness | - | - | no | no | no | -", out)
-        for key, why in (("harness.path", "harness-owned"), ("slurm.account", "release 90"),
-                         ("modules.demo.env_rebuild", "release 90"), ("project", "not in the permit catalog"),
+        for key, why in (("harness.path", "harness-owned"), ("slurm.account", "not in this release's permit catalog"),
+                         ("modules.demo.env_rebuild", "not in this release's permit catalog"),
+                         ("members.codex.model", "does not switch it yet"), ("project", "not in the permit catalog"),
                          ("push", "not in the permit catalog")):
             with self.assertRaisesRegex(DurehError, why):
                 permits.set_key(self.site(), "desk", key, 1, "m")
         self.assertEqual(self.events(), [])
+        # release 93 (mokoji): the refusal named release 90 as the switch point while sites ran 92
+        with self.assertRaises(DurehError) as cm:
+            permits.catalog_key("members.codex.model")
+        self.assertNotIn("release 90", str(cm.exception))
+        self.assertNotIn("release 90", out)
 
     def test_show_history(self):
         permits.set_key(self.site(), "desk", "push.standing_ff", True, "on for the session")
