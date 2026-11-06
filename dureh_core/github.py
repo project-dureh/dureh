@@ -261,6 +261,50 @@ def gh(cfg: dict, args: list[str], *, input_text: str | None = None, timeout: fl
     return _redact(proc.stdout or "", token)
 
 
+def _anon_get(url: str, timeout: float) -> tuple[int, bytes]:
+    """One unauthenticated GET (no token, no gh, no stored login): (HTTP status, body); a network failure raises
+    OSError. Tests replace this function."""
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json",
+                                               "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "dureh-harness"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, b""
+
+
+def is_not_found(exc: BaseException) -> bool:
+    """A gh failure that is GitHub's 404 (`gh: Not Found (HTTP 404)`): the token cannot see the repository."""
+    return "HTTP 404" in str(exc)
+
+
+def anonymous_visibility(owner: str, name: str, timeout: float = 30) -> str:
+    """The repository's visibility asked without any token (release 94, dureh-team#148): an organization's App
+    installation token gets 404 for a repository outside the installation (a personal account's repository), so
+    the token's 404 cannot tell private from public. GitHub shows every public repository to anyone: 200 with
+    `private: false` -> "public"; 404 -> "private" (private or absent; a push to an absent repository fails at git
+    anyway). Anything else (another status, an unreadable answer, a network failure) raises: fail-closed."""
+    url = f"https://api.github.com/repos/{owner}/{name}"
+    try:
+        status, body = _anon_get(url, timeout)
+    except (OSError, ValueError) as exc:
+        raise GhError(f"GET {url} without a token: {exc} (not retried)") from None
+    if status == 404:
+        return "private"
+    if status != 200:
+        raise GhError(f"GET {url} without a token: HTTP {status} (not retried)")
+    try:
+        data = json.loads(body or b"null")
+    except ValueError:
+        raise GhError(f"GET {url} without a token: the answer is not JSON (not retried)") from None
+    if not isinstance(data, dict) or not isinstance(data.get("private"), bool):
+        raise GhError(f"GET {url} without a token: no `private` in the answer (not retried)")
+    return "private" if data["private"] else "public"
+
+
 def graphql(cfg: dict, query: str, variables: dict, costs: list | None = None, name: str | None = None) -> dict:
     """One GraphQL call. When `costs` is a list and the query asks for RATE_LIMIT (release 79), the answer's
     `rateLimit {cost remaining resetAt}` is appended to it as {query: name, cost, remaining, reset_at}."""
