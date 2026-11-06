@@ -42,6 +42,21 @@ the stage record named the base while verify measured the commit.
   the new `wi.staged` carries `restaged_from`); the same head is refused ("already staged"). A verify job
   submitted at the old head is superseded as before (release 61).
 
+## The worktree's scratch directory (release 93, UR-20261106-02)
+
+Release 92 told file-writing workers to write a multi-line script to a file and run `python3 -I <file>` (a heredoc
+into an interpreter is refused), but named no place their scope lets them write; a company's writer drew 8 guard
+refusals in one morning probing `$TMPDIR` and the worktree root. Now every WI worktree has `.dureh-scratch/` at its
+top level:
+
+- the agent bound to the WI, of a role with write scopes and worktree isolation, may write there whatever its
+  scope (managers, roles without write scopes and the desk may not; another WI's agent may not);
+- it is git-ignored through the repository's own exclude file (`git rev-parse --git-path info/exclude`, written
+  when `dispatch brief` creates or reuses the worktree), never a tracked `.gitignore`;
+- verify's ownership check does not list it (it is exempt like interpreter caches), and `wi stage` removes it;
+- the brief's script-file line names `<worktree>/.dureh-scratch/`; a role without a worktree keeps the line that
+  points at its scope or scratch space (`$TMPDIR`, written out as an absolute path).
+
 ## A read-only sweep is staged without a dispatch (release 81, UR-20261023-02)
 
 An item owned by a role with the verify capability (the checker) that has no worktree, for example a read-only
