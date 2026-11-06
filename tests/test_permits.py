@@ -286,6 +286,27 @@ class Approval(PermitBase):
         with self.assertRaisesRegex(DurehError, "approves plan .*not this change"):
             permits.set_key(self.site(), "desk", "push.standing_ff", True, "m", self.ITEM)
 
+    def test_apply_tolerates_events_whose_approval_is_not_a_dict(self):
+        """Release 93 (UR-20261106-01): `slack.approval.decided` stores `approval` as the decided event id (a string);
+        approval_used() read every payload's `approval` as a dict and crashed, so no class C permit could be applied."""
+        self.assertEqual(self.ask()[0], 0)
+        led = Ledger(self.site())
+        led.event("slack.approval.decided", "desk", None, {"approval": "ev-20261006T133442648640Z-24d2ff97",
+                                                            "decision": "approved"})
+        led.event("slack.approval.decided", "desk", None, {"approval": None})
+        led.event("slack.approval.decided", "desk", None, {"approval": ["x"]})
+        rec = self.decide()
+        self.assertEqual(permits.approval_used(self.site(), rec["id"]), [])
+        code, out, err = self.cli("site", "permit", "apply", "--file", str(self.plan), "--memo", "board decision",
+                                  "--approval", self.ITEM)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(self.config()["push"]["policy"], [PRIVATE])
+        [used] = permits.approval_used(self.site(), rec["id"])
+        self.assertEqual(used["type"], "site.permit.applied")
+        hist = permits.show(self.site(), "push.policy", history=True)["history"]
+        self.assertEqual(hist[-1]["approval"], self.ITEM)
+
     def test_refused_decisions(self):
         self.assertEqual(self.ask()[0], 0)
         before = self.config()

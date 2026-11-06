@@ -516,7 +516,14 @@ def plan(site: Site, steps: list[dict], verify_github: bool = True) -> dict:
 
 # ------------------------------------------------------------------ approvals
 def approval_used(site: Site, record_id: str) -> list[dict]:
-    return [e for e in Ledger(site).events() if ((e["payload"].get("approval") or {}).get("record") == record_id)
+    """Permit and project-link events that already used the approval record `record_id`. Other events carry
+    `approval` in other shapes (release 93, UR-20261106-01: `slack.approval.decided` stores the decided event id as a
+    string), so only a dict payload is read and every other shape is not a use."""
+    def record(e: dict):
+        a = (e.get("payload") or {}).get("approval")
+        return a.get("record") if isinstance(a, dict) else None
+
+    return [e for e in Ledger(site).events() if record(e) == record_id
             and (e["type"].startswith(EVENT_PREFIX) or e["type"] == "site.project-linked")]
 
 
@@ -859,7 +866,7 @@ def show(site: Site, key: str, history: bool = False) -> dict:
             keys = [p.get("key")] + [s.get("key") for s in p.get("steps") or []] + (["push"] if p.get("key") == "push" else [])
             if key in keys or (p.get("key") == "push" and key.startswith("push.")):
                 hist.append({"id": e["id"], "ts": e["ts"], "type": e["type"], "by": p.get("by"), "memo": p.get("memo"),
-                             "approval": (p.get("approval") or {}).get("url")})
+                             "approval": p["approval"].get("url") if isinstance(p.get("approval"), dict) else None})
         out["history"] = hist
     return out
 
