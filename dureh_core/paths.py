@@ -16,6 +16,11 @@ from .site import Site
 from .util import is_within, read_json
 
 
+# release 93 (UR-20261106-02): every WI worktree has a scratch directory its bound agent may write whatever the role's
+# scope (scripts run with `python3 -I <file>`); git-ignored, exempt from verify's ownership check, removed at stage
+WORKTREE_SCRATCH = ".dureh-scratch"
+
+
 @dataclass
 class Target:
     zone: str            # see classify()
@@ -169,6 +174,9 @@ def write_decision(site: Site, role: str, raw: str | Path, cwd: Path | None = No
             return False, f"this agent is dispatched for {agent_wi}, not {t.wi}"
         if not t.logical:
             return False, "cannot map the worktree path to its WI target"
+        parts = t.site_rel.split("/")  # worktrees/<WI>/<rest>
+        if r.write_scopes and r.isolation == "worktree" and len(parts) > 3 and parts[2] == WORKTREE_SCRATCH:
+            return True, f"the WI's scratch directory ({WORKTREE_SCRATCH}/: git-ignored, removed at stage)"
         if org.scope_allows(role, t.logical):
             return True, f"within {role} scope ({t.logical})"
         return False, f"{role} may not write {t.logical}"

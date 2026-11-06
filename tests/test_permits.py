@@ -88,12 +88,18 @@ class Catalog(PermitBase):
         self.assertIn("push.policy | C (B when it only tightens) | yes | yes | yes | tightening only", out)
         self.assertIn("github.director_login | D | yes | yes | no | no | \"example-director\"", out)
         self.assertIn("harness | - | - | no | no | no | -", out)
-        for key, why in (("harness.path", "harness-owned"), ("slurm.account", "release 90"),
-                         ("modules.demo.env_rebuild", "release 90"), ("project", "not in the permit catalog"),
+        for key, why in (("harness.path", "harness-owned"), ("slurm.account", "not in this release's permit catalog"),
+                         ("modules.demo.env_rebuild", "not in this release's permit catalog"),
+                         ("members.codex.model", "does not switch it yet"), ("project", "not in the permit catalog"),
                          ("push", "not in the permit catalog")):
             with self.assertRaisesRegex(DurehError, why):
                 permits.set_key(self.site(), "desk", key, 1, "m")
         self.assertEqual(self.events(), [])
+        # release 93 (mokoji): the refusal named release 90 as the switch point while sites ran 92
+        with self.assertRaises(DurehError) as cm:
+            permits.catalog_key("members.codex.model")
+        self.assertNotIn("release 90", str(cm.exception))
+        self.assertNotIn("release 90", out)
 
     def test_show_history(self):
         permits.set_key(self.site(), "desk", "push.standing_ff", True, "on for the session")
@@ -285,6 +291,27 @@ class Approval(PermitBase):
         self.assertFalse(permits.apply(self.site(), "desk", self.STEPS, "again", self.ITEM)["applied"])
         with self.assertRaisesRegex(DurehError, "approves plan .*not this change"):
             permits.set_key(self.site(), "desk", "push.standing_ff", True, "m", self.ITEM)
+
+    def test_apply_tolerates_events_whose_approval_is_not_a_dict(self):
+        """Release 93 (UR-20261106-01): `slack.approval.decided` stores `approval` as the decided event id (a string);
+        approval_used() read every payload's `approval` as a dict and crashed, so no class C permit could be applied."""
+        self.assertEqual(self.ask()[0], 0)
+        led = Ledger(self.site())
+        led.event("slack.approval.decided", "desk", None, {"approval": "ev-20261006T133442648640Z-24d2ff97",
+                                                            "decision": "approved"})
+        led.event("slack.approval.decided", "desk", None, {"approval": None})
+        led.event("slack.approval.decided", "desk", None, {"approval": ["x"]})
+        rec = self.decide()
+        self.assertEqual(permits.approval_used(self.site(), rec["id"]), [])
+        code, out, err = self.cli("site", "permit", "apply", "--file", str(self.plan), "--memo", "board decision",
+                                  "--approval", self.ITEM)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(self.config()["push"]["policy"], [PRIVATE])
+        [used] = permits.approval_used(self.site(), rec["id"])
+        self.assertEqual(used["type"], "site.permit.applied")
+        hist = permits.show(self.site(), "push.policy", history=True)["history"]
+        self.assertEqual(hist[-1]["approval"], self.ITEM)
 
     def test_refused_decisions(self):
         self.assertEqual(self.ask()[0], 0)

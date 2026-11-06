@@ -31,7 +31,9 @@ HARNESS_OWNED = ("site", "harness", "startup", "schema_version", "state", "index
                  "upstream", "session", "env")
 LIST_KEYS = ("push.policy", "push.allowed_remotes")
 GITHUB_D_KEYS = ("enabled", "org", "project", "office_repo", "token_file", "app", "director_login")
-LATER_KEYS = ("members", "office_hours", "containers", "slurm", "limits", "checks")  # release 90
+# running-behaviour keys not in the catalog yet (planned for release 90, which shipped exams instead; release 91 added
+# `models.*` only): `site permit` refuses them and names the rule that still holds (release 93 wording)
+LATER_KEYS = ("members", "office_hours", "containers", "slurm", "limits", "checks")
 # Release 91 (docs/exams.md): `models.<tier>` is in the catalog with the quiet-point check (no agent running):
 # waiver -> `run-<id>` for the same model is class B (config_errors resolves the run id to a passing qualification
 # record of that tier and model), a new `model` is class C (a board Decision), a waiver set or extended is the
@@ -83,8 +85,9 @@ CATALOG = [
        "notes": "release 91; only at a quiet point (no agent running)"} for k in MODEL_TABLE_KEYS],
     *[{"key": f"github.{k}", "class": "D", "fail_closed": True, "T": True, "D+": False, "Desk": False,
        "notes": "GitHub identity and credentials: the Director's terminal only"} for k in GITHUB_D_KEYS],
-    *[{"key": k, "class": "C (release 90)", "fail_closed": True, "T": False, "D+": False, "Desk": False,
-       "notes": "running behaviour: switchable from release 90 (quiet-point check); refused here"}
+    *[{"key": k, "class": "C (not yet)", "fail_closed": True, "T": False, "D+": False, "Desk": False,
+       "notes": "running behaviour: not in the catalog in this release (a later release, with the quiet-point check);"
+                " refused here, a config change under the Director's rule"}
       for k in (*LATER_KEYS, *(f"modules.<id>.{m}" for m in LATER_MODULE_KEYS))],
     *[{"key": k, "class": "-", "fail_closed": None, "T": False, "D+": False, "Desk": False,
        "notes": "harness-owned: install / adapter sync"} for k in HARNESS_OWNED],
@@ -118,8 +121,10 @@ def catalog_key(key: str) -> str:
     if p[0] in HARNESS_OWNED:
         fail(f"{key} is harness-owned (install / `adapter sync`); `site permit` never changes it")
     if p[0] in LATER_KEYS or (p[0] == "modules" and len(p) == 3 and p[2] in LATER_MODULE_KEYS):
-        fail(f"{key} changes running behaviour: it becomes switchable at the site in release 90 (with the quiet-point"
-             " check); until then it stays a config change made under the Director's rule")
+        fail(f"{key} changes running behaviour and is not in this release's permit catalog: `site permit` does not"
+             " switch it yet (only push.*, modules.<id>.push, github.* and models.* are; the running-behaviour keys"
+             " come in a later release with the quiet-point check). Until then it stays a config change made under"
+             " the Director's rule (a merge window or the desk's OK); nothing was written")
     if p[0] == "models":  # release 91
         if len(p) == 2 and p[1] in MODEL_TABLE_KEYS:
             return key
@@ -516,7 +521,14 @@ def plan(site: Site, steps: list[dict], verify_github: bool = True) -> dict:
 
 # ------------------------------------------------------------------ approvals
 def approval_used(site: Site, record_id: str) -> list[dict]:
-    return [e for e in Ledger(site).events() if ((e["payload"].get("approval") or {}).get("record") == record_id)
+    """Permit and project-link events that already used the approval record `record_id`. Other events carry
+    `approval` in other shapes (release 93, UR-20261106-01: `slack.approval.decided` stores the decided event id as a
+    string), so only a dict payload is read and every other shape is not a use."""
+    def record(e: dict):
+        a = (e.get("payload") or {}).get("approval")
+        return a.get("record") if isinstance(a, dict) else None
+
+    return [e for e in Ledger(site).events() if record(e) == record_id
             and (e["type"].startswith(EVENT_PREFIX) or e["type"] == "site.project-linked")]
 
 
@@ -859,7 +871,7 @@ def show(site: Site, key: str, history: bool = False) -> dict:
             keys = [p.get("key")] + [s.get("key") for s in p.get("steps") or []] + (["push"] if p.get("key") == "push" else [])
             if key in keys or (p.get("key") == "push" and key.startswith("push.")):
                 hist.append({"id": e["id"], "ts": e["ts"], "type": e["type"], "by": p.get("by"), "memo": p.get("memo"),
-                             "approval": (p.get("approval") or {}).get("url")})
+                             "approval": p["approval"].get("url") if isinstance(p.get("approval"), dict) else None})
         out["history"] = hist
     return out
 

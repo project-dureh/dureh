@@ -14,15 +14,16 @@ import time
 from datetime import date
 from pathlib import Path
 
-from .paths import target_root
+from .paths import WORKTREE_SCRATCH, target_root
 from .records import Ledger
 from .site import Site
 from .util import DurehError, fail, git, is_within, sha256_file, times_word
 
 BRIEF_TAG = "DUREH-BRIEF"
 # interpreter caches, the virtualenv and the `.venv.stale-<time>` copies a rebuild (or the rename step) moved aside
+# release 93 (UR-20261106-02): the worktree's top-level scratch directory (paths.WORKTREE_SCRATCH) is exempt as well
 CACHE_RE = re.compile(r"(^|/)(__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.venv(\.stale-[^/]*)?)(/|$)"
-                      r"|\.py[co]$")
+                      r"|^\.dureh-scratch(/|$)|\.py[co]$")
 
 
 # --------------------------------------------------------------------- wi
@@ -243,6 +244,7 @@ def _create_worktree(site: Site, wi: str, target: str) -> dict:
             fail(f"worktree {wt} is broken ({err}); repair it with `dureh worktree repair --wi {wi}`")
         branch = git(["rev-parse", "--abbrev-ref", "HEAD"], wt)
         base = git(["rev-parse", branch], root, check=False) or None
+        ignore_worktree_scratch(wt)  # release 93: worktrees made before it
         return {"worktree": str(wt), "base": _base_of(site, wi) or base, "branch": branch, "note": "reused existing worktree"}
     site.worktrees.mkdir(exist_ok=True)
     base = git(["rev-parse", "HEAD"], root)
@@ -251,7 +253,24 @@ def _create_worktree(site: Site, wi: str, target: str) -> dict:
         git(["worktree", "add", str(wt), branch], root)
     else:
         git(["worktree", "add", "-b", branch, str(wt), base], root)
+    ignore_worktree_scratch(wt)
     return {"worktree": str(wt), "base": base, "branch": branch, "note": "new worktree"}
+
+
+def ignore_worktree_scratch(wt: Path) -> None:
+    """Git-ignore the worktree's scratch directory (release 93, UR-20261106-02) in the repository's own exclude file
+    (`git rev-parse --git-path info/exclude`, shared by its worktrees), never in a tracked .gitignore; idempotent.
+    A failure leaves the directory unignored (`wi stage` removes it before its clean check anyway)."""
+    line = f"/{WORKTREE_SCRATCH}/"
+    try:
+        rel = git(["rev-parse", "--git-path", "info/exclude"], wt)
+        ex = Path(rel) if Path(rel).is_absolute() else wt / rel
+        text = ex.read_text() if ex.is_file() else ""
+        if line not in text.splitlines():
+            ex.parent.mkdir(parents=True, exist_ok=True)
+            ex.write_text(text + ("" if not text or text.endswith("\n") else "\n") + line + "\n")
+    except (OSError, DurehError):
+        pass
 
 
 def wi_branches(site: Site, wi: str) -> tuple[str, str]:
@@ -830,7 +849,7 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None, tie
         block += jobs_block(led, wi)  # release 92 (fnd 68509358): a re-dispatch says which jobs already ran
     block += _env_brief_line(wt)  # release 47: outside the budget, as the verification block
     if role.write_scopes and not checking and not role.is_manager:
-        block += SCRIPT_FILE_LINE  # release 92: roles that write files; outside the budget
+        block += script_file_line(wt)  # release 92: roles that write files; outside the budget
     full = text + block
     digest = hashlib.sha256(full.encode("utf-8")).hexdigest()[:16]
     header = f"{BRIEF_TAG} {wi} role={role.name} brief={digest}"
@@ -946,8 +965,20 @@ def rework_notes_block(led: Ledger, wi: str) -> str:
     return out
 
 
-SCRIPT_FILE_LINE = ("\nShell: write a multi-line script to a file in your work root (or $TMPDIR) and run it"
-                    " (`python3 -I <file>`); a heredoc piped into an interpreter is refused by the permission check.\n")
+SCRIPT_FILE_LINE = ("\nShell: write a multi-line script to a file in your scope or in scratch space ($TMPDIR, written"
+                    " out as an absolute path) and run it (`python3 -I <file>`); a heredoc piped into an interpreter"
+                    " is refused by the permission check.\n")
+
+
+def script_file_line(wt: dict) -> str:
+    """The script-file line of a file-writing role's brief (release 92). Release 93 (UR-20261106-02): with a WI
+    worktree it names the worktree's scratch directory, which the bound agent may write whatever its scope."""
+    if not wt.get("worktree"):
+        return SCRIPT_FILE_LINE
+    d = f"{wt['worktree']}/{WORKTREE_SCRATCH}"
+    return (f"\nShell: write a multi-line script to a file under {d}/ (yours to write whatever your scope;"
+            " git-ignored, not an output, removed at `wi stage`) and run it (`python3 -I <file>`); a heredoc piped"
+            " into an interpreter is refused by the permission check.\n")
 # release 92: 38 of 84 guard refusals in a company week were heredoc-into-python (outside the budget)
 JOBS_BLOCK_BYTES = 1536  # release 92 (fnd 68509358): the WI's jobs in a re-dispatched brief, outside the budget
 
@@ -1223,6 +1254,15 @@ def dispatch_stop(site: Site, actor: str, wi: str, reason: str) -> dict:
 
 
 # --------------------------------------------------------------- staging
+def _remove_worktree_scratch(wt: Path) -> None:
+    """Delete `<worktree>/.dureh-scratch/` (release 93): a real directory inside the worktree only, never a symlink."""
+    d = wt / WORKTREE_SCRATCH
+    if d.is_symlink() or d.is_file():
+        d.unlink()
+    elif d.is_dir():
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def wi_stage(site: Site, actor: str, wi: str, summary: str) -> dict:
     """Mark committed work ready for the checker.
 
@@ -1240,6 +1280,7 @@ def wi_stage(site: Site, actor: str, wi: str, summary: str) -> dict:
     head = None
     wt = site.worktrees / wi
     if wt.is_dir():
+        _remove_worktree_scratch(wt)  # release 93 (UR-20261106-02): the agent's scratch files end at stage
         head = git(["rev-parse", "HEAD"], wt)
         dirty = git(["status", "--porcelain"], wt)
         if dirty:
