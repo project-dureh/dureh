@@ -30,7 +30,8 @@ CLASS_RANK = {"B": 1, "C": 2, "D": 3}
 HARNESS_OWNED = ("site", "harness", "startup", "schema_version", "state", "index", "references", "runtime",
                  "upstream", "session", "env")
 LIST_KEYS = ("push.policy", "push.allowed_remotes")
-GITHUB_D_KEYS = ("enabled", "org", "project", "office_repo", "token_file", "app", "director_login")
+GITHUB_D_KEYS = ("enabled", "org", "project", "office_repo", "token_file", "app", "director_login",
+                 "push_transport")
 # running-behaviour keys not in the catalog yet (planned for release 90, which shipped exams instead; release 91 added
 # `models.*` only): `site permit` refuses them and names the rule that still holds (release 93 wording)
 LATER_KEYS = ("members", "office_hours", "containers", "slurm", "limits", "checks")

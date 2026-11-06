@@ -88,6 +88,7 @@ Tests prove the mechanism with the neutral example package `tests/fixtures/examp
 | `github.org`, `github.project` | required when enabled | the company's organization login and its organization Project (v2) number |
 | `github.office_repo` | `office` | the repository for issues not tied to a project (`github item add` and `item ask` default) |
 | `github.token_file` | required when enabled | the fine-grained token's file (`~`, `$VAR` expanded); it must exist and be mode 600. The token goes to `gh` as GH_TOKEN only and is never printed, logged or recorded. Unknown `github` keys, wrong types, missing required keys or a missing or group/other-readable token file are refused (`adapter sync`, `verify --self`; `status` warns) |
+| `github.push_transport` | `"ssh"` | release 95 (dureh-team#56 step 6): `"app"` = `dureh push` reaches repositories of `github.org` over HTTPS with the company App token through `dureh_core/git_credential.py` (fail-closed: a missing or stale token refuses, no fallback); other remotes keep their URL and `github transport` lists them as still on SSH; requires `github.app`; class D in `site permit`; records carry `transport` (docs/github.md) |
 | `github.director_login` | unset | the Director's GitHub login: layer-3 asks (`github item ask --layer 3`) are assigned to it |
 
 ## The startup package: `startup.yaml` schema 2 (release 46)

@@ -41,7 +41,8 @@ from .records import Ledger, short_title
 from .site import Site
 from .util import DurehError, fail
 
-KEYS = ("enabled", "org", "project", "office_repo", "token_file", "director_login", "app", "dashboard_issue")
+KEYS = ("enabled", "org", "project", "office_repo", "token_file", "director_login", "app", "dashboard_issue",
+        "push_transport")
 DEFAULT_OFFICE = "office"
 DESK_MARK = "<!-- dureh-desk -->"
 DECISION_LABEL = "kind:decision"
@@ -187,9 +188,9 @@ def config_errors(site: Site, config: dict | None = None, startup=None) -> list[
     dash = raw.get("dashboard_issue")
     if dash is not None and (isinstance(dash, bool) or not isinstance(dash, int) or dash < 1):
         out.append(f"config github.dashboard_issue must be an issue number of office_repo (release 86), not {dash!r}")
-    from .github_app import app_errors
+    from .github_app import app_errors, push_transport_errors
 
-    out += app_errors(site, raw.get("app"))
+    out += app_errors(site, raw.get("app")) + push_transport_errors(raw)
     if on:
         missing = [k for k, v in (("org", org), ("project", number), ("token_file", token_file)) if v is None]
         if missing:

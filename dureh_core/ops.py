@@ -2308,12 +2308,12 @@ def squash_message_refusal(message: str | None) -> str | None:
 
 
 def _squash_commit(site: Site, repo_path: Path, remote: str, dest: str, rev: str, message: str,
-                   root: bool = False) -> dict:
+                   root: bool = False, env: dict | None = None) -> dict:
     """One commit with `rev`'s tree on top of the remote tip of `dest` (an existing branch), so the push is a
     fast-forward by construction and none of the local history goes out. Release 89 (dureh-team#111): `root` (a
     push.policy rule whose `new_branches` lists the branch, on an empty remote) lets the commit be the root commit
-    of the repository's first branch instead."""
-    env = site.env()
+    of the repository's first branch instead. Release 95: `env` carries the push transport (push_git_env)."""
+    env = env if env is not None else site.env()
     if not dest.startswith("refs/heads/"):
         fail(f"--squash pushes to a branch, not {dest}")
     ff = fast_forward(repo_path, remote, dest, rev, env)
@@ -2511,7 +2511,7 @@ def _first_push(led: Ledger, owner: str, name: str) -> bool:
 
 
 def push_policy_rule(site: Site, led: Ledger, repo_path: Path, remote: str, url: str, dest: str,
-                     rev: str) -> tuple[dict, dict]:
+                     rev: str, env: dict | None = None) -> tuple[dict, dict]:
     """The first `push.policy` rule that covers pushing `rev` to `dest` on `url`, and the facts it was matched on
     (release 89, proposal 4.2): visibility from GitHub, empty from `git ls-remote --heads`, new branch and
     fast-forward from fast_forward(), first = no push.completed to the repository yet. A fact that cannot be read, a
@@ -2524,7 +2524,7 @@ def push_policy_rule(site: Site, led: Ledger, repo_path: Path, remote: str, url:
     if not rules:
         fail(f"remote {url!r} is not in push.allowed_remotes and no push.policy rule covers {owner}/{name}: a config"
              " change (the Director's approval) adds one")
-    env = site.env()
+    env = env if env is not None else site.env()
     facts: dict = {"owner": owner, "name": name}
     try:
         facts["visibility"], facts["visibility_via"] = github_visibility_via(site, owner, name)
@@ -2650,6 +2650,7 @@ def push(site: Site, actor: str, repo: str, remote: str, ref: str, approval: str
     if squash is not None and not approval and not by_policy:
         fail(f"--squash needs --approval: a squashed push always takes a Director decision; {PUSH_APPROVAL_HINT}")
     rev = git(["rev-parse", ref], repo_path)
+    env, transport = _push_transport_env(site, repo_path, remote, url)
     if approval:
         dec = led.get("decision", approval)
         b = dec["payload"].get("binding") or {}
@@ -2662,7 +2663,7 @@ def push(site: Site, actor: str, repo: str, remote: str, ref: str, approval: str
     else:
         dest = _dest_ref(ref)
     if by_policy:
-        rule, facts = push_policy_rule(site, led, repo_path, remote, url, dest, rev)
+        rule, facts = push_policy_rule(site, led, repo_path, remote, url, dest, rev, env)
         refused = push_policy_refusal(rule, facts, dest, bool(approval), squash)
         if refused:
             fail(refused)
@@ -2687,7 +2688,7 @@ def push(site: Site, actor: str, repo: str, remote: str, ref: str, approval: str
                 fail(f"--approval DECISION is required (config push.standing_ff is off); {PUSH_APPROVAL_HINT}")
             fail(f"--approval DECISION is required (config push.allowed_remotes rule for {rule['url']} has standing_ff"
                  f" off); {PUSH_APPROVAL_HINT}")
-        ff = fast_forward(repo_path, remote, dest, rev, site.env())
+        ff = fast_forward(repo_path, remote, dest, rev, env)
         if ff["new_branch"] and not _globs(rule["new_branches"], dest[len("refs/heads/"):] if dest.startswith("refs/heads/") else dest):
             what = ("config push.standing_ff_new_branches is off" if rule["form"] == "string" else
                     f"config push.allowed_remotes rule for {rule['url']} has new_branches"
@@ -2703,13 +2704,25 @@ def push(site: Site, actor: str, repo: str, remote: str, ref: str, approval: str
     out_rev = rev
     if squash is not None:
         sq = _squash_commit(site, repo_path, remote, dest, rev, squash,
-                            root=by_policy and bool(facts.get("empty")))  # release 89: checked by the policy above
+                            root=by_policy and bool(facts.get("empty")), env=env)  # release 89: checked by the policy above
         out_rev, extra = sq["commit"], {**extra, "squash": {**sq, "message": squash}, "fast_forward": True}
     if not dry_run:
-        git(["push", remote, f"{out_rev}:{dest}"], repo_path, env=site.env())
+        git(["push", remote, f"{out_rev}:{dest}"], repo_path, env=env)
     return led.event("push.completed" if not dry_run else "push.planned", actor, wi,
                      {"repo": str(repo_path), "remote": url, "revision": rev, "ref": dest, **extra,
-                      "rule": rule, "policy": policy, "action_class": "compensatable"}, refs)
+                      "rule": rule, "policy": policy, "transport": transport, "action_class": "compensatable"}, refs)
+
+
+def _push_transport_env(site: Site, repo_path: Path, remote: str, url: str) -> tuple[dict, dict]:
+    """Release 95 (dureh-team#56 step 6): the git environment for every network call of this push and the record's
+    `transport` ({via: app-https, owner} or {via: remote as configured, why}; never the token or its file's content).
+    Refuses (fail-closed) when the App should carry the push and the token is not fresh, or when the checkout's own
+    url rewriting would send it elsewhere."""
+    from . import github_app
+
+    env, t = github_app.push_git_env(site, url)
+    github_app.check_resolved(repo_path, remote, env, t)
+    return env, {k: v for k, v in t.items() if k in ("via", "owner", "why")}
 
 
 def push_approve(site: Site, actor: str, repo: str, remote: str, ref: str, memo: str, by: str = "Director",
@@ -2727,7 +2740,8 @@ def push_approve(site: Site, actor: str, repo: str, remote: str, ref: str, memo:
             refused = push_limit_refusal(rule, _dest_ref(ref), True)
         elif push_policy(site.config.get("push") or {}) and GITHUB_REMOTE.match(url):
             # release 89: a remote under push.policy gets a decision only for a push its rule would take
-            prule, facts = push_policy_rule(site, Ledger(site), repo_path, remote, url, _dest_ref(ref), rev)
+            env, _t = _push_transport_env(site, repo_path, remote, url)  # release 95: the same transport as the push
+            prule, facts = push_policy_rule(site, Ledger(site), repo_path, remote, url, _dest_ref(ref), rev, env)
             refused = push_policy_refusal(prule, facts, _dest_ref(ref), True, squash)
         else:
             refused = None

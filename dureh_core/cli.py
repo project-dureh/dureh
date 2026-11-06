@@ -981,6 +981,15 @@ def cmd_github(a):
         from . import github_app
 
         raise SystemExit(github_app.serve(site, a.every, a.once))
+    if c == "transport":  # release 95 (dureh-team#56 step 6)
+        from . import github_app
+
+        res = github_app.transports(site)
+        if a.json:
+            _print(res)
+        else:
+            print("\n".join(github_app.transport_lines(res)))
+        return
     if c == "status":
         res = github.status(site)
         if a.json:
@@ -1849,6 +1858,11 @@ def parser() -> argparse.ArgumentParser:
                                      "job runs it beside the session); one line per refresh, never the token")
     x.add_argument("--every", type=int, default=1800)
     x.add_argument("--once", action="store_true")
+    x = add(gp, "transport", cmd_github, "how `dureh push` reaches each GitHub remote config push names (release 95, "
+                                         "#56 step 6): over HTTPS with the company App token (config "
+                                         "github.push_transport \"app\", the App's organization) or as the remote "
+                                         "says; ends with the remotes still on SSH. Config only: no network, no token")
+    x.add_argument("--json", action="store_true")
     x = add(gp, "sweep", cmd_github, "desk: close every open issue of the organization whose Status is Done and that "
                                      "carries no waiting-director, needs-review or needs-approval label (day close runs "
                                      "it); records github.sweep.done")
@@ -2000,7 +2014,7 @@ def parser() -> argparse.ArgumentParser:
 
 OBSERVE_ALLOWED = {("status", None), ("wi", "show"), ("wi", "list"), ("ledger", "query"), ("upstream", "list"), ("upstream", "message"), ("upstream", "inbox"),
                    ("path-refs", None), ("usage", None), ("verify", None), ("day", "status"), ("day", "handshake"), ("site", "session"),
-                   ("protected", "list"), ("member", "status"), ("github", "status"),
+                   ("protected", "list"), ("member", "status"), ("github", "status"), ("github", "transport"),
                    ("exam", "compare"), ("exam", "plan")}
 
 
