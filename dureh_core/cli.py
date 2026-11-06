@@ -1917,7 +1917,9 @@ def parser() -> argparse.ArgumentParser:
                    help="release 85 (approval classes): C a decision (Needs approval, the default form); D a step only"
                         " the Director's hands do (Waiting for Director, label waiting-director, no options; needs"
                         " --command)")
-    x.add_argument("--command", help="with --class D: the exact command or step the Director runs")
+    x.add_argument("--command", help="with --class D: the exact command or step the Director runs; the harness renders"
+                                     " 현재 상태, 대표님이 하실 일 and this command, so the body file carries background only"
+                                     " (a copy of the command or those headings in it is removed with a warning)")
     x.add_argument("--permit", help="release 89: a `site permit` plan file (JSON list of steps) this ask binds by "
                                     "sha256 to Approve 1; `site permit apply --file <plan> --approval <item URL>` "
                                     "applies exactly it after the Director's Decision (docs/permits.md)")

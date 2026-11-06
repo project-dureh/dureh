@@ -32,6 +32,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import time
 from datetime import date
 from pathlib import Path
@@ -1256,6 +1257,60 @@ WAITING_LABEL = "waiting-director"
 DIRECTOR_STEP = "github.director-step.created"
 
 
+# Release 95 (UR-20261106-04, the Director's request of 2026-11-06): a `--class D` body that repeats the headings the
+# harness renders (or the day-plan heading 대표님 조치 필요) or the command itself showed the command twice.
+_STEP_HEADINGS = ("현재 상태", "대표님이 하실 일", "대표님 조치 필요")
+_HEADING = re.compile(r"^\s{0,3}#{1,6}\s*(.*?)\s*#*\s*$")
+_FENCE = re.compile(r"^\s{0,3}(```+|~~~+)")
+
+
+def _strip_step_repeats(body: str, command: str) -> tuple[str, list[str]]:
+    """(body, what was removed): drop from a `--class D` body every heading the step renders itself and every copy of
+    `command` (a fenced block whose content is the command, or the command's lines verbatim, also in backticks), so the
+    issue shows 현재 상태, 대표님이 하실 일 and the command once. A body without them comes back unchanged."""
+    cmd = [ln.strip() for ln in command.strip().splitlines() if ln.strip()]
+
+    def same(lines: list[str]) -> bool:
+        got = [ln.strip() for ln in lines if ln.strip()]
+        if len(got) == 1 and len(cmd) == 1:
+            got = [got[0].strip("`").strip()]
+        return bool(cmd) and got == cmd
+
+    lines, out, removed, i = (body or "").splitlines(), [], [], 0
+    while i < len(lines):
+        ln = lines[i]
+        head = _HEADING.match(ln)
+        if head and head.group(1).strip() in _STEP_HEADINGS:
+            removed.append(f"heading {head.group(1).strip()!r}")
+            i += 1
+            continue
+        fence = _FENCE.match(ln)
+        if fence:
+            mark = fence.group(1)
+            end = next((j for j in range(i + 1, len(lines)) if lines[j].strip().startswith(mark[0] * len(mark))
+                        and not lines[j].strip().strip(mark[0])), None)
+            if end is None:  # an unclosed fence: keep the rest as it is
+                out.extend(lines[i:])
+                break
+            if same(lines[i + 1:end]):
+                removed.append("the command (fenced)")
+            else:
+                out.extend(lines[i:end + 1])
+            i = end + 1
+            continue
+        n = len(cmd)
+        if n and same(lines[i:i + n]):
+            removed.append("the command")
+            i += n
+            continue
+        out.append(ln)
+        i += 1
+    if not removed:
+        return body, []
+    text = re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
+    return text, list(dict.fromkeys(removed))
+
+
 def _director_step(site: Site, actor: str, title: str, body: str, command: str | None, wi: str | None, project,
                    repo: str | None, priority=None) -> dict:
     """Release 85 (`item ask --class D`, approval-balance plan 3.1/3.4): a step only the Director's hands can do (an App
@@ -1267,6 +1322,13 @@ def _director_step(site: Site, actor: str, title: str, body: str, command: str |
         fail("--class D needs --command: the exact command or step the Director runs (one block he can paste)")
     if priority is None:
         fail("refused: a layer-3 item needs --priority P0..P3 (release 87, dureh-team#108; desk rule: P2 unless asked)")
+    body, removed = _strip_step_repeats(body, command)
+    if removed:
+        if not body.strip():
+            fail("refused: the body held only the command and the headings the step renders; the body file carries"
+                 " background only (the harness renders 현재 상태, 대표님이 하실 일 and the --command block)")
+        print(f"warning: removed from the body what the step renders itself ({', '.join(removed)}); the body file"
+              " carries background only (UR-20261106-04)", file=sys.stderr)
     cfg = config(site)
     title = _clean(title, "the title", 256)
     text = (f"## 현재 상태\n\n{_clean(body, 'the body')}\n\n## 대표님이 하실 일\n\n```\n{_clean(command, '--command', 4000)}\n```"

@@ -371,7 +371,9 @@ def _github_rule(site: Site, dureh) -> str:
             " approval) and never set that Decision yourself. Never ask the Director for a decision or an approval in"
             " the chat (release 87, Director, dureh-team#108): it goes on the board with `github item ask`, and the"
             " chat holds only one status line with the item's link. An option that is a step only the Director's hands"
-            " do is not a choice: file it with `github item ask --class D --command \"...\" --priority P2`. Company"
+            " do is not a choice: file it with `github item ask --class D --command \"...\" --priority P2`; its"
+            " --body-file carries background only: the harness renders 현재 상태, 대표님이 하실 일 and the command"
+            " itself (UR-20261106-04). Company"
             f" permissions in the harness catalog (push rules, a module's push, `github.dashboard_issue`, a data project"
             f" link; `{dureh} site permit list`) change only through `{dureh} site permit` (release 89), never by"
             " editing config.json: a class B change (tightening, display) you apply yourself with `site permit"
@@ -753,7 +755,8 @@ def _claude_md(site: Site) -> str:
               " C, irreversible, outside the lab, or a change of rule or direction (the fail-closed kinds below): a Needs approval item that waits for an explicit answer, while the work it blocks is re-planned, never stalled;"
               " D, a step only the Director's hands can do (an App or web setting, a login, a command refused to you after approval, a dataset link):"
               " a Waiting for Director item with the exact command"
-              + (f" (`{dureh} github item ask --class D --command \"...\" --priority P2`). " if _github_on(site) else ". ") + FAIL_CLOSED_RULE +
+              + (f" (`{dureh} github item ask --class D --command \"...\" --priority P2`; the --body-file carries background only,"
+                 " the harness renders 현재 상태, 대표님이 하실 일 and the command). " if _github_on(site) else ". ") + FAIL_CLOSED_RULE +
               f" The plan lists every action only the Director can take (a dataset link, a push approval, a config change) with `{dureh} day plan --director-action \"<text>\"` (repeatable),"
               " so the Director handles them in one go at approval: `slack ask --kind day-plan` posts them under 대표님 조치 필요 (release 58)."
               " A wait is allowed only when the Director alone can act (a push, a dataset link, an approval-exec item): record it with"
