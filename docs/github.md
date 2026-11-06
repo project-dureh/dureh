@@ -66,6 +66,7 @@ on GitHub; Slack keeps the day thread reports, and the Slack opinions and consul
 | `token_file` | required when enabled | the file that holds the fine-grained token (`~` and `$VAR` expanded); it must exist and be mode 600 |
 | `director_login` | unset | the Director's GitHub login; layer-3 asks are assigned to it (unset: no assignee) |
 | `dashboard_issue` | unset | (release 86) the `office_repo` issue whose body `github digest --write` keeps as the company dashboard |
+| `push_transport` | `"ssh"` | (release 95) `"app"`: `dureh push` reaches the organization's repositories over HTTPS with the App token (see Pushing with the company App); needs `app`; class D (the Director's terminal) |
 
 Unknown keys, a wrong type, and (when enabled) a missing `org`/`project`/`token_file` or a token file that is missing
 or readable by group or others are refused: `adapter sync` and `verify --self` fail, `status` warns.
@@ -98,11 +99,71 @@ personal account: GitHub answers 404. Release 94 (dureh-team#148): where a push 
 (no gh, no stored login): public if GitHub shows the repository to anyone, else private (private or absent). Any
 other failure still refuses. The push record's `policy.facts.visibility_via` says which path decided.
 
+## Pushing with the company App (release 95, dureh-team#56 step 6)
+
+Until release 95 every company push went to the remote URL as written: `git@github.com:...`, i.e. over the
+Director's SSH key on the cluster. With `github.push_transport: "app"` (and `github.app` set) a push to a repository
+of `github.org`, the organization the company App is installed on, goes over HTTPS with the App installation token
+instead, so the push is made by `<app>[bot]` and no longer needs the Director's key.
+
+**Transport rule** (`dureh push` and `push --approve`, every network call of one push: `ls-remote`, `fetch`, `push`):
+
+| remote | transport |
+|---|---|
+| `git@github.com:<org>/<repo>.git`, `ssh://git@github.com/<org>/...` or `https://github.com/<org>/...`, `<org>` = `github.org` (case-insensitive), `push_transport` `"app"` | `https://github.com/<org>/<repo>.git` with the App token |
+| a GitHub repository of any other owner (a personal account, another organization) | as written (SSH): the org's App cannot reach it |
+| a local path or another host | as written |
+| any remote while `push_transport` is unset or `"ssh"`, or `github.app` is unset | as written (the release-94 behaviour) |
+
+How: the harness gives the git subprocesses of that push, in their environment only (`GIT_CONFIG_COUNT`, never a
+config file), `url.https://github.com/<org>/.insteadOf` for the two SSH forms of the organization, an empty
+`credential.helper` (so no global helper such as `gh auth git-credential` is asked), then
+`credential.https://github.com.helper` = `python3 -I <harness>/dureh_core/git_credential.py --token-file <token_file>
+--owner <org> --max-age 3000`, `credential.https://github.com.useHttpPath true`, `credential.interactive false` and
+`GIT_TERMINAL_PROMPT=0`. The helper (git credential protocol) answers only `get` for `https://github.com/<org>/...`
+with `username=x-access-token` and `password=<token>` on its stdout, which only git reads; anything else gets
+`quit=1` (git stops: no other helper, no prompt) and one stderr line that never carries the token. The token is not
+on a command line, not in the environment, not in a log or a record.
+
+**Fail-closed.** Before any network call the push is refused (nothing is pushed, no fallback to SSH) when the token
+file is missing, not mode 600, or older than 50 minutes (`dureh github token --every 1800` rewrites it every 30 min;
+a token lives 1 h), or when git, under that environment, resolves the remote to anything but the App's https URL (a
+`url.<base>.insteadOf` in the checkout or the global config with the same or a longer prefix wins over ours). A push
+GitHub refuses (for example HTTP 403 while the App lacks Contents write) fails as git reports it.
+
+**Record.** `push.completed` / `push.planned` carry `transport`: `{"via": "app-https", "owner": "<org>"}` or
+`{"via": "remote as configured", "owner"?, "why"}`; never the token or its file.
+
+**What stays on SSH.** `dureh github transport [--json]` (allowed with `--observe`; config only, no network) lists
+every GitHub remote that `push.allowed_remotes` and `push.policy` name, with its transport, and ends with
+`still on SSH (N): ...`. Those remotes keep needing an SSH key that can push there; while the list is not empty the
+Director's SSH key cannot be removed from the cluster (step 8) without moving them first (to the organization, or to
+their own deploy key / App: a Director decision, not done by the harness).
+
+### The Director's steps
+
+1. **Raise the App's permission** (web, per company App, 2 min): organization Settings -> Developer settings ->
+   GitHub Apps -> the company App -> Permissions & events -> Repository permissions -> **Contents: Read and write**
+   -> Save. Then the organization Settings -> GitHub Apps -> the App -> Configure: **accept the new permission** (GitHub
+   asks the installation to approve it) and check that "Repository access" includes every repository the desk pushes
+   to (`office`, `.github-private` and the project repositories, or "All repositories").
+2. **Switch the site** (his terminal, class D): `dureh --site <company> site permit set github.push_transport
+   '"app"' --memo "#56 step 6"`. Effective at the next `dureh push` (no session restart: the session job's
+   `github token --every 1800` already keeps the token fresh; a token minted before step 1 carries the old
+   permissions until the next refresh, at most 30 min, or `dureh github token --once`).
+3. **Check**: `dureh --site <company> github transport` (the organization's remotes show `app https`); the desk's next
+   push record shows `transport.via: app-https`, and the commit's push on GitHub is attributed to `<app>[bot]`.
+
+**Roll back**: `site permit set github.push_transport '"ssh"'` (or `site permit unset github.push_transport`); the next
+push goes to the remote URL as written again (SSH, while the Director's key is still on the cluster). The App
+permission may stay.
+
 ## Commands
 
 | command | who | what |
 |---|---|---|
 | `github token [--every 1800] [--once]` | the session job (config `github.app`) | mint the company App's installation token into `token_file`; one line per refresh, never the token |
+| `github transport [--json]` | anyone; allowed with `--observe` | release 95: each GitHub remote config `push` names with the transport `dureh push` uses (App https or as written) and the list `still on SSH` (Pushing with the company App) |
 | `github status [--json]` | anyone; allowed with `--observe` | the board's items grouped by Status, each with its Decision, Project and Layer; under a decided or waiting item the Director's latest comment since the ask (`Director: ...`) and, on Discuss, the hold line; `--json` rows carry `director_comments` |
 | `github watch [--interval 120] [--once]` | desk, as a Monitor in working hours | one line per Decision change (with ` | Director: <latest comment since the ask> <url>`, or `none`), per new comment and per newly opened issue not marked as the desk's; nothing else |
 | `github item add --wi WI [--status S] [--project P] [--layer 1-3] [--units N] [--priority P0-P3] [--start D] [--target D] [--repo R \| --url U]` | desk | an issue for the work item (its title and goal only) in `office_repo` or `--repo` (or the existing issue `--url`), added to the board with its fields; desk rule: Priority P2 unless asked |

@@ -23,7 +23,7 @@ Classes are computed **per change**, not per key:
 | `github.dashboard_issue` | B | display only; checked on GitHub: an open issue of `office_repo` (a failed check refuses) |
 | plan step `link-module`, `new-module`, `new-project` | B | reversible (`retire-module`); a module's push rule is a separate step |
 | plan step `link-project` | C | a data project link, fail-closed (also `site link-project --approval`) |
-| `github.enabled`, `org`, `project`, `office_repo`, `token_file`, `app`, `director_login` | D | the Director's terminal only; refused inside an agent session |
+| `github.enabled`, `org`, `project`, `office_repo`, `token_file`, `app`, `director_login`, `push_transport` | D | the Director's terminal only; refused inside an agent session. `push_transport` (release 95): `"app"` sends pushes to the App's organization over HTTPS with the App token, `"ssh"`/unset keeps the remote URL (docs/github.md, Pushing with the company App); the push records carry `transport` |
 | `models.<tier>`, `models.routing`, `models.fallback_tiers`, `models.candidates` | B run id for the same model, C new model or table key, D waiver | release 91, only at a quiet point (no agent running); docs/exams.md |
 | `members`, `office_hours`, `containers`, `slurm`, `limits`, `checks`, `modules.<id>.env_rebuild/submit/containers_cmd` | not yet | refused (running behaviour): not in the catalog in this release; they come in a later release with the quiet-point check `models.*` got in 91. Until then a config change under the Director's rule (release 93 wording; it named release 90 before) |
 | `site`, `harness`, `startup`, `schema_version`, `state`, `index`, `references`, `runtime`, `upstream`, `session`, `env` | harness-owned | refused: install / `adapter sync` |
