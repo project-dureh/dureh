@@ -1106,6 +1106,62 @@ class Items(GithubBase):
         self.assertEqual(code, 2)
         self.assertIn("--command goes with --class D", err)
 
+    def _class_d_text(self, body_text, command="git push origin main"):
+        body = self.tmp / "step.md"
+        body.write_text(body_text)
+        self.gh.calls.clear()
+        code, _, err = self.run_cli("item", "ask", "--title", "Push", "--body-file", str(body), "--class", "D",
+                                    "--command", command, "--priority", "P2")
+        self.assertEqual(code, 0, err)
+        create = next(c for c in self.gh.calls if c["argv"][1:3] == ["issue", "create"])
+        return create["input"], err
+
+    def test_class_d_body_repeating_the_command_shows_it_once(self):
+        """Release 95 (UR-20261106-04): a copy of --command in the body is removed with a
+        warning, so the issue shows the command once."""
+        text, err = self._class_d_text("The push was refused.\n\ngit push origin main\n\nThen reply here.")
+        self.assertEqual(text.count("git push origin main"), 1)
+        self.assertIn("## 대표님이 하실 일\n\n```\ngit push origin main\n```", text)
+        self.assertIn("The push was refused.\n\nThen reply here.", text)
+        self.assertIn("warning: removed from the body", err)
+        text, _ = self._class_d_text("The push was refused.\n\n`git push origin main`")
+        self.assertEqual(text.count("git push origin main"), 1)
+
+    def test_class_d_body_with_the_command_in_a_fence_shows_it_once(self):
+        cmd = "cd /site && bin/dureh site permit apply --file p.json --memo \"deep tier\""
+        text, err = self._class_d_text(f"Plan checked.\n\n```bash\n{cmd}\n```\n\nReply 완료.", command=cmd)
+        self.assertEqual(text.count(cmd), 1)
+        self.assertNotIn("```bash", text)
+        self.assertIn("the command (fenced)", err)
+        two = "git fetch\ngit push origin main"
+        text, _ = self._class_d_text(f"Two steps.\n\n```\n{two}\n```", command=two)
+        self.assertEqual(text.count("git fetch"), 1)
+
+    def test_class_d_body_with_the_rendered_headings_is_not_duplicated(self):
+        """The shape seen in use: the desk's body carried 현재 상태, 대표님 조치 필요 and the fenced command."""
+        body = ("## 현재 상태\npermit 적용 완료. push가 거부되었습니다.\n\n## 대표님 조치 필요\n"
+                "origin 쪽에서 pull 한 번:\n\n```\ngit push origin main\n```\n\n## 대표님이 하실 일\n\n끝나면 댓글.")
+        text, err = self._class_d_text(body)
+        self.assertEqual(text.count("## 현재 상태"), 1)
+        self.assertEqual(text.count("## 대표님이 하실 일"), 1)
+        self.assertNotIn("대표님 조치 필요", text)
+        self.assertEqual(text.count("git push origin main"), 1)
+        self.assertTrue(text.startswith("## 현재 상태\n\npermit 적용 완료."))
+        self.assertIn("heading '현재 상태'", err)
+        body_file = self.tmp / "only.md"
+        body_file.write_text("## 대표님이 하실 일\n\n```\ngit push origin main\n```")
+        code, _, err = self.run_cli("item", "ask", "--title", "Push", "--body-file", str(body_file), "--class", "D",
+                                    "--command", "git push origin main", "--priority", "P2")
+        self.assertEqual(code, 2)
+        self.assertIn("carries background only", err)
+
+    def test_class_d_body_without_the_command_is_unchanged(self):
+        body = "The push was refused.\n\n```\ngit status\n```\n\n### Notes\n- git push origin main --dry-run passed"
+        text, err = self._class_d_text(body)
+        self.assertIn(f"## 현재 상태\n\n{body}\n\n## 대표님이 하실 일", text)
+        self.assertNotIn("warning", err)
+        self.assertEqual(github._strip_step_repeats(body, "git push origin main"), (body, []))
+
     def test_ask_body_in_the_director_item_format(self):
         """Release 87 (dureh-team#108 item 4): --state opens the body; the issue round-trips through the dashboard's
         parser (board_digest.three_lines): the question under 결정할 것, 추천 and 답이 없으면."""
