@@ -92,6 +92,12 @@ App's private key, mode 600) the harness mints the App's installation token itse
 writes as `<app>[bot]` instead of the Director. The key is read by path only; neither key nor token is printed. While
 `app` is set, a missing token file is not an error (the first refresh writes it). Without `app` nothing changes.
 
+An organization's App installation token cannot see a repository outside the installation, such as one of a
+personal account: GitHub answers 404. Release 94 (dureh-team#148): where a push rule needs a repository's visibility
+(`push.policy`, a release-86 pattern entry) and the token gets that 404, the harness asks once more without any token
+(no gh, no stored login): public if GitHub shows the repository to anyone, else private (private or absent). Any
+other failure still refuses. The push record's `policy.facts.visibility_via` says which path decided.
+
 ## Commands
 
 | command | who | what |

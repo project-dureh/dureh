@@ -2222,7 +2222,12 @@ def pattern_private_refusal(site: Site, rule: dict, url: str) -> str | None:
         from . import github
 
         cfg = github.config(site)
-        private = github.gh(cfg, ["api", f"repos/{owner}/{name}", "--jq", ".private"], timeout=30).strip()
+        try:
+            private = github.gh(cfg, ["api", f"repos/{owner}/{name}", "--jq", ".private"], timeout=30).strip()
+        except github.GhError as exc:  # release 94: the token's 404 is decided without a token (dureh-team#148)
+            if not github.is_not_found(exc):
+                raise
+            private = str(github.anonymous_visibility(owner, name) == "private").lower()
     except DurehError as exc:
         return f"{where} covers private repositories only, and GitHub could not be asked about {owner}/{name}: {exc}"
     if private != "true":
@@ -2467,14 +2472,32 @@ def push_policy_line(rule: dict) -> str:
 
 def github_visibility(site: Site, owner: str, name: str) -> str:
     """The repository's visibility as GitHub reports it (`gh api repos/<o>/<n> --jq .visibility`, config `github`);
-    any failure raises (release 89, fail-closed)."""
+    any failure raises (release 89, fail-closed). Release 94: a 404 for the site's token is decided without a token
+    (github_visibility_via)."""
+    return github_visibility_via(site, owner, name)[0]
+
+
+VISIBILITY_VIA_TOKEN = "token"
+VISIBILITY_VIA_ANONYMOUS = "anonymous after token 404"
+
+
+def github_visibility_via(site: Site, owner: str, name: str) -> tuple[str, str]:
+    """(visibility, how it was decided). First with the site's token (`token`). Release 94 (dureh-team#148): when
+    that answer is GitHub's 404 (a company App installation token cannot see a personal account's repository), an
+    unauthenticated GET decides (`anonymous after token 404`): public if GitHub shows it to anyone, else private
+    (private or absent). Any other failure, of either call, raises (fail-closed)."""
     from . import github
 
     cfg = github.config(site)
-    v = github.gh(cfg, ["api", f"repos/{owner}/{name}", "--jq", ".visibility"], timeout=30).strip().lower()
+    try:
+        v = github.gh(cfg, ["api", f"repos/{owner}/{name}", "--jq", ".visibility"], timeout=30).strip().lower()
+    except github.GhError as exc:
+        if not github.is_not_found(exc):
+            raise
+        return github.anonymous_visibility(owner, name), VISIBILITY_VIA_ANONYMOUS
     if v not in ("private", "public", "internal"):
         fail(f"GitHub answered {v!r} for the visibility of {owner}/{name}")
-    return v
+    return v, VISIBILITY_VIA_TOKEN
 
 
 def _first_push(led: Ledger, owner: str, name: str) -> bool:
@@ -2504,7 +2527,7 @@ def push_policy_rule(site: Site, led: Ledger, repo_path: Path, remote: str, url:
     env = site.env()
     facts: dict = {"owner": owner, "name": name}
     try:
-        facts["visibility"] = github_visibility(site, owner, name)
+        facts["visibility"], facts["visibility_via"] = github_visibility_via(site, owner, name)
     except DurehError as exc:
         fail(f"push.policy needs the visibility of {owner}/{name} and GitHub could not be asked: {exc}"
              " (refused, fail-closed)")
@@ -2536,7 +2559,8 @@ def push_policy_rule(site: Site, led: Ledger, repo_path: Path, remote: str, url:
         if r["deny"]:
             fail(f"config push.policy rule {r['id']} refuses pushing {dest} to {owner}/{name} (deny)")
         return r, facts
-    fail(f"no push.policy rule covers {dest} on {owner}/{name} ({facts['visibility']},"
+    via = "" if facts.get("visibility_via") == VISIBILITY_VIA_TOKEN else f" via {facts.get('visibility_via')}"
+    fail(f"no push.policy rule covers {dest} on {owner}/{name} ({facts['visibility']}{via},"
          f" {'empty' if facts['empty'] else 'not empty'}): a config change (the Director's approval) adds one")
 
 

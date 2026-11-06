@@ -949,6 +949,96 @@ class PushPolicy(SiteCase):
         self.assertEqual(self.pushes(s), [])
         self.assertEqual(Ledger(s).load("decision"), [])
 
+    @staticmethod
+    def app_404(anon):
+        """The site's token answers 404 (a company App token and a personal repository, dureh-team#148); `anon` is
+        the unauthenticated GET's fake: (status, body) or an exception."""
+        from unittest import mock
+        from dureh_core import github
+
+        def token(_cfg, args, **_kw):
+            raise github.GhError(f"gh {' '.join(args[:2])}: exit 1: gh: Not Found (HTTP 404) (not retried)")
+        calls = []
+
+        def get(url, timeout):
+            calls.append(url)
+            if isinstance(anon, BaseException):
+                raise anon
+            return anon
+        return (mock.patch.object(github, "config", return_value={}), mock.patch.object(github, "gh", side_effect=token),
+                mock.patch.object(github, "_anon_get", side_effect=get), calls)
+
+    def push_404(self, s, anon, ref="main"):
+        cfgp, ghp, getp, calls = self.app_404(anon)
+        with cfgp, ghp, getp:
+            return ops.push(s, "desk", str(self.repo), self.URL, ref, None), calls
+
+    def test_token_404_anonymous_404_is_private(self):
+        # release 94 (dureh-team#148): the App token's 404 and an anonymous 404 -> private, the private rule applies
+        self.seed()
+        s = self.site_with([self.PRIVATE])
+        rev = self.commit("def f():\n    return 2\n")
+        ev, calls = self.push_404(s, (404, b'{"message": "Not Found"}'))
+        self.assertEqual(calls, ["https://api.github.com/repos/example-org/tool"])
+        self.assertEqual(self.tip(), rev)
+        pol = ev["payload"]["policy"]
+        self.assertEqual((pol["rule_id"], pol["facts"]["visibility"], pol["facts"]["visibility_via"]),
+                         ("org-private", "private", ops.VISIBILITY_VIA_ANONYMOUS))
+        self.assertEqual(self.pushes(s)[-1]["payload"]["policy"]["facts"]["visibility_via"],
+                         ops.VISIBILITY_VIA_ANONYMOUS)
+
+    def test_token_404_anonymous_public_is_refused_by_private_rule(self):
+        self.seed()
+        s = self.site_with([self.PRIVATE])
+        self.commit("def f():\n    return 2\n")
+        before = self.tip()
+        with self.assertRaisesRegex(DurehError, r"no push.policy rule covers refs/heads/main on example-org/tool"
+                                                r" \(public via anonymous after token 404"):
+            self.push_404(s, (200, b'{"private": false, "visibility": "public"}'))
+        self.assertEqual((self.tip(), self.pushes(s)), (before, []))
+
+    def test_token_404_anonymous_failure_refuses(self):
+        self.seed()
+        s = self.site_with([self.PRIVATE])
+        self.commit("def f():\n    return 2\n")
+        before = self.tip()
+        for anon, why in ((OSError("network unreachable"), "network unreachable"), ((403, b""), "HTTP 403"),
+                          ((200, b"not json"), "not JSON"), ((200, b"{}"), "no `private`")):
+            with self.subTest(why=why), self.assertRaisesRegex(DurehError, f"GitHub could not be asked.*{why}"):
+                self.push_404(s, anon)
+        self.assertEqual((self.tip(), self.pushes(s)), (before, []))
+
+    def test_token_answer_never_asks_anonymously(self):
+        from unittest import mock
+        from dureh_core import github
+        self.seed()
+        s = self.site_with([self.PRIVATE])
+        rev = self.commit("def f():\n    return 2\n")
+        with mock.patch.object(github, "_anon_get", side_effect=AssertionError("no anonymous call")):
+            ev = self.push(s)
+        self.assertEqual(self.tip(), rev)
+        self.assertEqual(ev["payload"]["policy"]["facts"]["visibility_via"], ops.VISIBILITY_VIA_TOKEN)
+        # a token failure that is not a 404 stays a refusal, without an anonymous call
+        cfgp = mock.patch.object(github, "config", return_value={})
+        ghp = mock.patch.object(github, "gh", side_effect=github.GhError("gh api repos/x: exit 1: HTTP 401"))
+        with cfgp, ghp, mock.patch.object(github, "_anon_get", side_effect=AssertionError("no anonymous call")):
+            with self.assertRaisesRegex(DurehError, "HTTP 401"):
+                ops.github_visibility_via(s, "example-org", "tool")
+
+    def test_pattern_rule_token_404(self):
+        # the release-86 pattern check takes the same anonymous path
+        pat = {"url": "git@github.com:example-org/*.git", "pattern": True, "standing_ff": True}
+        url = "git@github.com:example-org/tool.git"
+        for anon, refused in (((404, b""), None), ((200, b'{"private": false}'), "is not private"),
+                              (OSError("down"), "could not be asked")):
+            cfgp, ghp, getp, _ = self.app_404(anon)
+            with self.subTest(refused=refused), cfgp, ghp, getp:
+                out = ops.pattern_private_refusal(self.s, pat, url)
+                if refused is None:
+                    self.assertIsNone(out)
+                else:
+                    self.assertIn(refused, out)
+
     def test_pattern_public_falls_to_the_policy_and_status_lines(self):
         self.seed()
         pat = {"url": "git@github.com:example-org/*.git", "pattern": True, "standing_ff": True}

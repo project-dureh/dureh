@@ -17,7 +17,7 @@ Classes are computed **per change**, not per key:
 
 | Key / step | Class | Notes |
 |---|---|---|
-| `push.policy`, `push.allowed_remotes` (`set`, `add`, `remove`) | C; B when the change only tightens | tightening: a rule or entry removed that no later rule of the same owner could cover, a `deny` rule added anywhere, `allow.*` narrowed or `require.*` made stricter with the same `match` and order. Anything not proven narrower is C (fail-closed). A rule covering public repositories may be applied by the desk with a board Decision (proposal Q3) |
+| `push.policy`, `push.allowed_remotes` (`set`, `add`, `remove`) | C; B when the change only tightens | tightening: a rule or entry removed that no later rule of the same owner could cover, a `deny` rule added anywhere, `allow.*` narrowed or `require.*` made stricter with the same `match` and order. Anything not proven narrower is C (fail-closed). A rule covering public repositories may be applied by the desk with a board Decision (proposal Q3). A `visibility` match is checked with the site's token; when that token gets GitHub's 404 (a company App token and a personal account's repository) an unauthenticated check decides (release 94, docs/github.md), so a rule for a personal account's private repositories needs no change |
 | `push.standing_ff`, `push.standing_ff_new_branches` | C on, B off | |
 | `modules.<id>.push` | B when set to `false`, C otherwise | push-off narrows |
 | `github.dashboard_issue` | B | display only; checked on GitHub: an open issue of `office_repo` (a failed check refuses) |
