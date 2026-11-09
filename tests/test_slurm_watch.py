@@ -8,7 +8,7 @@ from pathlib import Path
 
 from helpers import SiteCase, denied, hook, add_runner_roles
 
-from dureh_core import ops
+from dureh_core import ops, records
 from dureh_core import workflow as wf
 from dureh_core.cli import main
 from dureh_core.records import Ledger
@@ -102,6 +102,7 @@ class WatchCase(SiteCase):
             if rec["ts"] <= until:
                 rec["ts"] = (datetime.fromisoformat(rec["ts"]) - timedelta(seconds=seconds)).isoformat()
                 path.write_text(json.dumps(rec))
+        records.forget_cache()  # rewritten in place: read again as a new process would (release 96)
 
     def last_dispatch(self, wi):
         return [e for e in self.led.events(wi) if e["type"] == "wi.dispatched"][-1]
@@ -241,6 +242,7 @@ class Batched(WatchCase):
         rec = read_json(path)
         rec["ts"] = (datetime.fromisoformat(rec["ts"]) - timedelta(days=days)).isoformat()
         path.write_text(json.dumps(rec))
+        records.forget_cache()  # rewritten in place: read again as a new process would (release 96)
 
     def test_one_sacct_call_per_round_for_all_runs(self):
         singles = [self.submit() for _ in range(4)]

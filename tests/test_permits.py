@@ -384,6 +384,25 @@ class PlanApply(PermitBase):
         subprocess.run(["git", "commit", "-qm", "init"], cwd=src, check=True)
         return src
 
+    def test_plan_notes_a_local_non_bare_remote_with_the_branch_checked_out(self):
+        """Release 96 (UR-20261106-03): a new allowed_remotes entry for a non-bare local repository whose checked-out
+        branch it covers is noted in the plan; a bare one, or one whose branches the entry leaves out, is not."""
+        origin = self.source()
+        bare = self.tmp / "bare.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+        steps = [{"op": "add", "key": "push.allowed_remotes", "value": {"url": str(origin), "branches": ["main"]}},
+                 {"op": "add", "key": "push.allowed_remotes", "value": {"url": str(bare)}},
+                 {"op": "add", "key": "push.allowed_remotes", "value": {"url": f"file://{origin}", "branches": ["dev"]}}]
+        f = self.tmp / "p.json"
+        f.write_text(json.dumps(steps))
+        code, out, err = self.cli("site", "permit", "plan", "--file", str(f))
+        self.assertEqual(code, 0, err)
+        notes = [ln for ln in out.splitlines() if ln.startswith("note: ")]
+        self.assertEqual(len(notes), 1, out)
+        self.assertIn(f"{origin} is a local non-bare repository with main checked out", notes[0])
+        self.assertIn("pull --ff-only", notes[0])
+        self.assertEqual(self.events(), [])
+
     def test_plan_shows_diff_and_binding(self):
         steps = [{"op": "set", "key": "push.standing_ff", "value": True},
                  {"op": "add", "key": "push.policy", "value": DENY}]

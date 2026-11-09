@@ -2608,6 +2608,61 @@ def push_policy_refusal(rule: dict, facts: dict, dest: str, approval: bool, squa
     return None
 
 
+# Release 96 (UR-20261106-03): git refuses a push to a branch checked out in a non-bare repository
+# (receive.denyCurrentBranch, default refuse), and it says so only after the push started. These values let it through.
+DENY_CURRENT_ALLOWS = {"ignore", "warn", "false", "no", "off", "0", "updateinstead"}
+
+
+def local_remote_path(url: str, repo_path: Path) -> Path | None:
+    """The directory a local remote URL names (an absolute or ./, ../, ~ path, or file://), else None (ssh, https,
+    scp-like, a missing directory)."""
+    if url.startswith("file://"):
+        from urllib.parse import unquote
+
+        p = Path(unquote(url[len("file://"):]))
+    elif url.startswith(("/", "./", "../", "~")):
+        p = Path(os.path.expanduser(url))
+        if not p.is_absolute():
+            p = Path(repo_path) / p
+    else:
+        return None
+    return p.resolve() if p.is_dir() else None
+
+
+def checked_out_remote(url: str, repo_path: Path) -> dict | None:
+    """For a local non-bare repository that refuses pushes to its checked-out branches: {path, checked_out: {branch
+    ref: worktree path}, annex}; None for anything else (a bare or remote repository, denyCurrentBranch set to let the
+    push in, or a repository git cannot read here). Read-only: rev-parse, config and worktree list only."""
+    path = local_remote_path(url, repo_path)
+    if path is None or git(["rev-parse", "--is-bare-repository"], path, check=False) != "false":
+        return None
+    deny = git(["config", "--get", "receive.denyCurrentBranch"], path, check=False).lower()
+    if deny in DENY_CURRENT_ALLOWS:
+        return None
+    checked, wt = {}, None
+    for line in git(["worktree", "list", "--porcelain"], path, check=False).splitlines():
+        if line.startswith("worktree "):
+            wt = line[len("worktree "):]
+        elif line.startswith("branch ") and wt:
+            checked[line[len("branch "):]] = wt
+    annex = bool(git(["config", "--get", "annex.version"], path, check=False))
+    return {"path": str(path), "checked_out": checked, "annex": annex}
+
+
+def checked_out_refusal(url: str, repo_path: Path, src: str, dest: str) -> str | None:
+    """Release 96 (UR-20261106-03): the refusal for a push to a branch checked out in a local non-bare repository,
+    with the step that delivers it instead (a fast-forward pull run on that side), else None."""
+    info = checked_out_remote(url, repo_path)
+    if not info or dest not in info["checked_out"]:
+        return None
+    wt = info["checked_out"][dest]
+    annex = (" with git-annex on PATH (that repository uses git-annex, and the pull runs its filters)"
+             if info["annex"] else "")
+    return (f"refused before pushing (nothing pushed): {dest} is checked out in {wt}, a non-bare repository, and git"
+            f" refuses a push to a checked-out branch there (receive.denyCurrentBranch). Deliver it by a fast-forward"
+            f" pull on that side instead; the Director's step{annex}: `git -C {wt} pull --ff-only {repo_path} {src}`")
+
+
 def _rule_after_pattern(site: Site, rule: dict | None, url: str) -> dict | None:
     """The allowed_remotes rule that applies, after the release-86 private check of a pattern rule. Release 89: when
     push.policy has rules, a repository the pattern does not cover because GitHub says it is not private falls to the
@@ -2662,6 +2717,9 @@ def push(site: Site, actor: str, repo: str, remote: str, ref: str, approval: str
         dest = _dest_ref(b.get("ref") or ref)
     else:
         dest = _dest_ref(ref)
+    refused = checked_out_refusal(url, repo_path, ref, dest)
+    if refused:
+        fail(refused)
     if by_policy:
         rule, facts = push_policy_rule(site, led, repo_path, remote, url, dest, rev, env)
         refused = push_policy_refusal(rule, facts, dest, bool(approval), squash)
@@ -2747,6 +2805,9 @@ def push_approve(site: Site, actor: str, repo: str, remote: str, ref: str, memo:
             refused = None
     except DurehError as exc:
         refused = str(exc)
+    # release 96 (UR-20261106-03, dureh-team#158): nor for one git would refuse at a checked-out branch of a local
+    # non-bare repository; the same check and message as `push`
+    refused = refused or checked_out_refusal(url, repo_path, ref, _dest_ref(ref))
     if refused:  # release 82: no decision for a push the remote's rule refuses anyway
         fail(refused + "; nothing was recorded")
     return Ledger(site).append("decision", "push-approval", actor, None,
