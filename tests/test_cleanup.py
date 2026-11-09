@@ -376,39 +376,39 @@ class Citations(CleanupCase):
         self.dir = self.site_root / "scratch" / self.w
         (self.dir / "cache").mkdir(parents=True)
         (self.dir / "cache" / "c.bin").write_bytes(b"c")
-        (self.dir / "mask.nii.gz").write_bytes(b"m" * 10)
+        (self.dir / "mask.bin").write_bytes(b"m" * 10)
         rn = self.site_root / "projects" / "p1" / "research-notes"
         rn.mkdir(parents=True)
         (rn / "positions.md").write_text(
-            "# positions\n\n- " + "7e" * 32 + f"  scratch/{self.w}/mask.nii.gz\n")
+            "# positions\n\n- " + "7e" * 32 + f"  scratch/{self.w}/mask.bin\n")
         (self.site_root / "notes" / "day").mkdir(parents=True, exist_ok=True)
         (self.site_root / "notes" / "day" / "end.md").write_text(
             f"cache at {self.site_root}/scratch/{self.w}/cache/c.bin\nnot this: other/scratch/{self.w}/cache\n"
             f"nor scratch/{self.w}0/x\n")
 
     def test_dry_run_lists_citations_and_pins(self):
-        out = cleanup.purge_scratch(self.s, "desk", self.w, ["cache", "mask.nii.gz"], None, dry_run=True)
+        out = cleanup.purge_scratch(self.s, "desk", self.w, ["cache", "mask.bin"], None, dry_run=True)
         rows = {r["path"]: r for r in out["paths"]}
         self.assertEqual(rows["cache"]["cited"], "cited by notes/day/end.md:1")
         self.assertNotIn("pinned", rows["cache"])
-        self.assertEqual(rows["mask.nii.gz"]["pinned"], ["projects/p1/research-notes/positions.md:3"])
+        self.assertEqual(rows["mask.bin"]["pinned"], ["projects/p1/research-notes/positions.md:3"])
         whole = cleanup.purge_scratch(self.s, "desk", self.w, None, None, dry_run=True)["paths"][0]
         self.assertEqual(len(whole["cited"].split("; ")), 2)
 
     def test_pinned_path_needs_an_approval_that_names_it(self):
-        old = cleanup.scratch_approve(self.s, "desk", self.w, ["mask.nii.gz"], "m", "Director")
+        old = cleanup.scratch_approve(self.s, "desk", self.w, ["mask.bin"], "m", "Director")
         self.assertEqual(old["payload"]["pinned"], ["projects/p1/research-notes/positions.md:3"])
         # a decision recorded before the pin existed does not name it: refused
         rn = self.site_root / "projects" / "p1" / "research-notes" / "positions.md"
         text = rn.read_text()
         rn.write_text("# positions\n")
-        unpinned = cleanup.scratch_approve(self.s, "desk", self.w, ["mask.nii.gz"], "m", "Director")["id"]
+        unpinned = cleanup.scratch_approve(self.s, "desk", self.w, ["mask.bin"], "m", "Director")["id"]
         rn.write_text(text)
         with self.assertRaisesRegex(DurehError, "pinned by sha256 in projects/p1/research-notes/positions.md:3"):
-            cleanup.purge_scratch(self.s, "desk", self.w, ["mask.nii.gz"], unpinned)
-        self.assertTrue((self.dir / "mask.nii.gz").is_file())
-        cleanup.purge_scratch(self.s, "desk", self.w, ["mask.nii.gz"], old["id"])
-        self.assertFalse((self.dir / "mask.nii.gz").exists())
+            cleanup.purge_scratch(self.s, "desk", self.w, ["mask.bin"], unpinned)
+        self.assertTrue((self.dir / "mask.bin").is_file())
+        cleanup.purge_scratch(self.s, "desk", self.w, ["mask.bin"], old["id"])
+        self.assertFalse((self.dir / "mask.bin").exists())
 
     def test_worktree_pinned_by_a_note_is_not_retired_without_approval(self):
         (self.site_root / "notes" / "pin.md").write_text("ab" * 32 + f" worktrees/{self.w}/out.json\n")
