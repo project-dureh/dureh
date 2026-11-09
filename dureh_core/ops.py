@@ -2805,6 +2805,9 @@ def push_approve(site: Site, actor: str, repo: str, remote: str, ref: str, memo:
             refused = None
     except DurehError as exc:
         refused = str(exc)
+    # release 96 (UR-20261106-03, dureh-team#158): nor for one git would refuse at a checked-out branch of a local
+    # non-bare repository; the same check and message as `push`
+    refused = refused or checked_out_refusal(url, repo_path, ref, _dest_ref(ref))
     if refused:  # release 82: no decision for a push the remote's rule refuses anyway
         fail(refused + "; nothing was recorded")
     return Ledger(site).append("decision", "push-approval", actor, None,

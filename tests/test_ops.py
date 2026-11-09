@@ -245,6 +245,35 @@ class Ops(SiteCase):
         self.assertIsNone(ops.local_remote_path("git@example.org:x/y.git", repo))
         self.assertIsNone(ops.checked_out_remote(str(self.tmp / "missing"), repo))
 
+    def test_push_approve_to_a_checked_out_branch_of_a_local_non_bare_repo_is_refused(self):
+        """Release 96 (dureh-team#158): `push --approve` refuses with the same check and message as `push` and records
+        no decision; a branch not checked out there, or a repository set to take the push, is approved as before."""
+        repo = self.make_module()
+        origin = self.tmp / "origin"
+        subprocess.run(["git", "clone", "-q", str(repo), str(origin)], check=True)
+        subprocess.run(["git", "remote", "add", "local", str(origin)], cwd=repo, check=True)
+        cfg = json.loads(self.s.config_path.read_text())
+        cfg["push"] = {"allowed_remotes": [str(origin)]}
+        self.s.config_path.write_text(json.dumps(cfg))
+        from dureh_core.site import Site
+        s = Site(self.site_root)
+        self._commit(repo, "def f():\n    return 2\n")
+        decisions = lambda: [d for d in Ledger(s).load("decision") if d["type"] == "push-approval"]  # noqa: E731
+        with self.assertRaises(DurehError) as cm:
+            ops.push_approve(s, "desk", str(repo), "local", "main", "Director approved in test")
+        msg = str(cm.exception)
+        self.assertIn("refs/heads/main is checked out in", msg)
+        self.assertIn(f"`git -C {origin.resolve()} pull --ff-only {repo.resolve()} main`", msg)
+        self.assertIn("nothing was recorded", msg)
+        self.assertEqual(decisions(), [])
+        subprocess.run(["git", "branch", "-q", "side"], cwd=repo, check=True)
+        dec = ops.push_approve(s, "desk", str(repo), "local", "side", "branch not checked out there")
+        self.assertEqual(ops.push(s, "desk", str(repo), "local", "side", dec["id"])["type"], "push.completed")
+        subprocess.run(["git", "config", "receive.denyCurrentBranch", "updateInstead"], cwd=origin, check=True)
+        dec = ops.push_approve(s, "desk", str(repo), "local", "main", "the repository takes the push")
+        self.assertEqual(ops.push(s, "desk", str(repo), "local", "main", dec["id"])["type"], "push.completed")
+        self.assertEqual(len(decisions()), 2)
+
     @staticmethod
     def _commit(repo, text):
         (repo / "src" / "demo.py").write_text(text)
