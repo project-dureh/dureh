@@ -251,6 +251,7 @@ unclean). The normal path was unclean too: `day close` inside the job scancelled
   `from: inside|outside` and prints `session job <id> ends by itself within ~<grace+30> s (close marker written);
   do nothing more in the session`. The marker's content is `{"actor", "closed_at", "record": <day.closed id>,
   "job_id"}`. No running recorded job: `released: false, reason: "no running session job"`.
+- **Cleanup line (release 98).** `day close` prints the one-line summary of `cleanup report` (worktrees and branches of finished items to retire, stopped or unmerged items to review, `scratch/<WI>` directories of finished items, sizes capped at 20 s) and records it as `cleanup` in `day.closed`. With config `cleanup.retire_on_close` true (default false) it first runs `worktree retire --all-promoted`; errors are listed, never refuse the close. Scratch directories are deleted only by `purge --scratch-wi` with the Director's approval.
 - **`dureh day close --cancel-now`** is the old immediate `scancel` of the recorded job (`mode: "scancel"`):
   the fallback when a marker was ignored (claude hung, the script predates release 39). Same ownership rule.
 - **`dureh site session release [--cancel-now]`** writes the marker (or scancels) for the recorded running job

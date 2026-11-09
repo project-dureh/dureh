@@ -536,8 +536,23 @@ def cmd_path_refs(a):
 def cmd_purge(a):
     from .workflow import purge, purge_cache, purge_cache_approve, purge_paths
 
-    if bool(a.wi) == bool(a.project):
-        fail("purge takes --wi <WI> or --project <name> [--cache <cache>] (not both)")
+    if sum(map(bool, (a.wi, a.project, a.scratch_wi))) != 1:
+        fail("purge takes one of --wi <WI>, --project <name> [--cache <cache>] or --scratch-wi <WI> (not both)")
+    if a.scratch_wi:  # release 98 (UR-20261109-02): a finished WI's run directory under scratch/<WI>/
+        from . import cleanup
+
+        if a.cache:
+            fail("--cache goes with --project")
+        if a.approve:
+            if a.approval or a.dry_run:
+                fail("--approve records the approval; it does not go with --approval or --dry-run")
+            from .records import approver
+
+            _print(cleanup.scratch_approve(_site(a), _actor(a), a.scratch_wi, a.path, a.memo or "",
+                                           approver(a.by, what="`purge --approve`")))
+        else:
+            _print(cleanup.purge_scratch(_site(a), _actor(a), a.scratch_wi, a.path, a.approval, a.dry_run))
+        return
     if a.project:  # release 77 (#40): files in a project cache; release 85: untracked project paths without --cache
         if not a.path:
             fail("purge --project needs at least one --path")
@@ -880,6 +895,8 @@ def cmd_day(a):
         rec = workday.close(site, actor, a.note or "", cancel_now=a.cancel_now, early=_early_reason(a),
                             approval=a.approval)
         _print(rec)
+        if (rec.get("payload") or {}).get("cleanup"):
+            print(rec["payload"]["cleanup"]["summary"])
         print(sessions.render_release(rec["release"]))
     elif c == "urgent":
         _print(workday.urgent(site, actor, a.wi, a.memo))
@@ -1104,6 +1121,46 @@ def cmd_worktree(a):
     _print(r)
 
 
+def cmd_worktree_retire(a):
+    from . import cleanup
+
+    states = None
+    if a.all_promoted:
+        if a.state:
+            fail("--all-promoted is --state promoted; give one of them")
+        states = ["promoted"]
+    elif a.state:
+        states = [s.strip() for s in ",".join(a.state).split(",") if s.strip()]
+    if a.approve:
+        if a.approval or a.dry_run or states:
+            fail("--approve records the approval for --wi items; it does not go with --approval, --dry-run or --state")
+        from .records import approver
+
+        _print(cleanup.retire_approve(_site(a), _actor(a), a.wi or [], a.memo or "",
+                                      approver(a.by, what="`worktree retire --approve`")))
+        return
+    for flag, v in (("--memo", a.memo), ("--by", a.by)):
+        if v is not None:
+            fail(f"{flag} goes with --approve")
+    r = cleanup.retire(_site(a), _actor(a), a.wi or None, states, a.approval, a.dry_run)
+    if a.json:
+        _print(r)
+        return
+    for line in cleanup.retire_lines(r):
+        print(line)
+
+
+def cmd_cleanup(a):
+    from . import cleanup
+
+    r = cleanup.report(_site(a), time_cap=a.time_cap, sizes=not a.no_sizes)
+    if a.json:
+        _print(r)
+        return
+    for line in cleanup.report_lines(r):
+        print(line)
+
+
 def repair_all_lines(r: dict) -> list[str]:
     """One table-like line per item of `worktree repair --all` and a summary line (a dry run says "would")."""
     dry = r["summary"]["dry_run"]
@@ -1198,7 +1255,7 @@ def _early_args(x, what: str) -> None:
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="dureh", description="DUREH harness tools: wi, dispatch, verify, ledger, event, status, "
                                 "slurm, path-refs, purge, push, usage, site, day, upstream, slack, github, report, "
-                                "authorize-write, worktree, protected, artifact, member, exam (plus install, adapter, hook).")
+                                "authorize-write, worktree, cleanup, protected, artifact, member, exam (plus install, adapter, hook).")
     p.add_argument("--site", help="installed site directory (or DUREH_SITE)")
     p.add_argument("--observe", action="store_true",
                    help="read-only: allow only status, wi show/list, ledger query, upstream list/message/inbox (without "
@@ -1505,14 +1562,19 @@ def parser() -> argparse.ArgumentParser:
                                                    " With --project --cache: a file in projects/<name>/cache/<cache>/;"
                                                    " with --project alone (release 85): an untracked or ignored file or"
                                                    " directory in projects/<name>/")
+    x.add_argument("--scratch-wi", help="release 98: delete scratch/<WI>/ (or --path entries in it) of a promoted,"
+                                        " stopped or reverted WI (desk only; symlinks never followed; needs --approval"
+                                        " bound to a manifest of relative path, size and mtime; --dry-run lists sizes)")
     x.add_argument("--project", help="release 77: delete files from projects/<name>/cache/<cache>/ (desk only; never a"
                                      " file pinned in config.json or the project manifest; needs --approval)")
     x.add_argument("--cache", help="with --project: the cache directory name, e.g. containers; without it the paths"
                                    " are untracked files or directories of the project (release 85)")
-    x.add_argument("--approval", help="with --project: the Director's purge-approval decision id (bound to the files"
-                                      " and their sha256); required, no default")
-    x.add_argument("--approve", action="store_true", help="with --project: record the Director's approval for these"
-                                                          " exact files (needs --memo), like `push --approve`")
+    x.add_argument("--approval", help="with --project or --scratch-wi: the Director's purge-approval decision id"
+                                      " (bound to the files and their sha256; --scratch-wi: to the manifest);"
+                                      " required, no default")
+    x.add_argument("--approve", action="store_true", help="with --project or --scratch-wi: record the Director's"
+                                                          " approval for these exact files (needs --memo and --by),"
+                                                          " like `push --approve`")
     x.add_argument("--memo", help="with --approve: where the Director approved (board item, message)")
     x.add_argument("--by", help="with --approve: who approved, Director, DUREH or desk (required, no default; "
                                 "release 78)")
@@ -2003,6 +2065,32 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--json", action="store_true", help="with --all or --prune-stale: print the items and summary as"
                    " JSON (--wi and --target always print JSON)")
     x.add_argument("--actor")
+    x = add(wt, "retire", cmd_worktree_retire, "desk (release 98): remove finished WIs' worktrees (with their .venv)"
+            " and delete their wi/* branches; a branch only when merged into its repository's main head, a stopped or"
+            " reverted item's when nothing is committed past its base, else with --approval. Refused: an active item,"
+            " jobs not known to have ended, a dirty or broken worktree, a promoted item's unmerged branch. One"
+            " worktree.retired event per item")
+    x.add_argument("--wi", nargs="+", help="these items; every one must pass or nothing is done")
+    x.add_argument("--state", action="append", help="every item in these states (promoted, stopped, reverted; comma"
+                   " list); the passing ones retire, the rest are listed")
+    x.add_argument("--all-promoted", action="store_true", help="= --state promoted")
+    x.add_argument("--dry-run", action="store_true", help="list path, size, branch and verdict; change nothing")
+    x.add_argument("--approval", help="with --wi: the Director's retire-approval decision id for stopped or reverted"
+                   " items whose branches hold unmerged commits (bound to each branch tip)")
+    x.add_argument("--approve", action="store_true", help="with --wi: record that approval (needs --memo and --by)")
+    x.add_argument("--memo", help="with --approve: where the Director approved")
+    x.add_argument("--by", help="with --approve: Director, DUREH or desk (required, no default)")
+    x.add_argument("--json", action="store_true")
+    x.add_argument("--actor")
+    cl = sub.add_parser("cleanup", help="site cleanup (release 98)").add_subparsers(dest="cleanup_command",
+                                                                                     required=True)
+    x = add(cl, "report", cmd_cleanup, "read-only, allowed with --observe: worktrees and branches of finished items"
+            " to retire, stopped or unmerged items to review, scratch/<WI> directories of finished items, with sizes"
+            " (scan capped by --time-cap: `partial`)")
+    x.add_argument("--json", action="store_true")
+    x.add_argument("--time-cap", type=float, default=60.0, help="seconds for the size scan (default 60)")
+    x.add_argument("--no-sizes", action="store_true", help="counts only")
+    x.add_argument("--actor")
     pr = sub.add_parser("protected", help="the package's protected paths (read-only, no-read)").add_subparsers(
         dest="protected_command", required=True)
     x = add(pr, "list", cmd_protected, "each protected path with its level and source (package id and revision); "
@@ -2019,7 +2107,7 @@ def parser() -> argparse.ArgumentParser:
 OBSERVE_ALLOWED = {("status", None), ("wi", "show"), ("wi", "list"), ("ledger", "query"), ("upstream", "list"), ("upstream", "message"), ("upstream", "inbox"),
                    ("path-refs", None), ("usage", None), ("verify", None), ("day", "status"), ("day", "handshake"), ("site", "session"),
                    ("protected", "list"), ("member", "status"), ("github", "status"), ("github", "transport"),
-                   ("exam", "compare"), ("exam", "plan")}
+                   ("exam", "compare"), ("exam", "plan"), ("cleanup", "report")}
 
 
 def _check_observe(args) -> None:

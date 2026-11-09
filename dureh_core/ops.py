@@ -381,6 +381,9 @@ def config_errors(site: Site, config: dict | None = None, startup: Path | None =
     for i, e in enumerate(conf.get("modules") or []):
         if isinstance(e, dict) and "public" in e and not isinstance(e["public"], bool):
             out.append(f"config modules[{i}].public must be true or false (release 82; default false)")
+    clean = conf.get("cleanup")
+    if clean is not None and (not isinstance(clean, dict) or not isinstance(clean.get("retire_on_close", False), bool)):
+        out.append("config cleanup.retire_on_close must be true or false (release 98; default false)")
     from .site import routing_errors
 
     out += routing_errors(conf)

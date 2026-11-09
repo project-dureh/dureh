@@ -248,6 +248,55 @@ dureh purge --project <name> --cache <cache> --path <file> ... --approval <decis
   once empty. Refused besides the cache rules: a tracked file (`git ls-files`), any symlink inside a directory
   (annexed content), `.git/` and `.datalad/`. Same approval, same `cache.purged` event (`cache` null).
 
+## Cleanup of finished items (release 98, UR-20261109-02)
+
+`purge --wi` removes one finished WI whole; nothing retired finished items in bulk, and `scratch/<WI>/` run
+directories had no command at all. Three tools, desk only except the report:
+
+```
+dureh cleanup report [--json] [--time-cap 60] [--no-sizes]          # read-only, allowed with --observe
+dureh worktree retire (--wi <WI>... | --state promoted[,stopped,reverted] | --all-promoted) [--dry-run] [--json]
+dureh worktree retire --wi <WI>... --approve --by Director --memo '<where approved>'
+dureh worktree retire --wi <WI>... --approval <decision>
+dureh purge --scratch-wi <WI> [--path <p>]... --dry-run
+dureh purge --scratch-wi <WI> [--path <p>]... --approve --by Director --memo '<where approved>'
+dureh purge --scratch-wi <WI> [--path <p>]... --approval <decision>
+```
+
+- **`worktree retire`** removes the item's worktree (with its `.venv`; `git worktree remove`, the fallback of
+  `purge`) and deletes its `wi/*` branch. The branch goes only when it is merged into its repository's main head
+  (`git for-each-ref --merged HEAD`), or for a stopped or reverted item when its tip is still the recorded dispatch
+  base, or with a `retire-approval` decision bound to each branch and tip (`--approve`, then `--approval`, used
+  once). Refused: an item that is not promoted, stopped or reverted; one whose scheduler jobs are not known to have
+  ended; a dirty worktree (tracked changes or untracked files other than `.venv`, interpreter caches and
+  `.dureh-scratch`); a broken worktree (`worktree repair` first); a promoted item whose branch is not merged; a
+  target that is not a module or project repository (harness or package work: `purge --wi`). A branch another
+  site's ledger owns is never deleted. With `--wi` every item must pass or nothing is done; with `--state` /
+  `--all-promoted` the passing items retire and the rest are listed with their reason. `--dry-run` lists path,
+  size, branch, verdict (retire, needs-approval, refused, nothing). One `worktree.retired` event per item (status,
+  target, worktree, branch, head, merged; refs: the approval). Promoted and merged items need no approval.
+- **`purge --scratch-wi <WI>`** deletes `scratch/<WI>/` (or the `--path` entries in it) of a promoted, stopped or
+  reverted item without live jobs. Symlinks are never followed: `scratch/<WI>` itself must be a plain directory, a
+  path whose parent resolves outside it is refused, a symlink inside is removed as a link; `..`, absolute paths,
+  overlapping paths and protected paths are refused. Fail-closed like `purge --project`: a `purge-approval` decision
+  is required and used once. The binding is a **manifest**, not content hashes: each path's file count, bytes and the
+  sha256 over the sorted lines `relative path, size, mtime (ns)` of every file and link under it (run directories
+  hold 100+ GB; hashing them is too slow). Any added, removed, resized or touched file voids the approval. `--dry-run`
+  lists the files, bytes, manifest digest and the 20 largest entries of each path. Records `scratch.purged`.
+- **Citations.** Before either tool deletes (and in `--dry-run`), the site's `notes/**` and
+  `projects/*/research-notes/**` text files (up to 2 MB each, 30 s scan) are searched for the paths being removed
+  (`worktrees/<WI>`, `scratch/<WI>[/<path>]`, or any path under them, relative or as this site's absolute path).
+  Each hit is listed as `cited by <file>:<line>`; a line that also carries a sha256 (64 hex digits) is
+  `pinned by <file>:<line>`. A pinned path is refused unless the approval names it: `--approve` binds the pinned
+  lines, a pin added after the approval voids it, and a retire candidate whose worktree is pinned needs an approval
+  even when merged (2026-11-09: a hand cleanup deleted files a research note pinned by sha256).
+- **`cleanup report`** lists, per site: retire candidates (worktrees and merged branches of finished items),
+  stopped or unmerged items to review, and `scratch/<WI>` directories of finished items, with sizes (a du-like scan
+  capped by `--time-cap`, `partial` when capped) and citations. It runs no scheduler call and no `git status`
+  (dirty worktrees show up in `worktree retire --dry-run`); with `--observe` it records nothing. `day close` prints
+  its one-line summary; config `cleanup.retire_on_close` (default false) adds `worktree retire --all-promoted` at
+  close (docs/workday.md). Scratch deletion is never automatic.
+
 ## Stray untracked files in an active WI: `purge --path` (release 72, project-dureh/dureh#23)
 
 `dureh purge --wi <WI>` removes a finished WI whole (promoted, stopped or reverted). A dispatched or staged WI whose
