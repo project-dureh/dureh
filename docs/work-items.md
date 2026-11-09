@@ -71,6 +71,16 @@ verify. Now the step is not left to the worker:
   refuses and records nothing; before release 97 every amendment was recorded as the Director's. The approver is
   recorded on `wi.amended`, on the re-approval of a stopped item and on `wi.reopened`.
 
+## The spawn prompt is the printed brief (release 97, option 2a of a second site's UR-20261109-01)
+
+Measured 2026-11-09 at a company site: leaders retyped briefs with errors, and the spawn hook checked only the
+brief id in the header. Now `dispatch brief` records `prompt_sha256` on `dispatch.prepared` (sha256 of the brief
+exactly as printed, trailing whitespace aside), and the PreToolUse hook refuses an Agent spawn whose prompt hashes
+differently, even with the right id: "pass the output of `dispatch brief --wi <WI>` unchanged as the whole prompt".
+Nothing is recorded on a refusal. Text added before or after the brief counts as a change; to change the work,
+amend the WI and prepare a new brief. A brief prepared before release 97 (no `prompt_sha256`), and a late binding
+from the subagent's transcript after a spawn hook that never ran (UR-20261015-01), keep the id check.
+
 ## The worktree's scratch directory (release 93, UR-20261106-02)
 
 Release 92 told file-writing workers to write a multi-line script to a file and run `python3 -I <file>` (a heredoc

@@ -927,6 +927,8 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None, tie
     digest = hashlib.sha256(full.encode("utf-8")).hexdigest()[:16]
     header = f"{BRIEF_TAG} {wi} role={role.name} brief={digest}"
     led.event("dispatch.prepared", by, wi, {"role": role.name, "brief": digest, "bytes": len(body), "checking": checking,
+                                            # release 97 (option 2a): the spawn hook admits only this exact text
+                                            "prompt_sha256": prompt_sha256(header + "\n\n" + full),
                                             "model": entry["model"], "kind": kind, "kind_reason": kind_reason,
                                             **({"tier": chosen, "tier_reason": tier_reason.strip()} if chosen else {}),
                                             "qualification": why,
@@ -945,6 +947,12 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None, tie
             "worktree": wt["worktree"], "subagent_type": role.name, "runtime": role.runtime,
             **({"fallback_tier": fallback} if fallback else {}),
             **({"worktree_env": wt["env"]} if wt.get("env") else {})}
+
+
+def prompt_sha256(text: str) -> str:
+    """sha256 of a spawn prompt as the spawn hook compares it with the printed brief (release 97, option 2a):
+    trailing whitespace aside (a terminal or the Agent tool may drop the last newline), every byte counts."""
+    return hashlib.sha256(text.rstrip().encode("utf-8")).hexdigest()
 
 
 def dispatch_kind(site: Site, payload: dict, role, checking: bool) -> str:

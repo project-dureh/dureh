@@ -1664,6 +1664,16 @@ def _record_spawn(led: Ledger, role: str, target: str, wi: str, digest: str, ti:
     consumed = [e for e in events if e["type"] in ("wi.dispatched", "checker.dispatched") and e["payload"].get("brief") == digest]
     if consumed:
         return _deny(f"brief {digest} was already used; prepare a new brief")
+    # release 97 (option 2a): the Agent tool's prompt must be the printed brief. Older records carry no hash; a late
+    # binding (the spawn hook never ran, the agent is already working) has no Agent prompt to compare and keeps the id
+    want = prepared[-1]["payload"].get("prompt_sha256")
+    if want and "prompt" in ti:
+        from ..workflow import prompt_sha256
+
+        if prompt_sha256(ti.get("prompt") or "") != want:
+            return _deny(f"the prompt is not the brief {digest} as printed for {wi}: it was retyped, shortened or added"
+                         f" to. Pass the output of `dispatch brief --wi {wi}` unchanged as the whole prompt (everything"
+                         " after the `# spawn ...` line); to change the work, amend the WI and prepare a new brief")
     member = _member_spawn(led, target, wi, digest, events)
     if isinstance(member, str):
         return _deny(member)
