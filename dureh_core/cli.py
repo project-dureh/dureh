@@ -154,7 +154,7 @@ def cmd_adapter_sync(a):
         print(f"config.json: added from the package's config_defaults: {', '.join(added)}")
     agents = site.root / ".claude" / "agents"
     before = {f.name for f in agents.glob("*.md")} if agents.is_dir() else set()
-    m = claude_code.generate(site)
+    m = claude_code.generate(site, switch=True)  # release 97: the switch; it re-pins config and deployment below
     print(f"generated {len(m['files'])} files for claude-code")
     new_roles = sorted(f[:-3] for f in ({f.name for f in agents.glob("*.md")} - before)) if before else []
     if new_roles:  # release 86 (dureh-team#91 item 7): Claude Code reads agent files when a session starts

@@ -142,6 +142,9 @@ def relink_module(site: Site, actor: str, module_id: str, rev: str, branch: str 
     tracks origin/B when it exists; a previous local branch of another name is kept as it is. Records
     `site.module-relinked` {id, path, source, from, to, forced, push_off, ...}, updates the entry (other keys kept)
     and regenerates the adapter files."""
+    from .runtimes.claude_code import require_pinned
+
+    require_pinned(site)  # release 97: only the pinned harness regenerates the site's files
     from .workflow import CACHE_RE
 
     entry = next((e for e in site.config.get("modules") or [] if isinstance(e, dict) and e.get("id") == module_id), None)
@@ -511,6 +514,9 @@ def retire_module(site: Site, actor: str, module_id: str, dry_run: bool = False,
     the event follows the removal; a failure mid-way records `site.module-retire-failed` with the failing step and
     what was removed so far, and leaves the module registered); finally the adapter files are regenerated.
     With dry_run every step is listed with its paths and the first refusal it would hit; nothing changes."""
+    from .runtimes.claude_code import require_pinned
+
+    require_pinned(site)  # release 97: only the pinned harness regenerates the site's files
     from .workflow import _own_branch, _registered_worktrees, remove_wi_worktree, wi_branches
 
     if site.org.role(actor).kind != "desk":
