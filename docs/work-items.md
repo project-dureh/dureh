@@ -42,6 +42,30 @@ the stage record named the base while verify measured the commit.
   the new `wi.staged` carries `restaged_from`); the same head is refused ("already staged"). A verify job
   submitted at the old head is superseded as before (release 61).
 
+## `wi amend --rebase`: the harness rebases, `wi stage` guards (release 97, UR-20261109-01)
+
+Measured 2026-11-06 at a company site: after `wi amend --rebase`, the re-dispatched worker skipped the brief's
+"run `git rebase <base>`" line and staged a head on the old base; only the desk's own check caught it before
+verify. Now the step is not left to the worker:
+
+- **Dispatch rebases.** When `dispatch brief` prepares the worktree of a worker's item whose latest
+  `wi.amended` has a `rebase_onto` and whose branch head does not contain it (`git merge-base --is-ancestor`), it
+  runs `git rebase <rebase_onto>` in the WI worktree before the brief is written. This holds for any later
+  dispatch too (also one after a worker skipped the step), not only the first after the amendment.
+  - It went through: the brief says "the harness rebased your branch onto <base> (head was <old>)" and gives no
+    rebase step; `dispatch.prepared` records `rebase: {onto, from, status: "done", to}`.
+  - It did not (a conflict, uncommitted changes in the worktree, or a rebase already in progress there, which is
+    never touched): the rebase is aborted (`git rebase --abort`, only for the rebase the harness started) and the
+    branch is left as it was. The brief keeps the "First: the base moved. In your worktree run `git rebase
+    <base>`" line, and a block outside the budget names the conflicted paths (or git's reason). The dispatch is
+    not refused: resolving a conflict is the worker's job (the Gate 2 recovery above depends on it).
+    `dispatch.prepared` records `rebase: {onto, from, status: "conflict", files, error, head_after_abort}`.
+  - A branch that already contains the base is left alone, with no line and no `rebase` field.
+- **Stage guards.** `wi stage` refuses a WI worktree whose head does not contain the amended base, naming the
+  command: `git -C <worktree> rebase <base>` (resolve any conflict, `git rebase --continue`), then stage again.
+  Nothing is recorded. When git gives no verdict (an unknown revision) the check is skipped. Items never amended
+  with `--rebase` are unchanged.
+
 ## The worktree's scratch directory (release 93, UR-20261106-02)
 
 Release 92 told file-writing workers to write a multi-line script to a file and run `python3 -I <file>` (a heredoc
@@ -88,8 +112,8 @@ with a worktree:
   The main tree is back at its HEAD with a clean status either way.
 - **Recovery.** `dureh wi amend --wi <WI> --reopen --rebase <target HEAD> --memo "<Director's words>"` (the
   verification is void, the item goes back to approved with its base moved to the current main), then dispatch
-  the WI again: the worker rebases onto that base and resolves the conflict, the checker verifies, and the desk
-  promotes. `wi.promote-failed` changes no status (it is not in the lifecycle projection); the item is verified
+  the WI again: the harness tries the rebase onto that base (release 97, below); it conflicts here, so it is
+  aborted and the worker rebases and resolves the conflict, the checker verifies, and the desk promotes. `wi.promote-failed` changes no status (it is not in the lifecycle projection); the item is verified
   until it is re-opened.
 
 ## Gate 2 and the main tree's environment (release 81)

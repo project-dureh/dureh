@@ -84,7 +84,11 @@ class WiAmend(AmendCase):
         wf.wi_amend(self.s, "desk", self.item, "plan approval covers it", {}, rebase="")
         self.assertEqual(Ledger(self.s).wi_status(self.item)["status"], "approved")  # re-opened
         again = wf.dispatch_brief(self.s, self.item, "pm-modules")["brief"]
-        self.assertIn(f"git rebase {head[:12]}", again)
+        # release 97 (UR-20261109-01): the harness rebases the branch itself; the brief says so, no worker step
+        self.assertIn(f"the harness rebased your branch onto {head[:12]}", again)
+        self.assertNotIn("git rebase", again)
+        wt = self.s.worktrees / self.item
+        self.assertEqual(subprocess.run(["git", "rev-parse", "HEAD"], cwd=wt, capture_output=True, text=True).stdout.strip(), head)
         self.assertNotEqual(old_base, head)
         self.assertEqual(Ledger(self.s).events(self.item)[-1]["payload"]["base"], head)
         self.assertNotIn("git rebase", first["brief"])

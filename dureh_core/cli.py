@@ -1271,7 +1271,7 @@ def parser() -> argparse.ArgumentParser:
                    help="an instruction for the next rework (repeat); the next brief carries it outside the brief budget")
     x.add_argument("--output", action="append", help="replaces the whole list (repeat)")
     x.add_argument("--rebase", nargs="?", const="", default=None,
-                   help="move the base to REV (default: the target's current HEAD); the next brief tells the worker to rebase")
+                   help="move the base to REV (default: the target's current HEAD); the next dispatch rebases the WI branch onto it (on a conflict the brief tells the worker to) and `wi stage` refuses a head without it")
     x.add_argument("--checks-runner", choices=["local", "site"],
                    help="per-item checks runner, as for wi new (local needs every check in checks.local_allow)")
     x.add_argument("--requirements", metavar="FILE",

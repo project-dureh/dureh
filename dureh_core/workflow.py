@@ -610,6 +610,69 @@ def _pending_rebase(site: Site, wi: str) -> str | None:
     return None
 
 
+def _amended_base(site: Site, wi: str) -> str | None:
+    """The base the latest `wi amend --rebase` moved this WI to (release 97, UR-20261109-01), or None."""
+    for ev in reversed(Ledger(site).events(wi)):
+        if ev["type"] == "wi.amended" and ev["payload"].get("rebase_onto"):
+            return ev["payload"]["rebase_onto"]
+    return None
+
+
+def _head_contains(wt: Path, rev: str) -> bool | None:
+    """Whether the worktree's HEAD contains `rev` (`git merge-base --is-ancestor`); None when git gives no verdict
+    (an unknown revision, for example)."""
+    try:
+        rc = subprocess.run(["git", "merge-base", "--is-ancestor", rev, "HEAD"], cwd=wt, capture_output=True,
+                            text=True, timeout=120).returncode
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return {0: True, 1: False}.get(rc)
+
+
+def _rebase_in_progress(wt: Path) -> bool:
+    for name in ("rebase-merge", "rebase-apply"):
+        rel = git(["rev-parse", "--git-path", name], wt, check=False)
+        if rel and (Path(rel) if Path(rel).is_absolute() else wt / rel).exists():
+            return True
+    return False
+
+
+def rebase_to_amended_base(site: Site, wi: str, wt: Path) -> dict | None:
+    """Release 97 (UR-20261109-01, options a): before a worker starts on a WI whose base `wi amend --rebase` moved,
+    the harness rebases the WI branch onto that base itself, so no worker can skip the step. None when there is no
+    amended base or the branch already contains it. Otherwise {onto, from, status}: `done` (the branch now sits on
+    the amended base, `to` names the new head), or `conflict` (the rebase did not go through: it is aborted, the
+    branch is left as it was, `files` lists the conflicted paths and `error` git's reason; the brief then tells
+    the worker to run the rebase and resolve it). A rebase the worktree already has in progress is never touched."""
+    onto = _amended_base(site, wi)
+    if not onto or _head_contains(wt, onto) is not False:
+        return None
+    old = git(["rev-parse", "HEAD"], wt)
+    out = {"onto": onto, "from": old}
+    if _rebase_in_progress(wt):
+        return {**out, "status": "conflict", "files": [], "error": "a rebase is already in progress in the worktree"}
+    proc = subprocess.run(["git", "rebase", onto], cwd=wt, capture_output=True, text=True, timeout=300)
+    if proc.returncode == 0:
+        return {**out, "status": "done", "to": git(["rev-parse", "HEAD"], wt)}
+    files = [f for f in git(["diff", "--name-only", "--diff-filter=U"], wt, check=False).splitlines() if f]
+    if _rebase_in_progress(wt):
+        git(["rebase", "--abort"], wt, check=False)
+    err = (proc.stderr.strip() or proc.stdout.strip()).splitlines()
+    return {**out, "status": "conflict", "files": files, "error": (err[-1] if err else "git rebase failed")[-300:],
+            "head_after_abort": git(["rev-parse", "HEAD"], wt, check=False)}
+
+
+def rebase_brief_block(wt: dict) -> str:
+    """Outside the brief budget: why the harness's rebase onto the amended base did not go through (release 97)."""
+    rb = wt.get("rebase") or {}
+    if rb.get("status") != "conflict":
+        return ""
+    where = f" in: {', '.join(rb['files'][:20])}" if rb.get("files") else f" ({rb.get('error')})"
+    return (f"\nRebase: the harness ran `git rebase {rb['onto'][:12]}` in your worktree and it stopped{where}. It was"
+            f" aborted; your branch is as it was (head {rb['from'][:12]}). Run it yourself, resolve, `git rebase"
+            " --continue`; `wi stage` refuses a head without the new base.\n")
+
+
 AMENDABLE = ("acceptance", "checks", "constraints", "outputs", "checks_runner", "requirements")
 
 
@@ -830,6 +893,8 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None, tie
     if role.is_worker and role.write_scopes and not checking and role.isolation == "worktree":
         wt = _create_worktree(site, wi, p["target"])
         if wt.get("worktree"):
+            # release 97 (UR-20261109-01): the harness, not the worker, moves the branch onto an amended base
+            wt["rebase"] = rebase_to_amended_base(site, wi, Path(wt["worktree"]))
             wt["env"] = _dispatch_worktree_env(site, led, wi, by, Path(wt["worktree"]), p["target"])
     else:
         wt = {"worktree": str(site.worktrees / wi) if checking and (site.worktrees / wi).is_dir() else None,
@@ -847,6 +912,7 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None, tie
     block += rework_notes_block(led, wi)  # release 91: the desk's rework instructions, outside the budget
     if not checking and (supersedes or led.wi_status(wi)["rework"] > 0):
         block += jobs_block(led, wi)  # release 92 (fnd 68509358): a re-dispatch says which jobs already ran
+    block += rebase_brief_block(wt)  # release 97: a rebase the harness could not finish; outside the budget
     block += _env_brief_line(wt)  # release 47: outside the budget, as the verification block
     if role.write_scopes and not checking and not role.is_manager:
         block += script_file_line(wt)  # release 92: roles that write files; outside the budget
@@ -860,6 +926,7 @@ def dispatch_brief(site: Site, wi: str, by: str, as_role: str | None = None, tie
                                             **({"fallback_tier": fallback} if fallback else {}),
                                             "worktree": wt["worktree"], "base": wt["base"], "by": by,
                                             **({"worktree_env": wt["env"]} if wt.get("env") else {}),
+                                            **({"rebase": wt["rebase"]} if wt.get("rebase") else {}),
                                             **({"verification_bytes": len(block.encode("utf-8"))} if block else {}),
                                             **({"staging_bytes": len(staging.encode("utf-8"))} if staging else {}),
                                             **({"supersedes": supersedes} if supersedes else {})})
@@ -1134,8 +1201,13 @@ def _render_brief(site: Site, rec: dict, role: str, wt: dict, entry: dict,
     if wt.get("worktree"):
         base = f", base {wt['base'][:12]}" if wt.get("base") else ""
         lines.append(f"Work only in: {wt['worktree']} (branch {wt.get('branch') or wi_branch(site, rec['id'])}{base})")
-        pending = _pending_rebase(site, rec["id"]) if rec["id"] != "WI-0000" else None
-        if pending and role == p["role"]:
+        rb = wt.get("rebase") or {}
+        pending = rb.get("onto") if rb.get("status") == "conflict" else (
+            None if "rebase" in wt or rec["id"] == "WI-0000" else _pending_rebase(site, rec["id"]))
+        if rb.get("status") == "done" and role == p["role"]:  # release 97: the harness rebased the branch itself
+            lines.append(f"The base moved: the harness rebased your branch onto {rb['onto'][:12]} (head was"
+                         f" {rb['from'][:12]}); do the work against the new base.")
+        elif pending and role == p["role"]:
             lines.append(f"First: the base moved. In your worktree run `git rebase {pending[:12]}`, resolve conflicts,"
                          " and commit; then do the work against the new base.")
     scopes = [s for s in r.write_scopes if not s.startswith("site:")]
@@ -1289,6 +1361,12 @@ def wi_stage(site: Site, actor: str, wi: str, summary: str) -> dict:
         if base and head == base:
             fail(f"{wi}: the branch head {head[:12]} is its dispatch base (nothing committed past it); commit the"
                  f" work on the WI branch in {wt} first, then run `wi stage` again. Nothing was recorded.")
+        # release 97 (UR-20261109-01, option b): a head that does not contain the amended base is not staged
+        onto = _amended_base(site, wi)
+        if onto and _head_contains(wt, onto) is False:
+            fail(f"{wi}: the branch head {head[:12]} does not contain its amended base {onto[:12]} (`wi amend --rebase`);"
+                 f" rebase it first: `git -C {wt} rebase {onto}` (resolve any conflict, `git rebase --continue`), then"
+                 " run `wi stage` again. Nothing was recorded.")
     elif st in ("approved", "rework") and not led.checker_item(wi):
         fail(f"{wi} is {st}; only an item owned by a role with the verify capability and without a worktree (a"
              " read-only sweep) is staged before it is dispatched")
