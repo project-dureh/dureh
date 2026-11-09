@@ -268,7 +268,7 @@ Measured 2026-10-08 at a company site: a 0.04 s `grep` check cost one scheduler 
 
 ```
 dureh wi new ... --check 'grep -q "## Usage" README.md' --checks-runner local
-dureh wi amend --wi <WI> --memo "..." --checks-runner local|site
+dureh wi amend --wi <WI> --memo "..." --by Director|DUREH|desk --checks-runner local|site
 ```
 
 - **Config.** `checks.local_allow` lists globs (fnmatch over the whole command; `*` matches anything) of checks

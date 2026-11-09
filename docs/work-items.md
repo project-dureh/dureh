@@ -10,7 +10,7 @@ brief (an amendment was refused at 2293 B), so the acceptance had to point at a 
 
 ```
 dureh wi new ... --acceptance "R1-R23 of the requirements file are met" --requirements notes/<file>.md
-dureh wi amend --wi <WI> --memo "<Director's words>" --requirements notes/<file>.md   # re-pin after a change
+dureh wi amend --wi <WI> --memo "<Director's words>" --by Director|DUREH|desk --requirements notes/<file>.md   # re-pin after a change
 ```
 
 - The file must be inside the site (a relative path is taken from the site root; `notes/` or a target's main
@@ -65,6 +65,11 @@ verify. Now the step is not left to the worker:
   command: `git -C <worktree> rebase <base>` (resolve any conflict, `git rebase --continue`), then stage again.
   Nothing is recorded. When git gives no verdict (an unknown revision) the check is skipped. Items never amended
   with `--rebase` are unchanged.
+- **Recorded with any flags; `--by` required** (a second site's UR-20261109-01, finding e785c91f). `--rebase` is
+  recorded as `rebase_onto` whatever other changes come with it (`--requirements`, `--check`, ...; pinned by
+  tests). `wi amend --by Director|DUREH|desk` is required, as for `wi approve` (release 78): without it the CLI
+  refuses and records nothing; before release 97 every amendment was recorded as the Director's. The approver is
+  recorded on `wi.amended`, on the re-approval of a stopped item and on `wi.reopened`.
 
 ## The worktree's scratch directory (release 93, UR-20261106-02)
 
@@ -110,7 +115,7 @@ with a worktree:
   same event with `stage: "merge"`, the unmerged paths (`git diff --name-only --diff-filter=U`, taken before the
   abort; empty when git refused before starting) and `error` (git's message), and fails with the same guidance.
   The main tree is back at its HEAD with a clean status either way.
-- **Recovery.** `dureh wi amend --wi <WI> --reopen --rebase <target HEAD> --memo "<Director's words>"` (the
+- **Recovery.** `dureh wi amend --wi <WI> --reopen --rebase <target HEAD> --memo "<Director's words>" --by Director|DUREH|desk` (the
   verification is void, the item goes back to approved with its base moved to the current main), then dispatch
   the WI again: the harness tries the rebase onto that base (release 97, below); it conflicts here, so it is
   aborted and the worker rebases and resolves the conflict, the checker verifies, and the desk promotes. `wi.promote-failed` changes no status (it is not in the lifecycle projection); the item is verified
@@ -204,7 +209,7 @@ A role with `runtime: local` writes only the item's declared `outputs` that lie 
 (docs/member-runtimes.md). `wi new` refuses an item for such a role without one (`--output <path>`, exact files, no
 globs), and `wi approve` refuses one recorded earlier, with the reason `member run` gives ("the item declares no output
 inside the role's write scopes, so the local member would have no file to write"); declare them with
-`wi amend --wi <WI> --memo ... --output <path>`. Other roles are not affected.
+`wi amend --wi <WI> --memo ... --by Director|DUREH|desk --output <path>`. Other roles are not affected.
 
 ## Files in a project cache: `purge --project` (release 77, project-dureh/dureh#40)
 

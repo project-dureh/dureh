@@ -299,7 +299,7 @@ What the plan approval covers (agreed with a company desk, 2026-10-03):
 - Amending a plan WI's checks, acceptance, constraints, outputs or base (`wi amend`, which also re-opens a
   stopped item); a different goal is a new WI.
 - Re-opening a verified plan WI that is not promoted (release 45): `wi amend --wi <WI> --reopen --memo
-  "<Director's words>" [--add-constraint ...] [--check ...]` records the amendment with `reopened_from: verified`
+  "<Director's words>" --by Director|DUREH|desk [--add-constraint ...] [--check ...]` records the amendment with `reopened_from: verified`
   and a `wi.reopened` event (refs the amendment, names the verify run it voids). The item goes back to
   `approved` and is dispatched again as usual; no `dispatch stop`. Only `wi.reopened` moves an item from verified
   to approved (`wi approve` cannot); a promoted item never changes, and an item of a verified or promoted bundle

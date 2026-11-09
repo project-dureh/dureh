@@ -158,7 +158,8 @@ class Reopen(AmendCase):
 
         wi = self.verified_item()
         os.environ["DUREH_SITE"] = str(self.site_root)
-        self.assertEqual(main(["wi", "amend", "--wi", wi, "--memo", "Director's words", "--reopen"]), 0)
+        self.assertEqual(main(["wi", "amend", "--wi", wi, "--memo", "Director's words", "--reopen",
+                               "--by", "Director"]), 0)
         self.assertEqual(Ledger(self.s).wi_status(wi)["status"], "approved")
 
 

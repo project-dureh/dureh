@@ -220,13 +220,15 @@ def cmd_wi_approve(a):
 
 
 def cmd_wi_amend(a):
+    from .records import approver
     from .workflow import wi_amend
 
+    by = approver(a.by, what="`wi amend`")  # release 97 (UR-20261109-01 mokoji): required, as for `wi approve`
     fields = {"acceptance": a.acceptance, "checks": a.check, "constraints": a.constraint, "outputs": a.output,
               "checks_runner": a.checks_runner, "requirements": a.requirements}
     _print(wi_amend(_site(a), _actor(a), a.wi, a.memo, {k: v for k, v in fields.items() if v is not None},
                     a.rebase, add_constraints=a.add_constraint, reopen=a.reopen,
-                    rework_notes=a.rework_note))
+                    rework_notes=a.rework_note, by=by))
 
 
 def cmd_wi_show(a):
@@ -1279,6 +1281,8 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--reopen", action="store_true",
                    help="re-open a verified, unpromoted item: the verification is void and it goes back to approved"
                         " for a new dispatch (no dispatch stop); other changes are optional")
+    x.add_argument("--by", help="who approved the amendment: Director, DUREH or desk (required, no default;"
+                                " release 97, as for wi approve)")
     x.add_argument("--actor")
     x = add(wi, "show", cmd_wi_show, "show work items with their events (repeat --wi; --summary for status and last events)")
     x.add_argument("--wi", required=True, action="append")

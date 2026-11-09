@@ -1,12 +1,16 @@
 """Release 97 (UR-20261109-01): after `wi amend --rebase`, `dispatch brief` rebases the WI branch onto the amended
 base itself (a conflict is aborted, the branch left as it was, and the brief says so), and `wi stage` refuses a head
 that does not contain the amended base."""
+import contextlib
+import io
+import os
 import subprocess
 from pathlib import Path
 
 from helpers import SiteCase, hook, commit_work
 
 from dureh_core import workflow as wf
+from dureh_core.cli import main
 from dureh_core.records import Ledger
 from dureh_core.util import DurehError
 
@@ -15,7 +19,7 @@ def git(cwd, *args, check=True):
     return subprocess.run(["git", *args], cwd=cwd, check=check, capture_output=True, text=True).stdout.strip()
 
 
-class AmendRebase(SiteCase):
+class RebaseCase(SiteCase):
     def setUp(self):
         super().setUp()
         self.install()
@@ -56,6 +60,8 @@ class AmendRebase(SiteCase):
     def prepared(self, wi):
         return [e for e in self.led.events(wi) if e["type"] == "dispatch.prepared"][-1]["payload"]
 
+
+class AmendRebase(RebaseCase):
     def test_redispatch_rebases_the_branch_onto_the_amended_base(self):
         wi, wt, old = self.worked("docs/new.md", "x\n")
         main = self.main_commits("src/other.py", "y = 1\n")
@@ -125,3 +131,63 @@ class AmendRebase(SiteCase):
         wi, wt, old = self.worked("docs/new.md", "x\n", stop=False)
         self.main_commits("src/other.py", "y = 1\n")  # main moved, but no `--rebase`: no new requirement
         self.assertEqual(wf.wi_stage(self.s, "doc-writer", wi, "done")["type"], "wi.staged")
+
+
+class AmendFlags(RebaseCase):
+    """Finding e785c91f (release 97): `--rebase` is recorded whatever comes with it; `--by` names the approver."""
+
+    def amended(self, wi):
+        return [e for e in self.led.events(wi) if e["type"] == "wi.amended"][-1]["payload"]
+
+    def cli_amend(self, wi, *args, by=("--by", "Director")):
+        os.environ["DUREH_SITE"] = str(self.site_root)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["wi", "amend", "--wi", wi, "--memo", "Director: ok", *args, *by, "--actor", "desk"]), 0)
+        return self.amended(wi)
+
+    def test_rebase_is_recorded_with_requirements(self):
+        req = self.site_root / "notes" / "req.md"
+        req.parent.mkdir(exist_ok=True)
+        req.write_text("R1\n")
+        wi, wt, old = self.worked("docs/new.md", "x\n")  # stopped
+        main_a = self.main_commits("src/a.py", "a = 1\n")
+        p = self.cli_amend(wi, "--rebase", main_a, "--requirements", "notes/req.md")
+        self.assertEqual(p["rebase_onto"], main_a)
+        self.assertEqual(p["fields"]["requirements"]["path"], "notes/req.md")
+        main_b = self.main_commits("src/b.py", "b = 1\n")
+        p = self.cli_amend(wi, "--requirements", "notes/req.md", "--rebase")  # bare --rebase: the target HEAD
+        self.assertEqual(p["rebase_onto"], main_b)
+        main_c = self.main_commits("src/c.py", "c = 1\n")
+        p = self.cli_amend(wi, "--requirements", "notes/req.md", "--check", "true", "--rebase", main_c)
+        self.assertEqual(p["rebase_onto"], main_c)
+        self.assertIn(f"rebased your branch onto {main_c[:12]}", self.dispatch(wi)["brief"])
+
+    def test_by_is_required_and_recorded(self):
+        wi, wt, old = self.worked("docs/new.md", "x\n")  # stopped: the amendment re-approves it
+        n = len(self.led.events(wi))
+        os.environ["DUREH_SITE"] = str(self.site_root)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+            rc = main(["wi", "amend", "--wi", wi, "--memo", "ok", "--check", "true", "--actor", "desk"])
+        self.assertNotEqual(rc, 0)
+        self.assertIn("--by is required for `wi amend`", err.getvalue())
+        self.assertEqual(len(self.led.events(wi)), n, "nothing recorded")
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertNotEqual(main(["wi", "amend", "--wi", wi, "--memo", "ok", "--check", "true", "--by", "someone",
+                                      "--actor", "desk"]), 0)
+        self.assertEqual(self.cli_amend(wi, "--check", "true", by=("--by", "desk"))["by"], "desk")
+        approvals = [e for e in self.led.events(wi) if e["type"] == "wi.approved"]
+        self.assertEqual(approvals[-1]["payload"]["by"], "desk", "the re-approval names the given approver")
+        self.dispatch(wi)
+        wf.dispatch_stop(self.s, "desk", wi, "again")
+        self.assertEqual(self.cli_amend(wi, "--check", "true", by=("--by", "DUREH"))["by"], "DUREH")
+        with self.assertRaises(DurehError):
+            wf.wi_amend(self.s, "desk", wi, "x", {"checks": ["true"]}, by=" ")
+
+    def test_by_on_a_reopen(self):
+        wi, wt, old = self.worked("docs/new.md", "x\n", stop=False)
+        wf.wi_stage(self.s, "doc-writer", wi, "done")
+        self.assertEqual(wf.verify_wi(self.s, "checker", wi)["result"], "pass")
+        ev = wf.wi_amend(self.s, "desk", wi, "plan approval covers it", {}, reopen=True, by="DUREH")
+        self.assertEqual(ev["payload"]["by"], "DUREH")
+        reopened = [e for e in self.led.events(wi) if e["type"] == "wi.reopened"][-1]
+        self.assertEqual(reopened["payload"]["by"], "DUREH")

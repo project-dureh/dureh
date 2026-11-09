@@ -131,7 +131,7 @@ def requirements_problem(site: Site, wi: str, payload: dict) -> str | None:
         return None
     what = "is missing" if now is None else f"changed (sha256 {now[:12]}, recorded {req['sha256'][:12]})"
     return (f"{wi}: the requirements file {p} {what} since it was pinned; nothing was recorded. Restore it, or pin the"
-            f" new content with `dureh wi amend --wi {wi} --memo \"<Director's words>\" --requirements {req['path']}`")
+            f" new content with `dureh wi amend --wi {wi} --memo \"<Director's words>\" --by Director|DUREH|desk --requirements {req['path']}`")
 
 
 def _brief_limit(site: Site, role) -> int:
@@ -204,7 +204,7 @@ def _local_output_check(site: Site, wi: str, payload: dict) -> None:
     why = output_problem(site, role, payload)
     if why:
         fail(f"{wi}: {role.name} runs on the local runtime and {why}: declare them first with `dureh wi amend --wi {wi}"
-             f" --memo ... --output <path>` (exact files inside its write scopes: {', '.join(role.write_scopes)})")
+             f" --memo ... --by Director|DUREH|desk --output <path>` (exact files inside its write scopes: {', '.join(role.write_scopes)})")
 
 
 # --------------------------------------------------------------- dispatch
@@ -678,7 +678,7 @@ AMENDABLE = ("acceptance", "checks", "constraints", "outputs", "checks_runner", 
 
 def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: str | None = None,
              add_constraints: list[str] | None = None, reopen: bool = False,
-             rework_notes: list[str] | None = None) -> dict:
+             rework_notes: list[str] | None = None, by: str | None = None) -> dict:
     """Change a WI's acceptance, checks, constraints or outputs, or move its base, without a replacement WI.
 
     The goal, role and target never change (that is a new WI). The amendment is approved like Gate 1:
@@ -691,13 +691,20 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
     `--add-constraint` is (also on a staged item).
     `reopen` (`--reopen`, release 45) re-opens a verified item that is not promoted: the amendment records
     `reopened_from: verified`, a `wi.reopened` event voids the verification and moves the item back to approved
-    for a new dispatch, with no `dispatch stop`. Fields are optional with it. A promoted item never changes."""
+    for a new dispatch, with no `dispatch stop`. Fields are optional with it. A promoted item never changes.
+    `by` (`--by`, release 97, UR-20261109-01 of a second site) names who approved the amendment (Director, DUREH or
+    desk); the CLI requires it, as `wi approve` since release 78; a library caller that omits it records "Director"
+    as before (and a stopped item's re-approval keeps its last Gate 1 approver). It is recorded on the amendment, the re-approval of a stopped item and
+    `wi.reopened`. `rebase` is recorded whatever other changes come with it."""
     from .ops import agent_state
+    from .records import approver
 
     if site.org.role(actor).kind != "desk":
         fail("only the desk amends work items")
     if not memo.strip():
         fail("--memo must carry the Director's words (or the day plan approval that covers the amendment)")
+    explicit_by = by is not None
+    by = "Director" if by is None else approver(by, what="`wi amend`")
     led = Ledger(site)
     rec = led.get("work-item", wi)
     st = led.wi_status(wi)["status"]
@@ -712,7 +719,7 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
              + (" (amend this item without it)" if st in ("approved", "rework", "dispatched", "proposed", "stopped") else ""))
     if st == "verified" and not reopen:
         fail(f"{wi} is verified; to change it before promotion re-open it: `dureh wi amend --wi {wi} --reopen --memo"
-             " \"<Director's words>\" [--add-constraint ...] [--check ...]` (the verification is void and the item goes"
+             " \"<Director's words>\" --by Director|DUREH|desk [--add-constraint ...] [--check ...]` (the verification is void and the item goes"
              " back to approved for a new dispatch)")
     parent = rec["payload"].get("parent")
     if reopen and parent and led.wi_status(parent)["status"] in ("verified", "promoted"):
@@ -728,7 +735,7 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
     if st == "staged" and not (only_adds or only_runner):
         fail(f"{wi} is staged; only --add-constraint (which appends) and --rework-note are allowed on a staged item. To change"
              f" acceptance, checks, constraints, outputs or the base: `dureh dispatch stop --wi {wi} --reason ...`, then"
-             f" `dureh wi amend --wi {wi} --memo ...` with the change (the amendment re-opens the stopped item)")
+             f" `dureh wi amend --wi {wi} --memo ... --by Director|DUREH|desk` with the change (the amendment re-opens the stopped item)")
     if st not in ("approved", "rework", "dispatched", "proposed", "stopped", "staged", "verified"):
         fail(f"{wi} is {st}; amend only proposed, approved, rework, stopped, staged (--add-constraint only),"
              " verified-not-promoted (--reopen) or dispatched-and-ended items")
@@ -766,7 +773,7 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
         _local_output_check(site, wi, draft["payload"])
     before = {k: rec["payload"].get(k) for k in fields}
     ev = led.event("wi.amended", actor, wi, {"fields": fields, "before": before, "rebase_onto": rebase_onto,
-                                              "memo": memo, "by": "Director",
+                                              "memo": memo, "by": by,
                                               **({"added_constraints": adds, "status": st} if adds else {}),
                                               **({"rework_notes": notes, "status": st} if notes else {}),
                                               **({"reopened_from": "verified"} if reopen else {})})
@@ -774,10 +781,10 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
         # release 78: the re-approval names the approver of the item's last Gate 1, never an assumed Director
         last = [e for e in led.events(wi) if e["type"] == "wi.approved"]
         wi_approve(site, actor, wi, f"amended ({ev['id']}): {memo}",
-                   by=(last[-1]["payload"].get("by") if last else None) or "Director")
+                   by=by if explicit_by else (last[-1]["payload"].get("by") if last else None) or "Director")
     if reopen:
         verified = [e for e in led.events(wi) if e["type"] == "wi.verified"]
-        led.event("wi.reopened", actor, wi, {"amendment": ev["id"], "memo": memo, "by": "Director",
+        led.event("wi.reopened", actor, wi, {"amendment": ev["id"], "memo": memo, "by": by,
                                              "voids": verified[-1]["payload"].get("run") if verified else None},
                   [ev["id"]])
     return ev
@@ -2683,7 +2690,7 @@ def _promote_failed(led: Ledger, actor: str, wi: str, rec: dict, root: Path, bas
             else f"the merge failed: {error or 'unknown error'}")
     fail(f"{wi} cannot be promoted: merging its branch into {target} ({target_head[:12]}) {what}. Nothing changed in"
          f" {root} ({wi} stays verified; recorded as wi.promote-failed, stage {stage}). Next: `dureh wi amend --wi {wi}"
-         f" --reopen --rebase {target_head[:12]} --memo \"<Director's words>\"`, then dispatch {wi} again so the worker"
+         f" --reopen --rebase {target_head[:12]} --memo \"<Director's words>\" --by Director|DUREH|desk`, then dispatch {wi} again so the worker"
          " rebases onto the current main and resolves the conflict; verify and promote after that")
 
 
