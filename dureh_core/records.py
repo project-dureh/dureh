@@ -196,7 +196,29 @@ def typed_line(typed: dict | None) -> str:
     return line
 
 
-_RECORD_CACHE: dict[str, dict[str, tuple[tuple[int, int], str]]] = {}  # dir -> file name -> (size, mtime), json
+class _DirCache:
+    """One record directory as this process knows it (release 96). `entries` holds each checked record's text keyed
+    by its (size, mtime) when read or packed; `verified` the names stat'ed (and read when new or changed) in this
+    process, which are trusted from then on without another stat (records are create-only, `write_create_only`);
+    `sorted` the record texts of the last listing in load order, as one JSON array, so a repeated load of an
+    unchanged directory is one listing and one parse."""
+
+    __slots__ = ("entries", "verified", "sorted")
+
+    def __init__(self, entries: dict[str, tuple[tuple[int, int], str]]):
+        self.entries = entries
+        self.verified: set[str] = set()
+        self.sorted: tuple[tuple[str, ...], str] | None = None
+
+
+_RECORD_CACHE: dict[str, _DirCache] = {}  # record dir -> what this process knows of it
+
+
+def forget_cache() -> None:
+    """Drop what this process knows of every record directory, as a new process starts (the packs stay)."""
+    _RECORD_CACHE.clear()
+
+
 PACK_VERSION = 1
 
 
@@ -335,49 +357,75 @@ class Ledger:
     # --- reading -----------------------------------------------------------
     def load(self, kind: str) -> list[dict]:
         """All records of a kind, oldest first. A file read and checked once is kept in a per-process cache keyed
-        by its size and mtime (records are create-only), so the many loads of one command (status reads the
-        events a dozen times) cost a directory listing and a stat each, not a read of every file: measured
-        2026-10-05, `--observe status` at a site with 3355 events spent minutes in NFS reads. Release 84: the cache
-        also lives on between processes as a pack file beside the index, so a new process (a hook, a status) opens
-        only the files written since the last pack."""
+        by its size and mtime (records are create-only): measured 2026-10-05, `--observe status` at a site with
+        3355 events spent minutes in NFS reads. Release 84: the cache also lives on between processes as a pack file
+        beside the index, so a new process (a hook, a status) opens only the files written since the last pack.
+        Release 96: each record file is stat'ed at most once per process (a later load lists the directory and
+        stats only names it has not seen), and an unchanged listing is parsed from one cached JSON array: a status
+        loads the events six times, and on NFS each pass cost a stat per file (2026-11-09, 22-35 s at a site with
+        about 500 work items)."""
+        dc, directory, names, extra = self._scan(kind)
+        key = tuple(names)
+        if not extra and dc.sorted is not None and dc.sorted[0] == key:
+            return json.loads(dc.sorted[1])  # fresh objects: callers may change what they get
+        texts = [extra[n] if n in extra else dc.entries[n][1] for n in names]
+        rows = [json.loads(t) for t in texts]
+        order = sorted(range(len(rows)), key=lambda i: (rows[i]["ts"], rows[i]["id"]))
+        if not extra:
+            dc.sorted = (key, "[" + ",".join(texts[i] for i in order) + "]")
+        return [rows[i] for i in order]
+
+    def _cache(self, kind: str) -> tuple[_DirCache, Path]:
         directory = self.site.record_dir(kind)
         if not directory.is_dir():
             fail(f"record store is missing: {directory}")
-        cache = _RECORD_CACHE.get(str(directory))
-        pack = self._pack_path(kind)
-        if cache is None:
-            cache = _RECORD_CACHE[str(directory)] = _read_pack(pack, directory)
-        rows, seen, opened = [], set(), 0
+        dc = _RECORD_CACHE.get(str(directory))
+        if dc is None:
+            dc = _RECORD_CACHE[str(directory)] = _DirCache(_read_pack(self._pack_path(kind), directory))
+        return dc, directory
+
+    def _scan(self, kind: str) -> tuple[_DirCache, Path, list[str], dict[str, str]]:
+        """List the kind's directory; stat (and read and check, when new or changed) only the names this process has
+        not verified yet. Returns the cache, the directory, the record file names in name order, and the texts of
+        records that could not be cached (their stat failed)."""
+        dc, directory = self._cache(kind)
         with os.scandir(directory) as it:
             entries = sorted((e for e in it if e.name.endswith(".json")), key=lambda e: e.name)
+        names, extra, opened = [], {}, 0
         for entry in entries:
+            name = entry.name
+            names.append(name)
+            if name in dc.verified:
+                continue
             try:
                 st = entry.stat()
                 key = (st.st_size, st.st_mtime_ns)
             except OSError:
                 key = None
-            hit = cache.get(entry.name)
+            hit = dc.entries.get(name)
             if key is not None and hit is not None and hit[0] == key:
-                text = hit[1]
+                dc.verified.add(name)
+                continue
+            path = Path(entry.path)
+            rec = read_json(path)
+            opened += 1
+            if rec.get("id") != path.stem:
+                fail(f"record id does not match its file name: {path}")
+            check_record(rec)
+            text = json.dumps(rec)
+            if key is None:
+                extra[name] = text
+                dc.entries.pop(name, None)
             else:
-                path = Path(entry.path)
-                rec = read_json(path)
-                opened += 1
-                if rec.get("id") != path.stem:
-                    fail(f"record id does not match its file name: {path}")
-                check_record(rec)
-                text = json.dumps(rec)
-                if key is not None:
-                    cache[entry.name] = (key, text)
-            seen.add(entry.name)
-            rows.append(json.loads(text))  # a fresh copy: callers may change what they get
-        gone = set(cache) - seen
+                dc.entries[name] = (key, text)
+                dc.verified.add(name)
+        gone = set(dc.entries).difference(names)
         for name in gone:
-            del cache[name]
+            del dc.entries[name]
+        dc.verified.difference_update(gone)
         if opened or gone:
-            _write_pack(pack, directory, cache)
-        rows.sort(key=lambda r: (r["ts"], r["id"]))
-        return rows
+            _write_pack(self._pack_path(kind), directory, dc.entries)
+        return dc, directory, names, extra
 
     def _pack_path(self, kind: str) -> Path:
         """The kind's record pack beside the index (outside the site; observe has its own private directory)."""
@@ -405,10 +453,14 @@ class Ledger:
 
     def get(self, kind: str, record_id: str) -> dict:
         path = self.site.record_dir(kind) / f"{record_id}.json"
-        if not path.is_file():
-            fail(f"no {kind} record {record_id}")
-        rec = read_json(path)
-        check_record(rec)
+        dc = _RECORD_CACHE.get(str(path.parent))
+        if dc is not None and path.name in dc.verified:  # read and checked by this process already (release 96)
+            rec = json.loads(dc.entries[path.name][1])
+        else:
+            if not path.is_file():
+                fail(f"no {kind} record {record_id}")
+            rec = read_json(path)
+            check_record(rec)
         if kind == "work-item":
             amended = [e for e in self.events(record_id) if e["type"] == "wi.amended"]
             for e in amended:  # records stay create-only; amendments apply on read, in order
@@ -460,9 +512,16 @@ class Ledger:
         for kind in RECORD_KINDS:
             d = self.site.record_dir(kind)
             if d.is_dir():
-                for p in sorted(d.glob("*.json")):
-                    st = p.stat()
-                    h.update(f"{kind}/{p.name}:{st.st_size}:{st.st_mtime_ns}\n".encode())
+                dc = _RECORD_CACHE.get(str(d))
+                with os.scandir(d) as it:
+                    names = sorted(e.name for e in it if e.name.endswith(".json") and not e.name.startswith("."))
+                for name in names:  # a size and mtime this process has already seen is not stat'ed again
+                    if dc is not None and name in dc.verified:
+                        size, mtime = dc.entries[name][0]
+                    else:
+                        st = (d / name).stat()
+                        size, mtime = st.st_size, st.st_mtime_ns
+                    h.update(f"{kind}/{name}:{size}:{mtime}\n".encode())
         return h.hexdigest()
 
     def build_index(self) -> dict:

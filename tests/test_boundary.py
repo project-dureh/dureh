@@ -10,7 +10,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from dureh_core import install, yamlsub
+from dureh_core import install, records, yamlsub
 from dureh_core.cli import main
 from dureh_core.org import HARNESS_ROOT, Org
 from dureh_core.package import CAPABILITIES, check, globs_overlap
@@ -667,6 +667,7 @@ class RemovedRoles(SiteCase):
         data["payload"]["role"] = "gone-runner"
         path.chmod(0o644)
         path.write_text(json.dumps(data))
+        records.forget_cache()  # as a new process reads it (records are create-only; release 96 trusts a stat once)
         text = render_status(status(self.site()))
         self.assertIn(f"{rec['id']} (gone-runner)", text)
         self.assertIn("role is not in this organization", text)
