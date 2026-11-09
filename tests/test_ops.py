@@ -212,6 +212,39 @@ class Ops(SiteCase):
         from dureh_core.site import Site
         return Site(self.site_root), repo, bare
 
+    def test_push_to_a_checked_out_branch_of_a_local_non_bare_repo_is_refused_up_front(self):
+        """Release 96 (UR-20261106-03): git refuses it late (receive.denyCurrentBranch); dureh refuses before pushing
+        and names the fast-forward pull on that side. Another branch, or a repository set to take the push, goes on."""
+        repo = self.make_module()
+        origin = self.tmp / "origin"
+        subprocess.run(["git", "clone", "-q", str(repo), str(origin)], check=True)
+        subprocess.run(["git", "remote", "add", "local", str(origin)], cwd=repo, check=True)
+        cfg = json.loads(self.s.config_path.read_text())
+        cfg["push"] = {"allowed_remotes": [{"url": str(origin), "standing_ff": True, "new_branches": ["*"]}]}
+        self.s.config_path.write_text(json.dumps(cfg))
+        from dureh_core.site import Site
+        s = Site(self.site_root)
+        rev = self._commit(repo, "def f():\n    return 2\n")
+        for dry in (True, False):
+            with self.assertRaises(DurehError) as cm:
+                ops.push(s, "desk", str(repo), "local", "main", None, dry_run=dry)
+            msg = str(cm.exception)
+            self.assertIn("refs/heads/main is checked out in", msg)
+            self.assertIn(f"`git -C {origin.resolve()} pull --ff-only {repo.resolve()} main`", msg)
+            self.assertNotIn("git-annex", msg)
+        self.assertNotEqual(self._remote_tip(origin), rev, "nothing pushed")
+        self.assertEqual([e for e in Ledger(s).events() if e["type"].startswith("push.")], [])
+        subprocess.run(["git", "config", "annex.version", "10"], cwd=origin, check=True)
+        with self.assertRaisesRegex(DurehError, "with git-annex on PATH"):
+            ops.push(s, "desk", str(repo), "local", "main", None)
+        subprocess.run(["git", "branch", "-q", "side"], cwd=repo, check=True)
+        self.assertEqual(ops.push(s, "desk", str(repo), "local", "side", None)["type"], "push.completed")
+        subprocess.run(["git", "config", "receive.denyCurrentBranch", "updateInstead"], cwd=origin, check=True)
+        self.assertEqual(ops.push(s, "desk", str(repo), "local", "main", None)["type"], "push.completed")
+        self.assertEqual(self._remote_tip(origin), rev)
+        self.assertIsNone(ops.local_remote_path("git@example.org:x/y.git", repo))
+        self.assertIsNone(ops.checked_out_remote(str(self.tmp / "missing"), repo))
+
     @staticmethod
     def _commit(repo, text):
         (repo / "src" / "demo.py").write_text(text)

@@ -517,7 +517,30 @@ def plan(site: Site, steps: list[dict], verify_github: bool = True) -> dict:
                  " `--approval <item URL>`), or the Director runs it in his own terminal",
             "D": "the Director's own terminal only"}[cls]
     return {"steps": rows, "class": cls, "fail_closed": cls != "B", "why": why_all, "approval": need,
-            "binding": binding(steps), "warnings": sorted(before_errs), "_config": cfg, "_raw": raw}
+            "binding": binding(steps), "warnings": sorted(before_errs), "notes": checked_out_notes(site, raw, cfg),
+            "_config": cfg, "_raw": raw}
+
+
+def checked_out_notes(site: Site, old_cfg: dict, new_cfg: dict) -> list[str]:
+    """Release 96 (UR-20261106-03): a new push.allowed_remotes entry for a local non-bare repository whose
+    checked-out branch the entry covers: `dureh push` to that branch is refused (git's receive.denyCurrentBranch), so
+    the plan says so before anyone approves it."""
+    from .ops import _globs, checked_out_remote, push_rules
+
+    old = {r["url"] for r in push_rules(old_cfg.get("push") or {})}
+    out = []
+    for r in push_rules(new_cfg.get("push") or {}):
+        if r["url"] in old or r.get("pattern"):
+            continue
+        info = checked_out_remote(r["url"], site.root)
+        heads = sorted(b[len("refs/heads/"):] for b in (info or {}).get("checked_out", {}) if b.startswith("refs/heads/"))
+        heads = [b for b in heads if _globs(r["branches"], b)]
+        if heads:
+            out.append(f"{r['url']} is a local non-bare repository with {', '.join(heads)} checked out: `dureh push`"
+                       " to " + ("that branch" if len(heads) == 1 else "those branches") + " is refused (git's"
+                       " receive.denyCurrentBranch); it is delivered by a fast-forward pull on that side (`git -C <that"
+                       " checkout> pull --ff-only <site copy> <ref>`), the Director's step, or by a bare remote instead")
+    return out
 
 
 # ------------------------------------------------------------------ approvals
@@ -891,6 +914,8 @@ def render_plan(pl: dict) -> str:
             lines.append(f"     widens: {w}")
     for w in pl["warnings"]:
         lines.append(f"warning (already in the config, not added by this plan): {w}")
+    for n in pl.get("notes") or []:
+        lines.append(f"note: {n}")
     return "\n".join(lines) + "\n"
 
 
