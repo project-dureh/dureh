@@ -69,7 +69,7 @@ class Titles(SiteCase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             main(["wi", "new", "--title", "t", "--goal", "g", "--role", "doc-writer", "--target", "modules/demo",
-                  "--acceptance", "ok", "--label", "short"])
+                  "--acceptance", "ok", "--label", "short", "--no-goal", "test item"])
         self.assertRegex(out.getvalue(), r"^WI-\d{4} \(short\) created")
 
     def test_upstream_message_and_slack_text(self):

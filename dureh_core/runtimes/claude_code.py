@@ -614,7 +614,14 @@ def _claude_md(site: Site) -> str:
               " Director already does: status, reports, Slack posts, `upstream message`; `wi new --label` sets a short title of at"
               " most 40 characters, else the title is cut to 40).", "",
               _handshake_rule(site, dureh), "",
-              f"1. Turn a Director request into work items: `{dureh} wi new --title ... --goal ... --role <role> --target <target> --acceptance ...`."
+              f"0. Goals (release 98): record the Director's goal verbatim from its board item, each criterion naming its deliverables:"
+              f" `{dureh} goal new --text \"<Director's words>\" --criterion \"<what must hold> => <deliverable>\" --source <board item> --by Director|DUREH`."
+              " No open goal: propose the next goal to the Director first. A goal closes only with evidence for every deliverable"
+              f" (`{dureh} goal evidence`) and the Director's Approve on the board (`{dureh} goal close --approval <item URL>`); you cannot close it yourself."
+              f" Before you report a goal done, show `{dureh} goal check --goal <G>`.",
+              f"1. Turn a Director request into work items: `{dureh} wi new --title ... --goal ... --goal-id <G> --role <role> --target <target> --acceptance \"[C1] ...\"`"
+              " (tag each acceptance line with the goal criterion it delivers; Gate 1 refuses while a criterion is covered by no item;"
+              " `--no-goal \"<reason>\"` for work that serves none)."
               " A bundle is a manager-owned item; its children set `--parent`."
               " `--check` commands run with the WI worktree (the target repository's root) as the working directory, or the target root when the role has no worktree;"
               " `$DUREH_TARGET_ROOT` is the target's main tree and `$DUREH_SITE` the site. `--output` paths are relative to that same working directory."

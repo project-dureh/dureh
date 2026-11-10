@@ -1036,8 +1036,15 @@ def plan(site: Site, actor: str, goal: str, text: str, items: list[str] | None =
     led = Ledger(site)
     for w in items or []:
         led.get("work-item", w)
+    from .goals import plan_prefix
+
+    first = plan_prefix(site, text)  # release 98 (dureh-team#161): no open goal -> the plan starts with proposing one
+    if first:
+        text = f"{first}\n{text}"
     u = usage(site)
     payload = {"date": _now().date().isoformat(), "goal": goal, "plan": text, "usage_at_plan": u, "heads": heads(site)}
+    if first:
+        payload["no_open_goal"] = True
     if items:
         payload["items"] = sorted(set(items))
     actions = [a.strip() for a in director_actions or [] if a and a.strip()]

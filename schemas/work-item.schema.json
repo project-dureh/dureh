@@ -179,6 +179,21 @@
             "string",
             "null"
           ]
+        },
+        "goal_id": {
+          "description": "release 98: the goal this item serves (goal.created), for example G-0001",
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^G-\\d{4,}$"
+        },
+        "no_goal": {
+          "description": "release 98: why this item serves no goal (`wi new --no-goal`)",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     }

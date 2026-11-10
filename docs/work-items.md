@@ -3,6 +3,14 @@
 Work-item options added in release 45. The lifecycle itself (proposed, approved, dispatched, staged, verified,
 promoted; rework and stopped) is a projection of events (`dureh_core/records.py`).
 
+## Every work item names its goal (release 98, dureh-team#161)
+
+`wi new` requires `--goal-id <G>` (an open goal; acceptance lines tag the criteria they deliver, `[C1] ...`) or
+`--no-goal "<reason>"`; `--parent` / `--fix-for` items inherit an open goal. Gate 1 (`wi approve`) of a goal's item
+prints the criterion -> work items coverage table and refuses, recording nothing, while a criterion of the goal is
+covered by no item. Items recorded before release 98 are legacy: approved as before, with a warning; `wi amend
+--goal-id` links one. See docs/goals.md.
+
 ## Requirements file: `--requirements <file>` (6g)
 
 Measured 2026-10-08 at a company site: an acceptance list of 23 requirements did not fit the 2048-byte worker

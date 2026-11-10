@@ -11,7 +11,7 @@ from .util import DurehError, dumps, fail
 
 
 RESERVED_EVENT_PREFIXES = ("workday.", "day.", "session.", "hours.", "slack.", "github.", "harness.", "member.", "office-hours.",
-                           "site.permit.")  # harness.switched: session start only
+                           "site.permit.", "goal.")  # goal.*: release 98, written only by `dureh goal`  # harness.switched: session start only
 
 
 def _percent(value: str) -> float:
@@ -206,8 +206,11 @@ def cmd_wi_new(a):
 
     r = wi_new(_site(a), _actor(a), a.title, a.goal, a.role, a.target, a.acceptance, a.lane, a.bundle, a.value,
                a.check, a.output, a.constraint, a.parent, None, a.academic, fix_for=a.fix_for,
-               checks_runner_choice=a.checks_runner, requirements=a.requirements, label=a.label)
-    print(f"{wi_label(r['id'], r['payload'])} created (proposed; needs Gate 1): {r['payload']['title']}")
+               checks_runner_choice=a.checks_runner, requirements=a.requirements, label=a.label,
+               goal_id=a.goal_id, no_goal=a.no_goal, require_goal=True)
+    p = r["payload"]
+    link = (f"; goal {p['goal_id']}" if p.get("goal_id") else f"; no goal: {p['no_goal']}" if p.get("no_goal") else "")
+    print(f"{wi_label(r['id'], p)} created (proposed; needs Gate 1{link}): {p['title']}")
 
 
 def cmd_wi_approve(a):
@@ -215,8 +218,15 @@ def cmd_wi_approve(a):
 
     from .records import approver
 
-    ev = wi_approve(_site(a), _actor(a), a.wi, a.memo, approver(a.by, what="`wi approve`"))
+    from .goals import gate1
+    from .records import Ledger
+
+    site = _site(a)
+    ev = wi_approve(site, _actor(a), a.wi, a.memo, approver(a.by, what="`wi approve`"))
     print(f"{a.wi} approved (Gate 1) by {a.by}: {ev['id']}")
+    led = Ledger(site)
+    for line in gate1(site, led, a.wi, led.get("work-item", a.wi)["payload"])["lines"]:  # release 98: coverage table
+        print(line)
 
 
 def cmd_wi_amend(a):
@@ -225,7 +235,7 @@ def cmd_wi_amend(a):
 
     by = approver(a.by, what="`wi amend`")  # release 97 (UR-20261109-01 mokoji): required, as for `wi approve`
     fields = {"acceptance": a.acceptance, "checks": a.check, "constraints": a.constraint, "outputs": a.output,
-              "checks_runner": a.checks_runner, "requirements": a.requirements}
+              "checks_runner": a.checks_runner, "requirements": a.requirements, "goal_id": a.goal_id}
     _print(wi_amend(_site(a), _actor(a), a.wi, a.memo, {k: v for k, v in fields.items() if v is not None},
                     a.rebase, add_constraints=a.add_constraint, reopen=a.reopen,
                     rework_notes=a.rework_note, by=by))
@@ -430,6 +440,10 @@ def cmd_ledger_add(a):
             fail(f"{a.type} events are written only by `dureh day`, `dureh site workday` and `dureh site session start`")
         rec = led.event(a.type or fail("--type is required for events"), actor, a.wi, payload, a.ref)
     elif a.kind == "decision":
+        from .goals import RESERVED_DECISIONS
+
+        if a.type in RESERVED_DECISIONS:
+            fail(f"{a.type} decisions are written only by `dureh goal close` and `dureh goal drop` (release 98)")
         payload = {"subject": a.summary or fail("--summary is required"), "disposition": a.disposition,
                    "by": a.by, "memo": a.memo or ""}
         if a.question or a.option or a.chosen or a.fact:
@@ -902,6 +916,57 @@ def cmd_day(a):
         _print(workday.urgent(site, actor, a.wi, a.memo))
 
 
+def cmd_goal(a):
+    from . import goals
+    from .records import Ledger
+
+    site, c = _site(a), a.goal_command
+    if c == "list":
+        led = Ledger(site)
+        if a.json:
+            _print([{k: g.get(k) for k in ("goal", "state", "title", "source", "by", "ts", "criteria")}
+                    for g in goals.goals(led).values() if not a.state or g["state"] == a.state])
+        else:
+            print("\n".join(goals.list_lines(led, a.state)) or "no goals recorded")
+        return 0
+    if c == "show":
+        led = Ledger(site)
+        g = goals.get_goal(led, a.goal)
+        _print({**g, "work_items": [{k: i[k] for k in ("wi", "label", "status", "tags")}
+                                    for i in goals.linked_items(led, a.goal)]})
+        return 0
+    if c == "check":
+        r = goals.check(site, a.goal)
+        _print(r if a.json else goals.render_check(r))
+        return 0 if r["ready"] or r["state"] != "open" else 1
+    actor = _actor(a)
+    if c == "new":
+        if bool(a.text) == bool(a.text_file):
+            fail("give the Director's words with --text or --text-file (one of them)")
+        text = Path(a.text_file).read_text(encoding="utf-8") if a.text_file else a.text
+        ev = goals.new(site, actor, text, a.criterion, a.source, a.by, a.title, a.memo)
+        print(f"{ev['payload']['goal']} recorded (open): {ev['payload']['title']}")
+        for cr in ev["payload"]["criteria"]:
+            print(f"  {cr['id']} {cr['text']} => {'; '.join(cr['deliverables'])}")
+    elif c == "evidence":
+        if a.withdraw:
+            _print(goals.withdraw_evidence(site, actor, a.goal, a.withdraw, a.memo))
+            return 0
+        kind = "path" if a.path else "figure" if a.figure else "link" if a.link else None
+        if not kind or not a.criterion:
+            fail("goal evidence needs --criterion and one of --path, --figure, --link (or --withdraw <id> --memo)")
+        ev = goals.add_evidence(site, actor, a.goal, a.criterion, kind, a.path or a.figure or a.link,
+                                a.deliverable, a.note)
+        print(f"{ev['id']}: {a.goal} {a.criterion} '{ev['payload']['deliverable']}' <- {kind} {ev['payload']['value']}")
+    elif c == "close":
+        ev = goals.close(site, actor, a.goal, a.approval, a.by, a.memo)
+        print(f"{a.goal} closed by {ev['payload']['by']} (acceptance {ev['payload']['decision']}): {ev['id']}")
+    elif c == "drop":
+        ev = goals.drop(site, actor, a.goal, a.memo, a.approval, a.by)
+        print(f"{a.goal} dropped by {ev['payload']['by']} ({ev['payload']['decision']}): {ev['id']}")
+    return 0
+
+
 def cmd_upstream(a):
     from . import upstream
 
@@ -1254,13 +1319,13 @@ def _early_args(x, what: str) -> None:
 
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="dureh", description="DUREH harness tools: wi, dispatch, verify, ledger, event, status, "
-                                "slurm, path-refs, purge, push, usage, site, day, upstream, slack, github, report, "
+                                "slurm, path-refs, purge, push, usage, site, day, goal, upstream, slack, github, report, "
                                 "authorize-write, worktree, cleanup, protected, artifact, member, exam (plus install, adapter, hook).")
     p.add_argument("--site", help="installed site directory (or DUREH_SITE)")
     p.add_argument("--observe", action="store_true",
                    help="read-only: allow only status, wi show/list, ledger query, upstream list/message/inbox (without "
                         "--record; --watch included), path-refs, usage, verify --self, day status, day handshake, site session status, "
-                        "protected list, member status, github status; never record anything (or DUREH_OBSERVE=1)")
+                        "protected list, member status, github status, cleanup report, goal list/show/check; never record anything (or DUREH_OBSERVE=1)")
     sub = p.add_subparsers(dest="command", required=True)
 
     def add(parent, name, func, help_):
@@ -1312,6 +1377,11 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--requirements", metavar="FILE",
                    help="a requirements file inside the site, pinned by sha256; the brief names it (read first) instead"
                         " of carrying its text, so only that line counts toward the brief limit")
+    x.add_argument("--goal-id", metavar="G", help="release 98: the open goal this item serves (`dureh goal list`); tag the"
+                   " acceptance lines that deliver its criteria, `[C1] ...`. Required unless --no-goal, or inherited"
+                   " from the --parent / --fix-for item")
+    x.add_argument("--no-goal", metavar="REASON", help="release 98: this item serves no goal, and why (an urgent"
+                   " repair, housekeeping); recorded and listed by `dureh status`")
     x.add_argument("--actor")
     x = add(wi, "approve", cmd_wi_approve, "record the Gate 1 approval (desk); --by names the approver")
     x.add_argument("--wi", required=True)
@@ -1335,6 +1405,8 @@ def parser() -> argparse.ArgumentParser:
                    help="per-item checks runner, as for wi new (local needs every check in checks.local_allow)")
     x.add_argument("--requirements", metavar="FILE",
                    help="pin (or re-pin after a change) the item's requirements file by sha256, as for wi new")
+    x.add_argument("--goal-id", metavar="G", help="release 98: link an item that names no goal (legacy or --no-goal)"
+                   " to an open goal; an item's goal never changes once set")
     x.add_argument("--reopen", action="store_true",
                    help="re-open a verified, unpromoted item: the verification is void and it goes back to approved"
                         " for a new dispatch (no dispatch stop); other changes are optional")
@@ -1356,6 +1428,51 @@ def parser() -> argparse.ArgumentParser:
     x.add_argument("--public-summary", help="release 82, a public module only (config modules[].public): the merge"
                    " commit message `<type>: <short English summary>` instead of the WI's label")
     x.add_argument("--actor")
+
+    gl = sub.add_parser("goal", help="the Director's goals (release 98): verbatim text, criteria with named"
+                        " deliverables, evidence, the Director's acceptance").add_subparsers(dest="goal_command",
+                                                                                          required=True)
+    x = add(gl, "new", cmd_goal, "record the Director's goal from its board item (desk)")
+    x.add_argument("--text", help="the Director's goal, verbatim (or --text-file)")
+    x.add_argument("--text-file", help="a file holding the Director's words, stored exactly")
+    x.add_argument("--criterion", action="append", required=True,
+                   help="\"<what must hold> => <deliverable>[; <deliverable>]\" (repeat; ids C1, C2, ... in order)")
+    x.add_argument("--source", required=True, help="the board item the goal comes from: an https URL, owner/repo#N or #N")
+    x.add_argument("--by", help="who set the goal: Director or DUREH (relaying the Director's words); required")
+    x.add_argument("--title", help="short title (at most 60 characters); default: the text's first line")
+    x.add_argument("--memo", default="")
+    x.add_argument("--actor")
+    x = add(gl, "list", cmd_goal, "the site's goals (read-only, allowed with --observe)")
+    x.add_argument("--state", choices=["open", "closed", "dropped"])
+    x.add_argument("--json", action="store_true")
+    x = add(gl, "show", cmd_goal, "one goal's record: text, criteria, evidence, linked work items (read-only)")
+    x.add_argument("--goal", required=True)
+    x = add(gl, "check", cmd_goal, "criteria vs evidence and work items, with a READY / NOT READY verdict (read-only,"
+            " allowed with --observe; exit 0 ready, 1 not ready)")
+    x.add_argument("--goal", required=True)
+    x.add_argument("--json", action="store_true")
+    x = add(gl, "evidence", cmd_goal, "record (or withdraw) evidence for a criterion's deliverable (desk)")
+    x.add_argument("--goal", required=True)
+    x.add_argument("--criterion", help="C1, C2, ...")
+    x.add_argument("--deliverable", help="the deliverable's name or number (default: the criterion's only one)")
+    ek = x.add_mutually_exclusive_group()
+    ek.add_argument("--path", help="a file or directory inside the site (bound by sha256)")
+    ek.add_argument("--figure", help="an image or PDF file inside the site (bound by sha256)")
+    ek.add_argument("--link", help="an https URL, for example the board item carrying the report")
+    ek.add_argument("--withdraw", metavar="EVIDENCE", help="withdraw an evidence record (with --memo)")
+    x.add_argument("--note", default="")
+    x.add_argument("--memo", default="")
+    x.add_argument("--actor")
+    for name, help_ in (("close", "close a goal: evidence for every deliverable and the Director's acceptance"
+                                  " (fail-closed: a board Decision, or the Director's own terminal)"),
+                        ("drop", "drop an open goal the Director withdrew (same authority as close)")):
+        x = add(gl, name, cmd_goal, help_)
+        x.add_argument("--goal", required=True)
+        x.add_argument("--approval", help="the board item URL (or github.decision.changed id) with the Director's"
+                                          " Approve, recorded by `github watch`")
+        x.add_argument("--by", help="Director: only in the Director's own terminal (no agent session)")
+        x.add_argument("--memo", default="", required=name == "drop")
+        x.add_argument("--actor")
 
     d = sub.add_parser("dispatch", help="dispatch contract").add_subparsers(dest="dispatch_command", required=True)
     x = add(d, "brief", cmd_dispatch_brief, "prepare a recorded brief for spawning one agent")
@@ -2107,7 +2224,8 @@ def parser() -> argparse.ArgumentParser:
 OBSERVE_ALLOWED = {("status", None), ("wi", "show"), ("wi", "list"), ("ledger", "query"), ("upstream", "list"), ("upstream", "message"), ("upstream", "inbox"),
                    ("path-refs", None), ("usage", None), ("verify", None), ("day", "status"), ("day", "handshake"), ("site", "session"),
                    ("protected", "list"), ("member", "status"), ("github", "status"), ("github", "transport"),
-                   ("exam", "compare"), ("exam", "plan"), ("cleanup", "report")}
+                   ("exam", "compare"), ("exam", "plan"), ("cleanup", "report"),
+                   ("goal", "list"), ("goal", "show"), ("goal", "check")}
 
 
 def _check_observe(args) -> None:

@@ -32,13 +32,18 @@ def wi_new(site: Site, actor: str, title: str, goal: str, role: str, target: str
            outputs: list[str] | None = None, constraints: list[str] | None = None, parent: str | None = None,
            source: str | None = None, academic: bool = False, fix_for: str | None = None,
            checks_runner_choice: str | None = None, requirements: str | None = None,
-           label: str | None = None) -> dict:
+           label: str | None = None, goal_id: str | None = None, no_goal: str | None = None,
+           require_goal: bool = False) -> dict:
     """Create a work item. `fix_for` names the WI whose problem this one fixes (recorded as `fix_for`): after the
     day's end time a fix for a day plan item goes on under the finish-plan rule (workday.py).
     `checks_runner_choice` (`--checks-runner local`, release 45) runs this item's checks in the verify process;
     every declared check must match config `checks.local_allow`. `requirements` (`--requirements <file>`, release
     45) pins a requirements file inside the site by its sha256; the brief carries one line naming it. `label`
-    (`--label`, UR-20261008-02) is the short title shown with the WI id to the Director instead of the cut title."""
+    (`--label`, UR-20261008-02) is the short title shown with the WI id to the Director instead of the cut title.
+    `goal_id` (`--goal-id`, release 98) links the item to an open goal (goals.py); its acceptance lines tag the
+    criteria they deliver (`[C1] ...`). `no_goal` (`--no-goal "<reason>"`) records why it serves none. Without
+    either, an item of a --parent or --fix-for item that names a goal inherits that goal. `require_goal` (the CLI)
+    refuses an item that ends up with neither; a library caller that names neither records a legacy item."""
     org = site.org
     if org.role(actor).kind != "desk":
         fail("only the desk creates work items")
@@ -53,6 +58,15 @@ def wi_new(site: Site, actor: str, title: str, goal: str, role: str, target: str
     if fix_for:
         led.get("work-item", fix_for)
     prec = led.get("work-item", parent) if parent else None
+    from . import goals
+
+    fixed = led.get("work-item", fix_for)["payload"] if fix_for else {}
+    link = goals.link_for_new(site, led, goal_id, no_goal, acceptance,
+                              (prec or {}).get("payload", {}).get("goal_id") or fixed.get("goal_id"))
+    if require_goal and not link:
+        fail("a work item names the goal it serves (release 98): `--goal-id <G>` (an open goal, `dureh goal list`;"
+             " tag the acceptance lines that deliver its criteria, `[C1] ...`), or `--no-goal \"<reason>\"` for work"
+             " that serves none (an urgent repair, housekeeping). No open goal? Propose the next goal to the Director")
     if prec:
         owner = prec["payload"]["role"]
         if role not in org.role(owner).may_dispatch and role not in org.role(actor).may_dispatch:
@@ -66,6 +80,7 @@ def wi_new(site: Site, actor: str, title: str, goal: str, role: str, target: str
                "scope_frozen": lane == "reorg", "academic": bool(academic)}
     if fix_for:
         payload["fix_for"] = fix_for
+    payload.update(link)
     if outputs:
         payload["outputs"] = list(outputs)
     if checks_runner_choice:
@@ -186,13 +201,21 @@ def wi_approve(site: Site, actor: str, wi: str, memo: str, by: str = "Director")
     default approver); here `by` must be one of records.APPROVER_ROLES."""
     from .records import approver
 
+    from . import goals
+
     by = approver(by, what="Gate 1")
     led = Ledger(site)
     rec = led.get("work-item", wi)
     _local_output_check(site, wi, rec["payload"])
+    # release 98 (dureh-team#161): an item of a goal is approved only while every criterion of the goal is covered
+    goal = goals.gate1(site, led, wi, rec["payload"])
+    extra = {"binding": {"goal": goal["goal"], "coverage": goal["coverage"]}} if goal.get("goal") else {}
     dec = led.append("decision", "gate1", actor, wi, {"subject": f"Gate 1 {wi}", "disposition": "approve",
-                                                        "by": by, "memo": memo})
-    return led.event("wi.approved", actor, wi, {"decision": dec["id"], "by": by}, [dec["id"]])
+                                                        "by": by, "memo": memo, **extra})
+    return led.event("wi.approved", actor, wi, {"decision": dec["id"], "by": by,
+                                                **({"goal": goal["goal"]} if goal.get("goal") else {}),
+                                                **({"legacy_no_goal": True} if goal.get("legacy") else {})},
+                     [dec["id"]])
 
 
 def _local_output_check(site: Site, wi: str, payload: dict) -> None:
@@ -673,7 +696,7 @@ def rebase_brief_block(wt: dict) -> str:
             " --continue`; `wi stage` refuses a head without the new base.\n")
 
 
-AMENDABLE = ("acceptance", "checks", "constraints", "outputs", "checks_runner", "requirements")
+AMENDABLE = ("acceptance", "checks", "constraints", "outputs", "checks_runner", "requirements", "goal_id")
 
 
 def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: str | None = None,
@@ -744,7 +767,15 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
     bad = [k for k in fields if k not in AMENDABLE]
     if bad:
         fail(f"cannot amend {', '.join(bad)}; a different goal, role or target is a new work item")
-    fields = {k: (v if k in ("checks_runner", "requirements") else list(v)) for k, v in fields.items() if v is not None}
+    fields = {k: (v if k in ("checks_runner", "requirements", "goal_id") else list(v)) for k, v in fields.items()
+              if v is not None}
+    if fields.get("goal_id") or (fields.get("acceptance") and rec["payload"].get("goal_id")):
+        from . import goals  # release 98: link an item that names no goal; tags must name the goal's criteria
+
+        if fields.get("goal_id") and rec["payload"].get("goal_id") and fields["goal_id"] != rec["payload"]["goal_id"]:
+            fail(f"{wi} already serves goal {rec['payload']['goal_id']}; a different goal is a new work item")
+        g = goals.open_goal(led, fields.get("goal_id") or rec["payload"]["goal_id"], "linking a work item")
+        goals.check_tags(g, fields.get("acceptance") or rec["payload"].get("acceptance") or [], "wi amend")
     if "requirements" in fields:
         fields["requirements"] = requirements_pin(site, fields["requirements"])
     if adds:
@@ -771,6 +802,9 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
     _checker_brief_check(site, draft, "amended brief")
     if st == "stopped":  # it is re-approved below: refuse before anything is recorded
         _local_output_check(site, wi, draft["payload"])
+        from . import goals
+
+        goals.gate1(site, led, wi, draft["payload"])  # release 98: the goal coverage of the re-approval
     before = {k: rec["payload"].get(k) for k in fields}
     ev = led.event("wi.amended", actor, wi, {"fields": fields, "before": before, "rebase_onto": rebase_onto,
                                               "memo": memo, "by": by,
