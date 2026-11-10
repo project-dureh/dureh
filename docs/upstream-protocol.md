@@ -210,6 +210,18 @@ When a UR's `Status` reaches `landed <rev>`:
    the next `dureh site session start` (run by upstream at clock-in) applies the newest `landed`
    message's checkout before it submits the session job, records `harness.switched`, and prints
    `switched harness <old> -> <new> (landed <id>)`; `--no-apply-landed` skips it (docs/workday.md).
+   Release 97 (measured 2026-11-09: after a correct switch, a command run from the previous release regenerated
+   `bin/dureh` to exec that release while `config.json` and `deployment.json` named the new one; it was a
+   `site permit apply` run from the previous release): the generated files name `config.json` `harness.root`,
+   never the running process (`bin/dureh`'s exec, `DUREH_ROOT` in `.claude/settings.json`, the harness skills);
+   only `adapter sync` and `install`, which re-pin config and deployment in the same command, name the running
+   tree. A pin without an executable `dureh` falls back to the running tree. Besides, `site permit apply|migrate`,
+   `relink-module` and `retire-module` run from a tree other than the pinned one are refused before anything is
+   written ("run it as `<site>/bin/dureh ...`"), since they would render another release's templates. `verify --self` fails, and
+   `status` shows `HARNESS FAIL:`, when `bin/dureh`'s exec target, `config.json` `harness.root` and
+   `deployment.json` `harness.rev` disagree (`verify --self` also against the tree it runs from), naming the fix:
+   `<pinned>/dureh --site <site> adapter sync`. `status` does not compare with the tree that reads it (DUREH reads
+   a company from its own tree).
 2. Run `dureh verify --self --skip-unit`, then `dureh verify --self --submit` (release 77: the unit suite as one
    scheduler job; start its `wake` command as a Monitor, then `verify --self --collect`) to self-test the harness and
    this site against that revision.

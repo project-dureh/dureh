@@ -635,8 +635,8 @@ def _claude_md(site: Site) -> str:
               f"3. Dispatch: `{dureh} dispatch brief --wi <WI>`, then use the Agent tool with `subagent_type` = the named role and the printed brief as the whole prompt."
               " The hook refuses any spawn without a recorded brief." + member_rule(site, dureh),
               f"4. Stop or rework: `{dureh} dispatch stop --wi <WI> --reason ...` (the runtime stop ends the agent; the record keeps the reason)."
-              f" Wrong checks or a stale base: `{dureh} wi amend --wi <WI> --memo \"<Director's words>\" --check ... | --rebase` keeps the WI (Gate 1 words required, as for approval)."
-              f" A verified item not yet promoted that needs more work: `{dureh} wi amend --wi <WI> --reopen --memo \"<Director's words>\" [--add-constraint ...]`"
+              f" Wrong checks or a stale base: `{dureh} wi amend --wi <WI> --memo \"<Director's words>\" --by Director|DUREH|desk --check ... | --rebase` keeps the WI (Gate 1 words required, as for approval)."
+              f" A verified item not yet promoted that needs more work: `{dureh} wi amend --wi <WI> --reopen --memo \"<Director's words>\" --by Director|DUREH|desk [--add-constraint ...]`"
               " (the verification is void, the item is approved again for a new dispatch; no `dispatch stop`).",
               f"5. Gate 2: after the checker verified the item, report it to the Director and promote with `{dureh} wi promote --wi <WI> --memo ...`."
               f" For a bundle the manager staged, run `{dureh} verify --wi <bundle>` (a recount of its items' states); promoting the bundle merges any verified items not yet promoted."
@@ -654,6 +654,10 @@ def _claude_md(site: Site) -> str:
               f" Files in a project cache (unpinned only): `{dureh} purge --project <name> --cache <cache> --path <file> --dry-run` (sizes, sha256),"
               " then, after the Director approved those files, `--approve --by Director --memo '<where approved>'` and `--approval <decision>`; there is no default approval."
               f" Untracked or ignored files and directories a run left in a project (release 85): `{dureh} purge --project <name> --path <path> --dry-run`, then the same approval steps; tracked files and annexed content are refused."
+              f" Finished items (release 98): `{dureh} cleanup report` lists worktrees and branches to retire and scratch/<WI> run directories;"
+              f" `{dureh} worktree retire --all-promoted --dry-run` (or `--wi <WI>...`), then without `--dry-run`, removes promoted items' worktrees and merged branches"
+              " (a stopped item's unmerged branch only with the Director's approval: `--approve --by Director --memo ...`, then `--approval <decision>`);"
+              f" a finished item's `scratch/<WI>/` goes only through `{dureh} purge --scratch-wi <WI> [--path <p>] --dry-run`, then the same approval steps."
               f" If a dispatch or verify reports a broken worktree, a stale `.venv` (for example after the site moved) or a missing worktree env, run `{dureh} worktree repair --wi <WI>`"
               f" (or `--target <target>` for a main tree's `.venv`); it rebuilds the environment with `env_rebuild` from config.json."
               f" After the site moved or was renamed, `{dureh} worktree repair --all` does this for every worktree and environment at once (`--dry-run` first)."
@@ -730,7 +734,7 @@ def _claude_md(site: Site) -> str:
               f" `{dureh} day overtime-plan --file <plan>` (or `day overtime --plan <plan>` with the approval), then carry it out;"
               " the Director's overtime approval covers that plan (no second approval). The first overtime work unit may already be in flight; the next is refused until the plan is recorded."
               " The plan lists each work item with its expected agent spawns and a rough usage estimate, and the day total against the daily share."
-              f" To fix a WI's checks, acceptance, constraints, outputs or stale base, amend it instead of replacing it: `{dureh} wi amend --wi <WI> --memo ... [--check ...] [--rebase]`"
+              f" To fix a WI's checks, acceptance, constraints, outputs or stale base, amend it instead of replacing it: `{dureh} wi amend --wi <WI> --memo ... --by Director|DUREH|desk [--check ...] [--rebase]`"
               " (a stopped item re-opens; inside a day plan the plan approval covers it). A different goal, role or target is a new WI."
               " Promotion (Gate 2) of checker-verified module and project WIs in the plan is covered by the plan approval; harness/package contributions wait for the end report."
               " After the end time one checker run is still allowed for an item staged during the day; a re-dispatch after a failed check is overtime (recorded by the harness for plan items)."
@@ -834,7 +838,7 @@ def _hook_command(site: Site) -> str:
     return f'"${{CLAUDE_PROJECT_DIR:-{root}}}/bin/dureh" hook claude-code'
 
 
-def _settings(site: Site) -> dict:
+def _settings(site: Site, harness: Path = HARNESS_ROOT) -> dict:
     cmd = _hook_command(site)
     hook = lambda timeout=30, extra="": [{"type": "command", "command": cmd + extra, "timeout": timeout}]
     desk_model = _model_id(site.model_for_tier("desk"))
@@ -850,7 +854,7 @@ def _settings(site: Site) -> dict:
         "autoMemoryEnabled": False,
         "env": {**{str(k): env[str(k)] for k in ((site.config.get("env") or {}).get("vars") or {})},
                 **({"PATH": env["PATH"]} if (site.config.get("env") or {}).get("path_prepend") else {}),
-                "DUREH_SITE": str(site.root), "DUREH_ROOT": str(HARNESS_ROOT)},
+                "DUREH_SITE": str(site.root), "DUREH_ROOT": str(harness)},
         "permissions": {
             "allow": [f"Bash({dureh} *)", "Read", "Grep", "Glob"],
             "deny": ["Bash(git push *)", "Bash(sbatch *)", "Bash(rm -rf *)"],
@@ -872,7 +876,44 @@ def _settings(site: Site) -> dict:
     }
 
 
-def generate(site: Site) -> dict:
+def pinned_mismatch(site: Site) -> str | None:
+    """Why this process may not regenerate the site's files (release 97): it runs a harness other than the one the
+    site is pinned to (config.json harness.root). bin/dureh, the hooks and the agent files embed the generating
+    tree, so a command run from an older release after `adapter sync` would point the site back at that release
+    (measured 2026-11-09: bin/dureh execed the previous release while config and deployment named the new one)."""
+    pinned = site.pinned_harness_root
+    if os.path.realpath(pinned) == os.path.realpath(HARNESS_ROOT):
+        return None
+    return (f"this command runs the harness at {HARNESS_ROOT}, but the site is pinned to {pinned} (config.json"
+            f" harness.root); only the pinned harness regenerates bin/dureh, the hooks and the agent files. Run it as"
+            f" `{site.root}/bin/dureh ...` (it execs the pinned harness); to move the site to this harness instead:"
+            f" `{HARNESS_ROOT}/dureh --site {site.root} adapter sync`. Nothing was changed")
+
+
+def require_pinned(site: Site) -> None:
+    """Refuse, before anything is written, a command that regenerates the site's files from a harness other than the
+    pinned one (release 97: `site permit apply|migrate`, `relink-module`, `retire-module`): its own templates are
+    another release's. `adapter sync` (the switch itself) and `install` do not call it."""
+    why = pinned_mismatch(site)
+    if why:
+        fail(why)
+
+
+def generation_root(site: Site, switch: bool = False) -> Path:
+    """The harness tree the generated files name (release 97): config.json harness.root, never the running process,
+    so a command run from another release cannot point bin/dureh at itself. `switch` (`adapter sync`, `install`)
+    names the running tree: those commands re-pin config.json and deployment.json to it. A pin without an executable
+    `dureh` (a removed checkout) falls back to the running tree, so bin/dureh never execs nothing."""
+    if switch:
+        return HARNESS_ROOT
+    pinned = site.pinned_harness_root
+    return pinned if os.access(pinned / "dureh", os.X_OK) and (pinned / "dureh_core").is_dir() else HARNESS_ROOT
+
+
+def generate(site: Site, switch: bool = False) -> dict:
+    """Write bin/dureh, CLAUDE.md, .claude/. The harness path they embed (bin/dureh's exec, DUREH_ROOT in the
+    settings, the harness skills) is generation_root: the pinned tree, or the running one for `switch`."""
+    harness = generation_root(site, switch)
     root = site.root
     (root / ".claude" / "agents").mkdir(parents=True, exist_ok=True)
     (root / ".claude" / "skills").mkdir(parents=True, exist_ok=True)
@@ -880,9 +921,9 @@ def generate(site: Site) -> dict:
     files: dict[str, str] = {}
     files["bin/dureh"] = ("#!/usr/bin/env sh\n# generated by dureh adapter claude-code; finds its site from its own location\n"
                           'SITE=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)\n'
-                          f'exec {shlex.quote(str(HARNESS_ROOT / "dureh"))} --site "$SITE" "$@"\n')
+                          f'exec {shlex.quote(str(harness / "dureh"))} --site "$SITE" "$@"\n')
     files["CLAUDE.md"] = _claude_md(site)
-    files[".claude/settings.json"] = json.dumps(_settings(site), indent=2) + "\n"
+    files[".claude/settings.json"] = json.dumps(_settings(site, harness), indent=2) + "\n"
     for role in site.org.roles.values():
         if role.kind != "desk":
             files[f".claude/agents/{role.name}.md"] = _agent_file(site, role)
@@ -895,7 +936,7 @@ def generate(site: Site) -> dict:
     for skill in sorted((site.startup / "skills").glob("*/SKILL.md")):
         name = skill.parent.name
         files[f".claude/skills/{name}/SKILL.md"] = _skill_frontmatter(name, skill.read_text(encoding="utf-8"))
-    org_skills = HARNESS_ROOT / "org" / "skills"
+    org_skills = harness / "org" / "skills"
     for skill in sorted(org_skills.glob("*/SKILL.md")):
         files[f".claude/skills/{skill.parent.name}/SKILL.md"] = _skill_frontmatter(skill.parent.name, skill.read_text(encoding="utf-8"))
     # remove stale generated agents/skills from a previous generation
@@ -1664,6 +1705,16 @@ def _record_spawn(led: Ledger, role: str, target: str, wi: str, digest: str, ti:
     consumed = [e for e in events if e["type"] in ("wi.dispatched", "checker.dispatched") and e["payload"].get("brief") == digest]
     if consumed:
         return _deny(f"brief {digest} was already used; prepare a new brief")
+    # release 97 (option 2a): the Agent tool's prompt must be the printed brief. Older records carry no hash; a late
+    # binding (the spawn hook never ran, the agent is already working) has no Agent prompt to compare and keeps the id
+    want = prepared[-1]["payload"].get("prompt_sha256")
+    if want and "prompt" in ti:
+        from ..workflow import prompt_sha256
+
+        if prompt_sha256(ti.get("prompt") or "") != want:
+            return _deny(f"the prompt is not the brief {digest} as printed for {wi}: it was retyped, shortened or added"
+                         f" to. Pass the output of `dispatch brief --wi {wi}` unchanged as the whole prompt (everything"
+                         " after the `# spawn ...` line); to change the work, amend the WI and prepare a new brief")
     member = _member_spawn(led, target, wi, digest, events)
     if isinstance(member, str):
         return _deny(member)

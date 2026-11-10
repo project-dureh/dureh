@@ -700,6 +700,9 @@ def apply(site: Site, actor: str, steps: list[dict], memo: str, approval: str | 
         live = quiet_point(site)
         if live:
             fail("refused: a models change waits for a quiet point (no agent running); running: " + ", ".join(live))
+    from .runtimes.claude_code import require_pinned
+
+    require_pinned(site)  # release 97: before config.json is written (the regeneration below would refuse anyway)
     raw_text = site.config_path.read_text(encoding="utf-8")
     backup = _backup(site, raw_text)
     done, written = [], False
@@ -837,6 +840,9 @@ def migrate_push(site: Site, actor: str, dry_run: bool = False, memo: str | None
     errs = [e for e in config_errors(site, config=new) if e not in before]
     if errs:
         fail("refused: the migrated config is invalid (nothing written): " + "; ".join(errs))
+    from .runtimes.claude_code import require_pinned
+
+    require_pinned(site)  # release 97
     backup = _backup(site, site.config_path.read_text(encoding="utf-8"))
     _write(site, new)
     generated = _regenerate(site)

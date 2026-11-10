@@ -476,7 +476,7 @@ def install(startup_arg: str, site_arg: str, preset_path: str | None = None, per
 
         if config["runtime"]["adapter"] != "claude-code":
             fail(f"runtime adapter {config['runtime']['adapter']!r} is not implemented")
-        claude_code.generate(site)
+        claude_code.generate(site, switch=True)
         state_result = init_state(site)
         from .selftest import run_self
 

@@ -1539,13 +1539,18 @@ def close(site: Site, actor: str, note: str, cancel_now: bool = False, early: st
     extra = {}
     if ext and (ext["count"] or ext.get("tool_count")):  # a warning, never a refusal (they may run overnight)
         extra = {"external_jobs": ext}
+    from .cleanup import close_step
+
+    # release 98 (UR-20261109-02): the cleanup report's one line; config cleanup.retire_on_close (default false)
+    # retires promoted items' worktrees and merged branches first. Never refuses the close; scratch stays manual.
+    extra["cleanup"] = close_step(site, actor)
     rec = led.event("day.closed", actor, None, {"note": note, "idle": checked or None, "checked": checked,
                                                "handoff": str(handoff), **({} if on else {"workday": False}),
                                                **({"plan": plan_ref} if plan_ref and not on else {}),
                                                **({"early_close": early_close} if early_close else {}),
                                                **extra}, ([plan_ref] if plan_ref else [])
                     + ([early_close["approval"]["id"]] if early_close else []) or None)
-    if extra:
+    if extra.get("external_jobs"):
         rec = {**rec, "warning": f"{render_external(ext)}. They keep running after the close; cancel any that"
                                  " should not (they are not the harness's to end)."}
 

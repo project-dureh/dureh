@@ -311,7 +311,7 @@ def preflight(site: Site, role, rec: dict, cfg: dict) -> str | None:
             return "no passing codex canary is recorded: run `dureh member canary --runtime codex` on this host first"
         return None
     if output_problem(site, role, p):
-        return f"{NO_OUTPUT}: declare them with `wi amend --wi {rec['id']} --output <path>` (exact files)"
+        return f"{NO_OUTPUT}: declare them with `wi amend --wi {rec['id']} --memo ... --by Director|DUREH|desk --output <path>` (exact files)"
     from .. import office_hours
 
     entry = office_hours.profile_for(site, role.profile)

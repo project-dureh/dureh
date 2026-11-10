@@ -39,7 +39,7 @@ def session_checks(site: Site) -> list[str]:
     from .util import harness_label
 
     hc = harness_checks(site)
-    out.append(f"harness {harness_label(site.harness_root)} at {site.harness_root}" + (f"; HARNESS MISMATCH: {hc[0]}" if hc else ""))
+    out.append(f"harness {harness_label(site.harness_root)} at {site.harness_root}" + (f"; HARNESS MISMATCH: {'; '.join(hc)}" if hc else ""))
     pending = unsaved(site)
     out.append(f"unsaved state changes: {len(pending)}" if pending else "state saved")
     d = drift(site)
@@ -51,14 +51,56 @@ def session_checks(site: Site) -> list[str]:
     return out
 
 
-def harness_checks(site: Site) -> list[str]:
-    """D1: config.json harness.root must be the checkout this command runs from."""
+def bin_exec_root(site: Site) -> Path | None:
+    """The harness tree the site's bin/dureh execs (the directory of its `exec <tree>/dureh --site` line), or None
+    when there is no bin/dureh or no such line."""
+    import re
+    import shlex
+
+    p = site.root / "bin" / "dureh"
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    m = re.search(r"^exec\s+(.+?)\s+--site\b", text, re.M)
+    if not m:
+        return None
+    try:
+        return Path(shlex.split(m.group(1))[0]).parent
+    except (ValueError, IndexError):
+        return None
+
+
+def harness_checks(site: Site, running_tree: bool = True) -> list[str]:
+    """D1: config.json harness.root must be the checkout this command runs from. Release 97 (2026-11-09, a site
+    whose bin/dureh still execed the previous release after `adapter sync`): bin/dureh must exec that same tree, and
+    deployment.json's harness.rev must be that tree's revision. Each disagreement names the one-line fix.
+    `running_tree=False` (`status`) leaves out the comparison with the tree this command runs from: DUREH reads a
+    company's status from its own tree, which is not the company's pin."""
+    from .util import git_revision
+
     named = (site.config.get("harness") or {}).get("root")
     running = site.harness_root.resolve()
-    if named and Path(named).resolve() != running:
-        return [f"config.json names harness {named} but this command runs from {running}; "
-                f"run `{running}/dureh --site {site.root} adapter sync` (or `bin/dureh adapter sync --harness {running}`)"]
-    return []
+    out = []
+    if running_tree and named and Path(named).resolve() != running:
+        out.append(f"config.json names harness {named} but this command runs from {running}; "
+                   f"run `{running}/dureh --site {site.root} adapter sync` (or `bin/dureh adapter sync --harness {running}`)")
+    pinned = site.pinned_harness_root
+    fixer = pinned if os.access(pinned / "dureh", os.X_OK) else running
+    fix = f"`{fixer}/dureh --site {site.root} adapter sync`"
+    target = bin_exec_root(site)
+    if target is not None and os.path.realpath(target) != os.path.realpath(pinned):
+        out.append(f"bin/dureh execs {target}/dureh but config.json harness.root is {pinned}: every `bin/dureh` command"
+                   f" runs the wrong release; run {fix} (regenerates bin/dureh and re-pins deployment.json)")
+    try:
+        dep = (json.loads((site.root / "deployment.json").read_text(encoding="utf-8")).get("harness") or {}).get("rev")
+    except (OSError, ValueError):
+        dep = None
+    have = git_revision(pinned) if pinned.is_dir() else None
+    if dep and have and have not in ("not-a-git-repo", "no-commit") and dep != have:
+        out.append(f"deployment.json pins harness {dep[:12]} but {pinned} (config.json harness.root) is at"
+                   f" {have[:12]}; run {fix}")
+    return out
 
 
 def tool_coverage(site: Site | None) -> list[str]:

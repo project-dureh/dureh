@@ -535,7 +535,7 @@ class AsyncVerify(SiteCase):
         self.assertEqual(self.led.get("work-item", wi)["payload"]["constraints"], ["A.", "B.", "C."])
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            main(["--site", str(self.site_root), "wi", "amend", "--wi", wi, "--memo", "ok", "--add-constraint", "D.",
+            main(["--site", str(self.site_root), "wi", "amend", "--wi", wi, "--memo", "ok", "--by", "desk", "--add-constraint", "D.",
                   "--add-constraint", "E.", "--actor", "desk"])
         self.assertEqual(self.led.get("work-item", wi)["payload"]["constraints"], ["A.", "B.", "C.", "D.", "E."])
 
@@ -561,7 +561,7 @@ class AsyncVerify(SiteCase):
             wf.wi_amend(self.s, "desk", wi, "ok", {}, rework_notes=[" "])
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
-            main(["--site", str(self.site_root), "wi", "amend", "--wi", wi, "--memo", "ok", "--rework-note", "CLI note.",
+            main(["--site", str(self.site_root), "wi", "amend", "--wi", wi, "--memo", "ok", "--by", "desk", "--rework-note", "CLI note.",
                   "--actor", "desk"])
         self.assertIn("CLI note.", wf.rework_notes_block(self.led, wi))
 

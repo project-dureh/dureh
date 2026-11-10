@@ -10,7 +10,7 @@ brief (an amendment was refused at 2293 B), so the acceptance had to point at a 
 
 ```
 dureh wi new ... --acceptance "R1-R23 of the requirements file are met" --requirements notes/<file>.md
-dureh wi amend --wi <WI> --memo "<Director's words>" --requirements notes/<file>.md   # re-pin after a change
+dureh wi amend --wi <WI> --memo "<Director's words>" --by Director|DUREH|desk --requirements notes/<file>.md   # re-pin after a change
 ```
 
 - The file must be inside the site (a relative path is taken from the site root; `notes/` or a target's main
@@ -41,6 +41,45 @@ the stage record named the base while verify measured the commit.
 - A staged item whose head moved since its last `wi.staged` is staged again at the new head (`staged -> staged`,
   the new `wi.staged` carries `restaged_from`); the same head is refused ("already staged"). A verify job
   submitted at the old head is superseded as before (release 61).
+
+## `wi amend --rebase`: the harness rebases, `wi stage` guards (release 97, UR-20261109-01)
+
+Measured 2026-11-06 at a company site: after `wi amend --rebase`, the re-dispatched worker skipped the brief's
+"run `git rebase <base>`" line and staged a head on the old base; only the desk's own check caught it before
+verify. Now the step is not left to the worker:
+
+- **Dispatch rebases.** When `dispatch brief` prepares the worktree of a worker's item whose latest
+  `wi.amended` has a `rebase_onto` and whose branch head does not contain it (`git merge-base --is-ancestor`), it
+  runs `git rebase <rebase_onto>` in the WI worktree before the brief is written. This holds for any later
+  dispatch too (also one after a worker skipped the step), not only the first after the amendment.
+  - It went through: the brief says "the harness rebased your branch onto <base> (head was <old>)" and gives no
+    rebase step; `dispatch.prepared` records `rebase: {onto, from, status: "done", to}`.
+  - It did not (a conflict, uncommitted changes in the worktree, or a rebase already in progress there, which is
+    never touched): the rebase is aborted (`git rebase --abort`, only for the rebase the harness started) and the
+    branch is left as it was. The brief keeps the "First: the base moved. In your worktree run `git rebase
+    <base>`" line, and a block outside the budget names the conflicted paths (or git's reason). The dispatch is
+    not refused: resolving a conflict is the worker's job (the Gate 2 recovery above depends on it).
+    `dispatch.prepared` records `rebase: {onto, from, status: "conflict", files, error, head_after_abort}`.
+  - A branch that already contains the base is left alone, with no line and no `rebase` field.
+- **Stage guards.** `wi stage` refuses a WI worktree whose head does not contain the amended base, naming the
+  command: `git -C <worktree> rebase <base>` (resolve any conflict, `git rebase --continue`), then stage again.
+  Nothing is recorded. When git gives no verdict (an unknown revision) the check is skipped. Items never amended
+  with `--rebase` are unchanged.
+- **Recorded with any flags; `--by` required** (a second site's UR-20261109-01, finding e785c91f). `--rebase` is
+  recorded as `rebase_onto` whatever other changes come with it (`--requirements`, `--check`, ...; pinned by
+  tests). `wi amend --by Director|DUREH|desk` is required, as for `wi approve` (release 78): without it the CLI
+  refuses and records nothing; before release 97 every amendment was recorded as the Director's. The approver is
+  recorded on `wi.amended`, on the re-approval of a stopped item and on `wi.reopened`.
+
+## The spawn prompt is the printed brief (release 97, option 2a of a second site's UR-20261109-01)
+
+Measured 2026-11-09 at a company site: leaders retyped briefs with errors, and the spawn hook checked only the
+brief id in the header. Now `dispatch brief` records `prompt_sha256` on `dispatch.prepared` (sha256 of the brief
+exactly as printed, trailing whitespace aside), and the PreToolUse hook refuses an Agent spawn whose prompt hashes
+differently, even with the right id: "pass the output of `dispatch brief --wi <WI>` unchanged as the whole prompt".
+Nothing is recorded on a refusal. Text added before or after the brief counts as a change; to change the work,
+amend the WI and prepare a new brief. A brief prepared before release 97 (no `prompt_sha256`), and a late binding
+from the subagent's transcript after a spawn hook that never ran (UR-20261015-01), keep the id check.
 
 ## The worktree's scratch directory (release 93, UR-20261106-02)
 
@@ -86,10 +125,10 @@ with a worktree:
   same event with `stage: "merge"`, the unmerged paths (`git diff --name-only --diff-filter=U`, taken before the
   abort; empty when git refused before starting) and `error` (git's message), and fails with the same guidance.
   The main tree is back at its HEAD with a clean status either way.
-- **Recovery.** `dureh wi amend --wi <WI> --reopen --rebase <target HEAD> --memo "<Director's words>"` (the
+- **Recovery.** `dureh wi amend --wi <WI> --reopen --rebase <target HEAD> --memo "<Director's words>" --by Director|DUREH|desk` (the
   verification is void, the item goes back to approved with its base moved to the current main), then dispatch
-  the WI again: the worker rebases onto that base and resolves the conflict, the checker verifies, and the desk
-  promotes. `wi.promote-failed` changes no status (it is not in the lifecycle projection); the item is verified
+  the WI again: the harness tries the rebase onto that base (release 97, below); it conflicts here, so it is
+  aborted and the worker rebases and resolves the conflict, the checker verifies, and the desk promotes. `wi.promote-failed` changes no status (it is not in the lifecycle projection); the item is verified
   until it is re-opened.
 
 ## Gate 2 and the main tree's environment (release 81)
@@ -180,7 +219,7 @@ A role with `runtime: local` writes only the item's declared `outputs` that lie 
 (docs/member-runtimes.md). `wi new` refuses an item for such a role without one (`--output <path>`, exact files, no
 globs), and `wi approve` refuses one recorded earlier, with the reason `member run` gives ("the item declares no output
 inside the role's write scopes, so the local member would have no file to write"); declare them with
-`wi amend --wi <WI> --memo ... --output <path>`. Other roles are not affected.
+`wi amend --wi <WI> --memo ... --by Director|DUREH|desk --output <path>`. Other roles are not affected.
 
 ## Files in a project cache: `purge --project` (release 77, project-dureh/dureh#40)
 
@@ -208,6 +247,55 @@ dureh purge --project <name> --cache <cache> --path <file> ... --approval <decis
   linked project. A directory stands for every regular file under it (each bound by path and sha256) and is removed
   once empty. Refused besides the cache rules: a tracked file (`git ls-files`), any symlink inside a directory
   (annexed content), `.git/` and `.datalad/`. Same approval, same `cache.purged` event (`cache` null).
+
+## Cleanup of finished items (release 98, UR-20261109-02)
+
+`purge --wi` removes one finished WI whole; nothing retired finished items in bulk, and `scratch/<WI>/` run
+directories had no command at all. Three tools, desk only except the report:
+
+```
+dureh cleanup report [--json] [--time-cap 60] [--no-sizes]          # read-only, allowed with --observe
+dureh worktree retire (--wi <WI>... | --state promoted[,stopped,reverted] | --all-promoted) [--dry-run] [--json]
+dureh worktree retire --wi <WI>... --approve --by Director --memo '<where approved>'
+dureh worktree retire --wi <WI>... --approval <decision>
+dureh purge --scratch-wi <WI> [--path <p>]... --dry-run
+dureh purge --scratch-wi <WI> [--path <p>]... --approve --by Director --memo '<where approved>'
+dureh purge --scratch-wi <WI> [--path <p>]... --approval <decision>
+```
+
+- **`worktree retire`** removes the item's worktree (with its `.venv`; `git worktree remove`, the fallback of
+  `purge`) and deletes its `wi/*` branch. The branch goes only when it is merged into its repository's main head
+  (`git for-each-ref --merged HEAD`), or for a stopped or reverted item when its tip is still the recorded dispatch
+  base, or with a `retire-approval` decision bound to each branch and tip (`--approve`, then `--approval`, used
+  once). Refused: an item that is not promoted, stopped or reverted; one whose scheduler jobs are not known to have
+  ended; a dirty worktree (tracked changes or untracked files other than `.venv`, interpreter caches and
+  `.dureh-scratch`); a broken worktree (`worktree repair` first); a promoted item whose branch is not merged; a
+  target that is not a module or project repository (harness or package work: `purge --wi`). A branch another
+  site's ledger owns is never deleted. With `--wi` every item must pass or nothing is done; with `--state` /
+  `--all-promoted` the passing items retire and the rest are listed with their reason. `--dry-run` lists path,
+  size, branch, verdict (retire, needs-approval, refused, nothing). One `worktree.retired` event per item (status,
+  target, worktree, branch, head, merged; refs: the approval). Promoted and merged items need no approval.
+- **`purge --scratch-wi <WI>`** deletes `scratch/<WI>/` (or the `--path` entries in it) of a promoted, stopped or
+  reverted item without live jobs. Symlinks are never followed: `scratch/<WI>` itself must be a plain directory, a
+  path whose parent resolves outside it is refused, a symlink inside is removed as a link; `..`, absolute paths,
+  overlapping paths and protected paths are refused. Fail-closed like `purge --project`: a `purge-approval` decision
+  is required and used once. The binding is a **manifest**, not content hashes: each path's file count, bytes and the
+  sha256 over the sorted lines `relative path, size, mtime (ns)` of every file and link under it (run directories
+  hold 100+ GB; hashing them is too slow). Any added, removed, resized or touched file voids the approval. `--dry-run`
+  lists the files, bytes, manifest digest and the 20 largest entries of each path. Records `scratch.purged`.
+- **Citations.** Before either tool deletes (and in `--dry-run`), the site's `notes/**` and
+  `projects/*/research-notes/**` text files (up to 2 MB each, 30 s scan) are searched for the paths being removed
+  (`worktrees/<WI>`, `scratch/<WI>[/<path>]`, or any path under them, relative or as this site's absolute path).
+  Each hit is listed as `cited by <file>:<line>`; a line that also carries a sha256 (64 hex digits) is
+  `pinned by <file>:<line>`. A pinned path is refused unless the approval names it: `--approve` binds the pinned
+  lines, a pin added after the approval voids it, and a retire candidate whose worktree is pinned needs an approval
+  even when merged (2026-11-09: a hand cleanup deleted files a research note pinned by sha256).
+- **`cleanup report`** lists, per site: retire candidates (worktrees and merged branches of finished items),
+  stopped or unmerged items to review, and `scratch/<WI>` directories of finished items, with sizes (a du-like scan
+  capped by `--time-cap`, `partial` when capped) and citations. It runs no scheduler call and no `git status`
+  (dirty worktrees show up in `worktree retire --dry-run`); with `--observe` it records nothing. `day close` prints
+  its one-line summary; config `cleanup.retire_on_close` (default false) adds `worktree retire --all-promoted` at
+  close (docs/workday.md). Scratch deletion is never automatic.
 
 ## Stray untracked files in an active WI: `purge --path` (release 72, project-dureh/dureh#23)
 

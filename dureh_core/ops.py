@@ -381,6 +381,9 @@ def config_errors(site: Site, config: dict | None = None, startup: Path | None =
     for i, e in enumerate(conf.get("modules") or []):
         if isinstance(e, dict) and "public" in e and not isinstance(e["public"], bool):
             out.append(f"config modules[{i}].public must be true or false (release 82; default false)")
+    clean = conf.get("cleanup")
+    if clean is not None and (not isinstance(clean, dict) or not isinstance(clean.get("retire_on_close", False), bool)):
+        out.append("config cleanup.retire_on_close must be true or false (release 98; default false)")
     from .site import routing_errors
 
     out += routing_errors(conf)
@@ -447,6 +450,7 @@ def status(site: Site) -> dict:
         "site": str(site.root),
         "package": (site.config.get("startup") or {}).get("id"),
         "harness": f"{harness_label(site.harness_root)} at {site.harness_root}",
+        "harness_problems": _harness_problems(site),  # release 97: bin/dureh, config and deployment must agree
         "work_items": len(wis),
         "by_status": {k: [f"{w['id']} {w['role']}: {w['title']}" for w in v] for k, v in sorted(by_status.items())},
         "awaiting_gate1": [w["id"] for w in wis if w["status"] == "proposed"],
@@ -468,6 +472,15 @@ def status(site: Site) -> dict:
         "push": [push_rule_line(r) for r in push_rules(site.config.get("push") or {})]  # release 82
         + [push_policy_line(r) for r in push_policy(site.config.get("push") or {})],  # release 89
     }
+
+
+def _harness_problems(site: Site) -> list[str]:
+    from .selftest import harness_checks
+
+    try:
+        return harness_checks(site, running_tree=False)
+    except Exception as exc:  # noqa: BLE001 - status still renders
+        return [f"harness check failed: {exc}"]
 
 
 def status_warnings(site: Site, wis: list[dict]) -> list[str]:
@@ -532,6 +545,7 @@ def _workday(site: Site) -> dict:
 def render_status(st: dict) -> str:
     lines = [f"DUREH site {st['site']} (package {st['package']})",
              f"harness {st['harness']}",
+             *[f"HARNESS FAIL: {p}" for p in st.get("harness_problems") or []],
              f"work items {st['work_items']} · active lanes {st['active_lanes']} · findings {st['findings']}"
              f" · reorg findings {st['reorg_findings']} · index fresh {st['index_fresh']}"]
     if st["awaiting_gate1"]:

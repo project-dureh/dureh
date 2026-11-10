@@ -251,6 +251,7 @@ unclean). The normal path was unclean too: `day close` inside the job scancelled
   `from: inside|outside` and prints `session job <id> ends by itself within ~<grace+30> s (close marker written);
   do nothing more in the session`. The marker's content is `{"actor", "closed_at", "record": <day.closed id>,
   "job_id"}`. No running recorded job: `released: false, reason: "no running session job"`.
+- **Cleanup line (release 98).** `day close` prints the one-line summary of `cleanup report` (worktrees and branches of finished items to retire, stopped or unmerged items to review, `scratch/<WI>` directories of finished items, sizes capped at 20 s) and records it as `cleanup` in `day.closed`. With config `cleanup.retire_on_close` true (default false) it first runs `worktree retire --all-promoted`; errors are listed, never refuse the close. Scratch directories are deleted only by `purge --scratch-wi` with the Director's approval.
 - **`dureh day close --cancel-now`** is the old immediate `scancel` of the recorded job (`mode: "scancel"`):
   the fallback when a marker was ignored (claude hung, the script predates release 39). Same ownership rule.
 - **`dureh site session release [--cancel-now]`** writes the marker (or scancels) for the recorded running job
@@ -299,13 +300,15 @@ What the plan approval covers (agreed with a company desk, 2026-10-03):
 - Amending a plan WI's checks, acceptance, constraints, outputs or base (`wi amend`, which also re-opens a
   stopped item); a different goal is a new WI.
 - Re-opening a verified plan WI that is not promoted (release 45): `wi amend --wi <WI> --reopen --memo
-  "<Director's words>" [--add-constraint ...] [--check ...]` records the amendment with `reopened_from: verified`
+  "<Director's words>" --by Director|DUREH|desk [--add-constraint ...] [--check ...]` records the amendment with `reopened_from: verified`
   and a `wi.reopened` event (refs the amendment, names the verify run it voids). The item goes back to
   `approved` and is dispatched again as usual; no `dispatch stop`. Only `wi.reopened` moves an item from verified
   to approved (`wi approve` cannot); a promoted item never changes, and an item of a verified or promoted bundle
   is refused (re-open the bundle first). Without `--reopen`, amending a verified item is refused with this
   command in the message. A Gate 2 refused on a merge conflict (`wi.promote-failed`, release 60; docs/work-items.md)
-  is recovered the same way, with `--rebase <target HEAD>` so the next dispatch rebases the work.
+  is recovered the same way, with `--rebase <target HEAD>` so the next dispatch rebases the work (the harness
+  runs the rebase itself, release 97; on a conflict the worker resolves it, and `wi stage` refuses a head without
+  the new base).
 - Gate 2 for checker-verified module and project WIs in the plan. Harness/package
   contributions wait for the end report.
 - After the end time, one checker run for an item staged during the day. A re-dispatch after a failed
