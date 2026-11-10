@@ -802,6 +802,9 @@ def wi_amend(site: Site, actor: str, wi: str, memo: str, fields: dict, rebase: s
     _checker_brief_check(site, draft, "amended brief")
     if st == "stopped":  # it is re-approved below: refuse before anything is recorded
         _local_output_check(site, wi, draft["payload"])
+        from . import goals
+
+        goals.gate1(site, led, wi, draft["payload"])  # release 98: the goal coverage of the re-approval
     before = {k: rec["payload"].get(k) for k in fields}
     ev = led.event("wi.amended", actor, wi, {"fields": fields, "before": before, "rebase_onto": rebase_onto,
                                               "memo": memo, "by": by,

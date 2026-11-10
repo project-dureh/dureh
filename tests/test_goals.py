@@ -197,6 +197,19 @@ class GoalLink(GoalCase):
         self.assertIn(f"Warning: {legacy} names no goal", out)
         self.assertTrue(self.led.events(legacy)[-1]["payload"]["legacy_no_goal"])
 
+    def test_amending_a_stopped_item_checks_coverage_first(self):
+        gid = self.goal()
+        a = self.wi(["[C1] summary", "[C2] comparison"], gid)
+        wf.wi_approve(self.s, "desk", a, "ok", by="Director")
+        self.led.event("wi.stopped", "desk", a, {"reason": "pause"})
+        n = len(self.led.events(a))
+        with self.assertRaisesRegex(DurehError, "criteria C2"):
+            wf.wi_amend(self.s, "desk", a, "narrower", {"acceptance": ["[C1] summary"]}, by="Director")
+        self.assertEqual(len(self.led.events(a)), n)  # no amendment recorded without its re-approval
+        wf.wi_amend(self.s, "desk", a, "same", {"acceptance": ["[C1] summary", "[C2] comparison, figure"]},
+                    by="Director")
+        self.assertEqual(self.led.wi_status(a)["status"], "approved")
+
     def test_amend_links_a_legacy_item(self):
         gid = self.goal(criteria=["it is written => document"])
         legacy = self.wi(["ok"])

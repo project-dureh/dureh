@@ -294,9 +294,11 @@ def linked_items(led: Ledger, gid: str, events: list[dict] | None = None,
 
 def coverage(led: Ledger, g: dict, events: list[dict] | None = None, extra: dict[str, dict] | None = None,
              items: list[dict] | None = None) -> dict:
-    """{criterion id: [items covering it]}: items of the goal, not stopped or reverted, whose acceptance tags it."""
+    """{criterion id: [items covering it]}: items of the goal, not stopped or reverted, whose acceptance tags it. An
+    item in `extra` (the one at Gate 1, with its draft payload) counts whatever its status (a stopped item being
+    re-approved)."""
     items = linked_items(led, g["goal"], events, extra) if items is None else items
-    items = [i for i in items if i["status"] not in NOT_COUNTED]
+    items = [i for i in items if i["status"] not in NOT_COUNTED or i["wi"] in (extra or {})]
     return {c["id"]: [i for i in items if c["id"] in i["tags"]] for c in g["criteria"]}
 
 
