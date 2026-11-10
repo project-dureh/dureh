@@ -466,6 +466,7 @@ def status(site: Site) -> dict:
         "last_session": sessions[-1]["ts"] if sessions else None,
         "index_fresh": led.index_fresh(),
         "workday": _workday(site),
+        "goals": _goals(site, led),  # release 98 (dureh-team#161)
         "external_jobs": external_jobs(site, led),
         "labels": led.labels(),  # UR-20261008-02: `WI-xxxx (short title)` wherever the text names a WI
         "warnings": status_warnings(site, wis),
@@ -533,6 +534,15 @@ def model_waiver_warnings(site: Site, today=None) -> list[str]:
     return out
 
 
+def _goals(site: Site, led: Ledger) -> dict:
+    from .goals import status_block
+
+    try:
+        return status_block(site, led)
+    except DurehError as exc:
+        return {"error": str(exc)}
+
+
 def _workday(site: Site) -> dict:
     from .workday import status as workday_status
 
@@ -552,6 +562,10 @@ def render_status(st: dict) -> str:
         lines.append("Gate 1 (Director approval) pending: " + ", ".join(st["awaiting_gate1"]))
     if st["awaiting_gate2"]:
         lines.append("Gate 2 (promotion) pending: " + ", ".join(st["awaiting_gate2"]))
+    from .goals import status_lines
+
+    gb = st.get("goals") or {}
+    lines += [f"Goal: status unavailable: {gb['error']}"] if gb.get("error") else status_lines(gb)
     from .workday import banner, render as render_workday
 
     wd = st.get("workday") or {}

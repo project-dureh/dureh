@@ -319,6 +319,13 @@ handling (idle, `adapter sync`, `verify --self`), recording upstream replies. Fo
 tells the Director at once; on the Director's word `dureh day urgent --wi <WI>... --memo "..."` releases
 those WIs from the plan, the clock and the budget until the next day.
 
+### No open goal: the plan starts with the next goal (release 98, dureh-team#161)
+
+When the site has no open goal, `day plan` records the plan with a first line added by the harness, `0. Propose the
+next goal to the Director (...)`, and `no_open_goal: true` (unless the plan's first line already speaks of the next
+goal), and `dureh status` shows `Goal: none open (on duty): ...` while a day plan is open or a session started today.
+Goals, their evidence and the Director's acceptance: docs/goals.md.
+
 ## Start-of-day handshake
 
 The Director, 2026-11-02: operations are checked every morning before work, like a handshake (that morning a

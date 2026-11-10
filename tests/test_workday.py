@@ -1591,7 +1591,7 @@ class Workday(SiteCase):
         with self.assertRaises(DurehError):
             wf.wi_new(self.s, "desk", "bad", "g", "pm-modules", "modules/demo", ["ok"], fix_for="WI-9999")
         rc, out = self.cli("wi", "new", "--title", "cli fix", "--goal", "g", "--role", "pm-modules", "--target",
-                           "modules/demo", "--acceptance", "ok", "--fix-for", self.wi)
+                           "modules/demo", "--acceptance", "ok", "--fix-for", self.wi, "--no-goal", "test item")
         self.assertEqual(rc, 0, out)
 
     def test_finish_plan_off_restores_the_refusal(self):

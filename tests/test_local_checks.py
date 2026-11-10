@@ -107,7 +107,7 @@ class LocalChecks(SiteCase):
         os.environ["DUREH_SITE"] = str(self.site_root)
         self.assertEqual(main(["wi", "new", "--title", "t", "--goal", "g", "--role", "doc-writer", "--target",
                                "modules/demo", "--acceptance", "ok", "--check", "test -f README.md",
-                               "--checks-runner", "local"]), 0)
+                               "--checks-runner", "local", "--no-goal", "test item"]), 0)
 
 
 del VerifyChecksJob  # its tests run in their own module

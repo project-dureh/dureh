@@ -75,6 +75,6 @@ class RequirementsFile(SiteCase):
     def test_cli(self):
         os.environ["DUREH_SITE"] = str(self.site_root)
         self.assertEqual(main(["wi", "new", "--title", "t", "--goal", "g", "--role", "doc-writer", "--target",
-                               "modules/demo", "--acceptance", "ok", "--requirements", str(self.req)]), 0)
+                               "modules/demo", "--acceptance", "ok", "--requirements", str(self.req), "--no-goal", "test item"]), 0)
         wi = self.led.work_items()[-1]["id"]
         self.assertEqual(self.led.get("work-item", wi)["payload"]["requirements"]["path"], "notes/req-design.md")
